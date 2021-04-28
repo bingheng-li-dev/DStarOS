@@ -1,0 +1,6 @@
+*.o
+bootloader/*
+build/*
+.vscode/*
+*.sh
+*.elf
