@@ -3,6 +3,7 @@
 #include "tinyprintf.h"
 #include "trap.h"
 #include "tick.h"
+#include "mm.h"
 #define UNUSED(x) (void)(x)
 
 static void init_bss(void)
@@ -16,9 +17,9 @@ static void init_bss(void)
         *dst++ = 0;
 }
 
-static void stdout_putc(void *unused, char *ch)
+static void stdout_putc(void *unused, char ch)
 {
-    sbi_console_putchar(ch);
+    sbi_console_putchar((int)ch);
 }
 
 void os_init(void)
@@ -28,15 +29,14 @@ void os_init(void)
     const char *startmsg = "os start...";
     printf("%s\n", startmsg);
     trap_init();
-#if DEBUG
-    printf("trap inited!\n");
-#endif
+    mm_init();
     tick_init();
     irq_enable();
+
+#if DEBUG_INIT_os_init
     while (1)
-    {
         ;
-    }
-    
+#endif
+
     sbi_shutdown();
 }

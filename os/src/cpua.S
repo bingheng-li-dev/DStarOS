@@ -3,8 +3,8 @@
 
   .section      .text.entry
   .align 2
-  .globl trap_init
-trap_init:
+  .globl trap_init_asm
+trap_init_asm:
   la t0, trap_entry
   csrw stvec, t0
   ret

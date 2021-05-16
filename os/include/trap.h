@@ -2,6 +2,9 @@
 #define _TRAP_H
 
 #include <stdint.h>
+
+#include "encoding.h"
+#include "tinyprintf.h"
 #include "debug.h"
 
 /* Machine interrupt mask for 64 bit system, 0x8000 0000 0000 0000 */

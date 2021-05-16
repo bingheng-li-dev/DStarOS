@@ -1,6 +1,12 @@
 #include "trap.h"
-#include "encoding.h"
-#include "tinyprintf.h"
+
+void trap_init_asm(void);
+
+void trap_init(void)
+{
+    trap_init_asm();
+    printf("trap inited!\n");
+}
 
 void irq_disable(void)
 {
@@ -10,6 +16,7 @@ void irq_disable(void)
 void irq_enable(void)
 {
     set_csr(sstatus, SSTATUS_SIE);
+    printf("irq enabled!!\n");
 }
 
 void trap_handle(intstkf_t *sp)
@@ -27,31 +34,13 @@ void trap_handle(intstkf_t *sp)
         case IRQ_S_SOFT:
             printf("Supervisor software interrupt\n");
             break;
-        // case IRQ_H_SOFT:
-        //     printf("Hypervisor software interrupt\n");
-        //     break;
-        // case IRQ_M_SOFT:
-        //     printf("Machine software interrupt\n");
-        //     break;
         case IRQ_S_TIMER:
-            printf("Supervisor timer interrupt\n");
+            // printf("Supervisor timer interrupt\n");
             tick_int_handler();
             break;
-        // case IRQ_H_TIMER:
-        //     printf("Hypervisor software interrupt\n");
-        //     break;
-        // case IRQ_M_TIMER:
-        //     printf("Machine software interrupt\n");
-        //     break;
         case IRQ_S_EXT:
             printf("Supervisor external interrupt\n");
             break;
-        // case IRQ_H_EXT:
-        //     printf("Hypervisor software interrupt\n");
-        //     break;
-        // case IRQ_M_EXT:
-        //     printf("Machine software interrupt\n");
-        //     break;
         default:
             printf("Unknown irq\n");
             break;
@@ -79,6 +68,8 @@ void trap_handle(intstkf_t *sp)
             break;
         case CAUSE_FAULT_LOAD:
             printf("Load access fault");
+            while (1)
+                ;
             break;
         case CAUSE_MISALIGNED_STORE:
             printf("Store address misaligned");
@@ -103,7 +94,6 @@ void trap_handle(intstkf_t *sp)
             break;
         }
     }
-
 }
 
 #if DEBUG_INTSTACK
