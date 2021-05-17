@@ -70,10 +70,12 @@ void irq_disable(void);
 void irq_enable(void);
 void trap_handle(intstkf_t *sp);
 
+
 #if DEBUG_INTSTACK
 void print_intstk(intstkf_t *sp);
 #endif
 
+extern void trap_init_asm(void);
 extern void tick_int_handler(void);
 
 #endif

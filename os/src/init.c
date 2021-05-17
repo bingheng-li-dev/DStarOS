@@ -3,7 +3,7 @@
 #include "tinyprintf.h"
 #include "trap.h"
 #include "tick.h"
-#include "mm.h"
+#include "pmm.h"
 #define UNUSED(x) (void)(x)
 
 static void init_bss(void)
@@ -29,7 +29,7 @@ void os_init(void)
     const char *startmsg = "os start...";
     printf("%s\n", startmsg);
     trap_init();
-    mm_init();
+    pmm_init();
     tick_init();
     irq_enable();
 

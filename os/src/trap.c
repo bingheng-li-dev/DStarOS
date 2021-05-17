@@ -1,7 +1,5 @@
 #include "trap.h"
 
-void trap_init_asm(void);
-
 void trap_init(void)
 {
     trap_init_asm();
@@ -42,7 +40,7 @@ void trap_handle(intstkf_t *sp)
             printf("Supervisor external interrupt\n");
             break;
         default:
-            printf("Unknown irq\n");
+            printf("Unknown interrupt\n");
             break;
         }
     }

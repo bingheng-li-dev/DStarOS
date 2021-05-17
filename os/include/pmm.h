@@ -1,5 +1,5 @@
-#ifndef _MM_H
-#define _MM_H
+#ifndef _PMM_H
+#define _PMM_H
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -59,14 +59,14 @@ extern fslist_t FreeAList;
 extern pframe_t *KernelLevel3PageTableFrame;
 
 
-void mm_init(void);
-pframe_t *mm_alloc(uint16_t nsize);
-void mm_dealloc(pframe_t *baseppn, uint16_t nsize);
-pframe_t *mm_allocOneFrame(void);
-void mm_deallocOneFrame(pframe_t *baseppn);
-pte_t *mm_getPte(pframe_t *pageTable, virAddr_t va);
-void mm_removePte(virAddr_t va, pte_t *pte);
-pte_t *mm_insertPte(pframe_t *pageTable, virAddr_t va, pteflg_t pteFlag);
+void pmm_init(void);
+pframe_t *pmm_alloc(uint16_t nsize);
+void pmm_dealloc(pframe_t *baseppn, uint16_t nsize);
+pframe_t *pmm_allocOneFrame(void);
+void pmm_deallocOneFrame(pframe_t *baseppn);
+pte_t *pmm_getPte(pframe_t *pageTable, virAddr_t va);
+void pmm_removePte(virAddr_t va, pte_t *pte);
+pte_t *pmm_insertPte(pframe_t *pageTable, virAddr_t va, pteflg_t pteFlag);
 
 static inline pte_t pte_create(ppn_t ppn, pteflg_t pteFlag)
 {

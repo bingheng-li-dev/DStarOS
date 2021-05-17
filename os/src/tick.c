@@ -1,8 +1,4 @@
 #include "tick.h"
-#include "debug.h"
-#include "sbi.h"
-#include "tinyprintf.h"
-#include "encoding.h"
 
 static uint64_t TIMEBASE = 100000;
 

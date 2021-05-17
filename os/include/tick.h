@@ -3,6 +3,11 @@
 
 #include <stdint.h>
 
+#include "debug.h"
+#include "sbi.h"
+#include "tinyprintf.h"
+#include "encoding.h"
+
 void tick_init(void);
 void tick_int_handler(void);
 

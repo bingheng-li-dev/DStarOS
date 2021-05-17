@@ -2,5 +2,4 @@
 bootloader/*
 build/*
 .vscode/*
-*.sh
 *.elf

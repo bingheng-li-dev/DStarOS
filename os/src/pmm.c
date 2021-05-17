@@ -1,4 +1,6 @@
-#include "mm.h"
+#include "pmm.h"
+
+//@TODO:recyclePageTableRecursively(,cnt,...);
 
 pframe_t *PageListBegin;
 fslist_t FreeList;  /* Free memories will arrange from small size to large size,used for best fit. */
@@ -24,7 +26,7 @@ const bffa_t BFallocator = {
     .bffa_insertAndMerge = insertAndMerge,
 };
 
-void mm_init(void)
+void pmm_init(void)
 {
     extern unsigned int ekernel;
     extern unsigned int skernel;
@@ -92,7 +94,7 @@ void mm_init(void)
     printf("mmu inited!\n");
 }
 
-pframe_t *mm_alloc(uint16_t nsize)
+pframe_t *pmm_alloc(uint16_t nsize)
 {
     pframe_t *ret = (pframe_t *)0;
     if (nsize > FreeList.fnsize)
@@ -121,13 +123,13 @@ pframe_t *mm_alloc(uint16_t nsize)
     }
 
 #if DEBUG_MMU_mm_alloc
-    printf("mm_alloc::Frame has been allocated!ppn:%ld,pa:%08lx\n", convert_pframe2ppn(ret), convert_pframe2pa(ret));
+    printf("pmm_alloc::Frame has been allocated!ppn:%ld,pa:%08lx\n", convert_pframe2ppn(ret), convert_pframe2pa(ret));
 #endif
 
     return ret;
 }
 
-void mm_dealloc(pframe_t *baseppn, uint16_t nsize)
+void pmm_dealloc(pframe_t *baseppn, uint16_t nsize)
 {
     pframe_t *currentFrame;
     for (currentFrame = baseppn; currentFrame != baseppn + nsize; currentFrame++)
@@ -145,31 +147,31 @@ void mm_dealloc(pframe_t *baseppn, uint16_t nsize)
     BFallocator.bffa_insertAndMerge(baseppn, nsize);
 
 #if DEBUG_MMU_mm_dealloc
-    printf("mm_dealloc::Frame has been deallocated!ppn:%ld,pa:%08lx,nsize:%d\n", ppnDealloc, convert_ppn2pa(ppnDealloc), nsize);
+    printf("pmm_dealloc::Frame has been deallocated!ppn:%ld,pa:%08lx,nsize:%d\n", ppnDealloc, convert_ppn2pa(ppnDealloc), nsize);
 #endif
 }
 
-pframe_t *mm_allocOneFrame(void)
+pframe_t *pmm_allocOneFrame(void)
 {
-    return mm_alloc((u_int16_t)1);
+    return pmm_alloc((u_int16_t)1);
 }
 
-void mm_deallocOneFrame(pframe_t *baseppn)
+void pmm_deallocOneFrame(pframe_t *baseppn)
 {
-    mm_dealloc(baseppn, (uint16_t)1);
+    pmm_dealloc(baseppn, (uint16_t)1);
 }
 
-pte_t *mm_getPte(pframe_t *pageTable, virAddr_t va)
+pte_t *pmm_getPte(pframe_t *pageTable, virAddr_t va)
 {
     return searchAndGetPteIfExists(pageTable, va, 3);
 }
 
-void mm_removePte(virAddr_t va, pte_t *pte)
+void pmm_removePte(virAddr_t va, pte_t *pte)
 {
     removePteFromPageTable(va, pte);
 }
 
-pte_t *mm_insertPte(pframe_t *pageTable, virAddr_t va, pteflg_t pteFlag)
+pte_t *pmm_insertPte(pframe_t *pageTable, virAddr_t va, pteflg_t pteFlag)
 {
     return insertPteIntoPageTable(pageTable, va, 3, pteFlag);
 }
@@ -348,7 +350,7 @@ static void insertAndMerge(pframe_t *baseppn, uint16_t nsize)
 
 static void kernelPa2Va_IdentityMapping(phyAddr_t tKernelEndAddr)
 {
-    KernelLevel3PageTableFrame = mm_allocOneFrame(); /* Used for level3 page table. */
+    KernelLevel3PageTableFrame = pmm_allocOneFrame(); /* Used for level3 page table. */
     KernelLevel3PageTableFrame->reference = KernelLevel3PageTableFrame->reference + 1;
 
 #if DEBUG_MMU_kernelPa2Va_IdentityMapping
@@ -402,57 +404,57 @@ static void kernelPa2Va_IdentityMapping(phyAddr_t tKernelEndAddr)
 
     for (ppnCursor = ppnBase; ppnCursor <= ppn_etext; ppnCursor++)
     {
-        cursorPte = mm_insertPte(kernelBasePageTable, convert_ppn2pa(ppnCursor), kernelPageFlag_text);
+        cursorPte = pmm_insertPte(kernelBasePageTable, convert_ppn2pa(ppnCursor), kernelPageFlag_text);
         cursorFrame = convert_pte2pframe(*cursorPte);
         pteChangeppn(cursorPte, ppnCursor);
 #if DEBUG_MMU_kernelPa2Va_IdentityMapping
         printf("kernelPa2Va_IdentityMapping::Changed cursorPte pa:%08lx,pte:%lx\n\n", (phyAddr_t)cursorPte, *cursorPte);
 #endif
-        mm_deallocOneFrame(cursorFrame);
+        pmm_deallocOneFrame(cursorFrame);
     }
 
     for (; ppnCursor <= ppn_erodata; ppnCursor++)
     {
-        cursorPte = mm_insertPte(kernelBasePageTable, convert_ppn2pa(ppnCursor), kernelPageFlag_rodata);
+        cursorPte = pmm_insertPte(kernelBasePageTable, convert_ppn2pa(ppnCursor), kernelPageFlag_rodata);
         cursorFrame = convert_pte2pframe(*cursorPte);
         pteChangeppn(cursorPte, ppnCursor);
 #if DEBUG_MMU_kernelPa2Va_IdentityMapping
         printf("kernelPa2Va_IdentityMapping::Changed cursorPte pa:%08lx,pte:%lx\n\n", (phyAddr_t)cursorPte, *cursorPte);
 #endif
-        mm_deallocOneFrame(cursorFrame);
+        pmm_deallocOneFrame(cursorFrame);
     }
 
     for (; ppnCursor <= ppn_edata; ppnCursor++)
     {
-        cursorPte = mm_insertPte(kernelBasePageTable, convert_ppn2pa(ppnCursor), kernelPageFlag_data);
+        cursorPte = pmm_insertPte(kernelBasePageTable, convert_ppn2pa(ppnCursor), kernelPageFlag_data);
         cursorFrame = convert_pte2pframe(*cursorPte);
         pteChangeppn(cursorPte, ppnCursor);
 #if DEBUG_MMU_kernelPa2Va_IdentityMapping
         printf("kernelPa2Va_IdentityMapping::Changed cursorPte pa:%08lx,pte:%lx\n\n", (phyAddr_t)cursorPte, *cursorPte);
 #endif
-        mm_deallocOneFrame(cursorFrame);
+        pmm_deallocOneFrame(cursorFrame);
     }
 
     for (; ppnCursor <= ppn_ebss; ppnCursor++)
     {
-        cursorPte = mm_insertPte(kernelBasePageTable, convert_ppn2pa(ppnCursor), kernelPageFlag_bss);
+        cursorPte = pmm_insertPte(kernelBasePageTable, convert_ppn2pa(ppnCursor), kernelPageFlag_bss);
         cursorFrame = convert_pte2pframe(*cursorPte);
         pteChangeppn(cursorPte, ppnCursor);
 #if DEBUG_MMU_kernelPa2Va_IdentityMapping
         printf("kernelPa2Va_IdentityMapping::Changed cursorPte pa:%08lx,pte:%lx\n\n", (phyAddr_t)cursorPte, *cursorPte);
 #endif
-        mm_deallocOneFrame(cursorFrame);
+        pmm_deallocOneFrame(cursorFrame);
     }
 
     for (; ppnCursor <= ppnKernelEnd; ppnCursor++)
     {
-        cursorPte = mm_insertPte(kernelBasePageTable, convert_ppn2pa(ppnCursor), kernelPageFlag_data);
+        cursorPte = pmm_insertPte(kernelBasePageTable, convert_ppn2pa(ppnCursor), kernelPageFlag_data);
         cursorFrame = convert_pte2pframe(*cursorPte);
         pteChangeppn(cursorPte, ppnCursor);
 #if DEBUG_MMU_kernelPa2Va_IdentityMapping
         printf("kernelPa2Va_IdentityMapping::Changed cursorPte pa:%08lx,pte:%lx\n\n", (phyAddr_t)cursorPte, *cursorPte);
 #endif
-        mm_deallocOneFrame(cursorFrame);
+        pmm_deallocOneFrame(cursorFrame);
     }
 }
 
@@ -492,7 +494,7 @@ static void removePteFromPageTable(virAddr_t va, pte_t *pte)
         currentFrame->reference = currentFrame->reference - 1;
         if (currentFrame->reference == 0)
         {
-            mm_deallocOneFrame(currentFrame);
+            pmm_deallocOneFrame(currentFrame);
         }
         *pte = (pte_t)0;
         refreshTLB(va);
@@ -512,7 +514,7 @@ static pte_t *insertPteIntoPageTable(pframe_t *pageTable, virAddr_t va, uint16_t
     {
         pframe_t *newFrameOfNextLevelPageTable;
         pte_t newPteOfThisLevelPageTable;
-        newFrameOfNextLevelPageTable = mm_allocOneFrame();
+        newFrameOfNextLevelPageTable = pmm_allocOneFrame();
         newFrameOfNextLevelPageTable->reference = newFrameOfNextLevelPageTable->reference + 1;
         if (newFrameOfNextLevelPageTable == (pframe_t *)0)
         {
