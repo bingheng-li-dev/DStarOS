@@ -26,22 +26,25 @@ typedef uint64_t vpn_t;
 typedef uint64_t pte_t;
 typedef uint16_t pteflg_t;
 
+typedef struct phyframe pframe_t;
+typedef struct freeSpaceList fslist_t;
+typedef struct bestfitFrameAllocator bffa_t;
+
 struct phyframe
 {
     uint16_t nsize;     /* The size of this block which free or to be used. */
-    bool canBeAlloc;    /* True:this frame is the head of a free block and can be alloc;false:this frame is in usage or it is not the head of a block. */
     uint16_t reference; /* Amount of vir page used. */
+    bool canBeAlloc;    /* True:this frame is the head of a free block and can be alloc;false:this frame is in usage or it is not the head of a block. */
     struct list_head list_linker_inFreeList;
     struct list_head list_linker_inFreeAList;
+    struct list_head list_linker_inClockList;
 };
-typedef struct phyframe pframe_t;
 
 struct freeSpaceList /* Record the addr of the free list from small to large. */
 {
     struct list_head list_linker;
     uint16_t fnsize; /* PGSIZE times */
 };
-typedef struct freeSpaceList fslist_t;
 
 struct bestfitFrameAllocator /* Best fit,it allows to allocate a continuous block of memory. */
 {
@@ -50,14 +53,12 @@ struct bestfitFrameAllocator /* Best fit,it allows to allocate a continuous bloc
     /* Insert and merge dealloced mems base addr into free list. */
     void (*bffa_insertAndMerge)(pframe_t *baseppn, uint16_t nsize);
 };
-typedef struct bestfitFrameAllocator bffa_t;
 
 /* Each pframe maps a ppn/pa,use convert_pframe2ppn/pa to covert. */
 extern pframe_t *PageListBegin;
 extern fslist_t FreeList;
 extern fslist_t FreeAList;
 extern pframe_t *KernelLevel3PageTableFrame;
-
 
 void pmm_init(void);
 pframe_t *pmm_alloc(uint16_t nsize);
@@ -67,6 +68,9 @@ void pmm_deallocOneFrame(pframe_t *baseppn);
 pte_t *pmm_getPte(pframe_t *pageTable, virAddr_t va);
 void pmm_removePte(virAddr_t va, pte_t *pte);
 pte_t *pmm_insertPte(pframe_t *pageTable, virAddr_t va, pteflg_t pteFlag);
+
+void *kmalloc(uint64_t size);
+void kfree(void *ptr, uint64_t size);
 
 static inline pte_t pte_create(ppn_t ppn, pteflg_t pteFlag)
 {
@@ -151,6 +155,11 @@ static inline pframe_t *convert_ppn2pframe(ppn_t ppn)
 static inline pframe_t *convert_pte2pframe(pte_t pte)
 {
     return (convert_ppn2pframe(pte_get_ppn(pte)));
+}
+
+static inline pframe_t *convert_pa2pframe_flr(phyAddr_t pa)
+{
+    return convert_ppn2pframe(convert_pa2ppn_flr(pa));
 }
 
 static inline void dropTLB(void)

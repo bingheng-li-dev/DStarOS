@@ -1,4 +1,5 @@
 #include "trap.h"
+#include "vmm.h"
 
 void trap_init(void)
 {
@@ -66,14 +67,14 @@ void trap_handle(intstkf_t *sp)
             break;
         case CAUSE_FAULT_LOAD:
             printf("Load access fault");
-            while (1)
-                ;
+            vmm_pageFaultHander((virAddr_t)sp->sbadaddr);
             break;
         case CAUSE_MISALIGNED_STORE:
             printf("Store address misaligned");
             break;
         case CAUSE_FAULT_STORE:
             printf("Store access fault");
+            vmm_pageFaultHander((virAddr_t)sp->sbadaddr);
             break;
         case CAUSE_USER_ECALL:
             printf("Environment call from U-mode");
@@ -87,8 +88,17 @@ void trap_handle(intstkf_t *sp)
         case CAUSE_MACHINE_ECALL:
             printf("Environment call from M-mode");
             break;
+        case CAUSE_FAULT_INSTRUCTION_PAGE:
+            printf("Instruction page fault");
+            break;
+        case CAUSE_FAULT_LOAD_PAGE:
+            vmm_pageFaultHander((virAddr_t)sp->sbadaddr);
+            break;
+        case CAUSE_FAULT_STORE_PAGE:
+            vmm_pageFaultHander((virAddr_t)sp->sbadaddr);
+            break;
         default:
-            printf("Uknown exception : %08x", cause);
+            printf("Unknown exception : %08x", cause);
             break;
         }
     }
@@ -131,6 +141,7 @@ void print_intstk(intstkf_t *sp)
     printf("  t6       0x%08lx\n", sp->x31_t6);
     printf("  sepc     0x%08lx\n", sp->sepc);
     printf("  sstatus  0x%08lx\n", sp->sstatus);
+    printf("  sbadaddr 0x%08lx\n", sp->sbadaddr);
     printf("=================================================================\n");
 }
 #endif

@@ -6,20 +6,24 @@ pframe_t *PageListBegin;
 fslist_t FreeList;  /* Free memories will arrange from small size to large size,used for best fit. */
 fslist_t FreeAList; /* Free memories will arrange from small addr to large addr,used for merge. */
 pframe_t *KernelLevel3PageTableFrame;
-// tt_t PageTableTrieTree;
+/* The following vars are used for micro memory alloc. */
+pframe_t *microPhysicalMemoryPoolBase;
+phyAddr_t *poolBaseAddr;
+phyAddr_t *ptrTableAddr; /* Used for restore ptr who used micro mem. */
 
 static pframe_t *deleteAndReinsert(uint16_t nsize);
 static void insertAndMerge(pframe_t *baseppn, uint16_t nsize);
-/* Must be called first before using functions about page table below. */
-static void kernelPa2Va_IdentityMapping(phyAddr_t tKernelEndAddr);
 /* Return null if not exists.When using:@param pageTable should be base page table,@param level should be 3. */
 static pte_t *searchAndGetPteIfExists(pframe_t *pageTable, virAddr_t va, uint16_t level);
 /* Delete the pte which refers to this virtual addr (param va) and dealloc the mapping pframe of this pte if needed. */
 static void removePteFromPageTable(virAddr_t va, pte_t *pte);
 /* Turn the given va into vpns and insert them into different level page tables. Return null if failed,else return the pte of page table level1. */
-static pte_t *insertPteIntoPageTable(pframe_t *pageTable, virAddr_t va, uint16_t level, pteflg_t pteFlag);
-static inline void pteChangeppn(pte_t *pte, ppn_t ppn);
-static void enable_mmu(void);
+static pte_t *insertPteIntoPageTableRecursively(pframe_t *pageTable, virAddr_t va, uint16_t level, pteflg_t pteFlag);
+/* The following funs are used for micro memory alloc. */
+static void initMicroPhysicalMemoryPool(void);
+static void *microMalloc(uint64_t size);
+/* Maybe memories in pool have ran out.So return true if target memory has been dealloced in pool. */
+static bool microDemalloc(void *ptr);
 
 const bffa_t BFallocator = {
     .bffa_deleteAndReinsert = deleteAndReinsert,
@@ -89,9 +93,10 @@ void pmm_init(void)
     printf("FreeList.fnsize:%d, FreeAList.fnsize:%d\n", FreeList.fnsize, FreeAList.fnsize);
 #endif
 
-    kernelPa2Va_IdentityMapping(freeMemoryBeginAddr);
-    enable_mmu();
-    printf("mmu inited!\n");
+    microPhysicalMemoryPoolBase = (pframe_t *)0;
+    initMicroPhysicalMemoryPool();
+
+    printf("pmm inited!\n");
 }
 
 pframe_t *pmm_alloc(uint16_t nsize)
@@ -173,7 +178,42 @@ void pmm_removePte(virAddr_t va, pte_t *pte)
 
 pte_t *pmm_insertPte(pframe_t *pageTable, virAddr_t va, pteflg_t pteFlag)
 {
-    return insertPteIntoPageTable(pageTable, va, 3, pteFlag);
+    return insertPteIntoPageTableRecursively(pageTable, va, 3, pteFlag);
+}
+
+void *kmalloc(uint64_t size)
+{
+    void *ret;
+    if (microPhysicalMemoryPoolBase != (pframe_t *)0 && size <= 1024)
+    {
+        ret = microMalloc(size);
+        if (ret != (void *)0)
+        {
+            return ret;
+        }
+    }
+    /* "microPhysicalMemoryPoolBase" is null or "size" is more than 1024 or no remaining micro mem in pool. */
+    ret = pmm_alloc(convert_pa2ppn_cil(size)); /* Here "convert" is used for calculate amount of pframes. */
+    return (void *)convert_pframe2pa(ret);
+}
+
+void kfree(void *ptr, uint64_t size)
+{
+    if (ptr == (void *)0)
+    {
+        return;
+    }
+    if (microPhysicalMemoryPoolBase != (pframe_t *)0 && size <= 1024)
+    {
+        if (microDemalloc(ptr))
+        {
+            return;
+        }
+    }
+    /* Maybe memories in pool have ran out. */
+    pframe_t *base;
+    base = convert_pa2pframe_flr((phyAddr_t)ptr); /* Here "convert" is used for calculate amount of pframes. */
+    pmm_dealloc(base, convert_pa2ppn_cil(size));
 }
 
 static pframe_t *deleteAndReinsert(uint16_t nsize)
@@ -348,116 +388,6 @@ static void insertAndMerge(pframe_t *baseppn, uint16_t nsize)
     }
 }
 
-static void kernelPa2Va_IdentityMapping(phyAddr_t tKernelEndAddr)
-{
-    KernelLevel3PageTableFrame = pmm_allocOneFrame(); /* Used for level3 page table. */
-    KernelLevel3PageTableFrame->reference = KernelLevel3PageTableFrame->reference + 1;
-
-#if DEBUG_MMU_kernelPa2Va_IdentityMapping
-    printf("KernelLevel3PageTableFrame ppn:%ld,pa:%08lx\n", convert_pframe2ppn(KernelLevel3PageTableFrame), convert_pframe2pa(KernelLevel3PageTableFrame));
-#endif
-
-    if (KernelLevel3PageTableFrame == (pframe_t *)0)
-    {
-        printf("NO FREE MEMORY!Must be something wrong...\n");
-        while (1)
-            ;
-    }
-
-    extern unsigned int etext;
-    extern unsigned int erodata;
-    extern unsigned int edata;
-    extern unsigned int ebss;
-
-    ppn_t ppnBase;
-    ppn_t ppnKernelEnd;
-
-    ppn_t ppnCursor;
-    ppn_t ppn_etext;
-    ppn_t ppn_erodata;
-    ppn_t ppn_edata;
-    ppn_t ppn_ebss;
-
-    pteflg_t kernelPageFlag_text;
-    pteflg_t kernelPageFlag_rodata;
-    pteflg_t kernelPageFlag_data;
-    pteflg_t kernelPageFlag_bss;
-
-    pte_t *cursorPte;
-    pframe_t *cursorFrame;
-    pframe_t *kernelBasePageTable;
-
-    ppnBase = convert_pa2ppn_flr((phyAddr_t)KERNEL_START);
-    ppnKernelEnd = convert_pa2ppn_flr(tKernelEndAddr);
-
-    ppn_etext = convert_pa2ppn_flr((phyAddr_t)&etext);
-    ppn_erodata = convert_pa2ppn_flr((phyAddr_t)&erodata);
-    ppn_edata = convert_pa2ppn_flr((phyAddr_t)&edata);
-    ppn_ebss = convert_pa2ppn_flr((phyAddr_t)&ebss);
-
-    kernelPageFlag_text = PTE_G | PTE_R | PTE_X;
-    kernelPageFlag_rodata = PTE_G | PTE_R;
-    kernelPageFlag_data = PTE_G | PTE_R | PTE_W;
-    kernelPageFlag_bss = PTE_G | PTE_R | PTE_W;
-
-    kernelBasePageTable = KernelLevel3PageTableFrame;
-
-    for (ppnCursor = ppnBase; ppnCursor <= ppn_etext; ppnCursor++)
-    {
-        cursorPte = pmm_insertPte(kernelBasePageTable, convert_ppn2pa(ppnCursor), kernelPageFlag_text);
-        cursorFrame = convert_pte2pframe(*cursorPte);
-        pteChangeppn(cursorPte, ppnCursor);
-#if DEBUG_MMU_kernelPa2Va_IdentityMapping
-        printf("kernelPa2Va_IdentityMapping::Changed cursorPte pa:%08lx,pte:%lx\n\n", (phyAddr_t)cursorPte, *cursorPte);
-#endif
-        pmm_deallocOneFrame(cursorFrame);
-    }
-
-    for (; ppnCursor <= ppn_erodata; ppnCursor++)
-    {
-        cursorPte = pmm_insertPte(kernelBasePageTable, convert_ppn2pa(ppnCursor), kernelPageFlag_rodata);
-        cursorFrame = convert_pte2pframe(*cursorPte);
-        pteChangeppn(cursorPte, ppnCursor);
-#if DEBUG_MMU_kernelPa2Va_IdentityMapping
-        printf("kernelPa2Va_IdentityMapping::Changed cursorPte pa:%08lx,pte:%lx\n\n", (phyAddr_t)cursorPte, *cursorPte);
-#endif
-        pmm_deallocOneFrame(cursorFrame);
-    }
-
-    for (; ppnCursor <= ppn_edata; ppnCursor++)
-    {
-        cursorPte = pmm_insertPte(kernelBasePageTable, convert_ppn2pa(ppnCursor), kernelPageFlag_data);
-        cursorFrame = convert_pte2pframe(*cursorPte);
-        pteChangeppn(cursorPte, ppnCursor);
-#if DEBUG_MMU_kernelPa2Va_IdentityMapping
-        printf("kernelPa2Va_IdentityMapping::Changed cursorPte pa:%08lx,pte:%lx\n\n", (phyAddr_t)cursorPte, *cursorPte);
-#endif
-        pmm_deallocOneFrame(cursorFrame);
-    }
-
-    for (; ppnCursor <= ppn_ebss; ppnCursor++)
-    {
-        cursorPte = pmm_insertPte(kernelBasePageTable, convert_ppn2pa(ppnCursor), kernelPageFlag_bss);
-        cursorFrame = convert_pte2pframe(*cursorPte);
-        pteChangeppn(cursorPte, ppnCursor);
-#if DEBUG_MMU_kernelPa2Va_IdentityMapping
-        printf("kernelPa2Va_IdentityMapping::Changed cursorPte pa:%08lx,pte:%lx\n\n", (phyAddr_t)cursorPte, *cursorPte);
-#endif
-        pmm_deallocOneFrame(cursorFrame);
-    }
-
-    for (; ppnCursor <= ppnKernelEnd; ppnCursor++)
-    {
-        cursorPte = pmm_insertPte(kernelBasePageTable, convert_ppn2pa(ppnCursor), kernelPageFlag_data);
-        cursorFrame = convert_pte2pframe(*cursorPte);
-        pteChangeppn(cursorPte, ppnCursor);
-#if DEBUG_MMU_kernelPa2Va_IdentityMapping
-        printf("kernelPa2Va_IdentityMapping::Changed cursorPte pa:%08lx,pte:%lx\n\n", (phyAddr_t)cursorPte, *cursorPte);
-#endif
-        pmm_deallocOneFrame(cursorFrame);
-    }
-}
-
 static pte_t *searchAndGetPteIfExists(pframe_t *pageTable, virAddr_t va, uint16_t level)
 {
     pte_t *pageTableAddrPointer; /* Because essentially it is a pte array. [0]~[511] */
@@ -502,7 +432,7 @@ static void removePteFromPageTable(virAddr_t va, pte_t *pte)
 }
 
 /* This function will auto create middle pte if needed. */
-static pte_t *insertPteIntoPageTable(pframe_t *pageTable, virAddr_t va, uint16_t level, pteflg_t pteFlag)
+static pte_t *insertPteIntoPageTableRecursively(pframe_t *pageTable, virAddr_t va, uint16_t level, pteflg_t pteFlag)
 {
     pte_t *pageTableAddrPointer;
     vpn_t currentVpn;
@@ -548,15 +478,114 @@ static pte_t *insertPteIntoPageTable(pframe_t *pageTable, virAddr_t va, uint16_t
         }
     }
     /* The middle page table already exists. */
-    return insertPteIntoPageTable(convert_pte2pframe(*currentPte), va, level - 1, pteFlag);
+    return insertPteIntoPageTableRecursively(convert_pte2pframe(*currentPte), va, level - 1, pteFlag);
 }
 
-static inline void pteChangeppn(pte_t *pte, ppn_t ppn)
+static void initMicroPhysicalMemoryPool(void)
 {
-    *pte = pte_create(ppn, pte_get_flag(*pte));
+    microPhysicalMemoryPoolBase = pmm_alloc(2); /* Total size 8192 byte. */
+    if (microPhysicalMemoryPoolBase == (pframe_t *)0)
+    {
+        printf("MicroPhysicalMemoryPool init failed!\n");
+    }
+    else
+    {
+        poolBaseAddr = (phyAddr_t *)convert_pframe2pa(microPhysicalMemoryPoolBase);
+        *poolBaseAddr = 0x0;
+        ptrTableAddr = poolBaseAddr + 1;
+        phyAddr_t *poolBeginAddr = poolBaseAddr + 128;
+#if DEBUG_MMU_initMicroPhysicalMemoryPool
+        printf("initMicroPhysicalMemoryPool::poolBaseAddr:%08lx poolBeginAddr:%08lx\n", (phyAddr_t)poolBaseAddr, (phyAddr_t)poolBeginAddr);
+#endif
+        uint16_t cursor;
+        for (cursor = 0; cursor <= 31; cursor++)
+        {
+            ptrTableAddr[cursor] = (phyAddr_t)poolBeginAddr + cursor * 32;
+#if DEBUG_MMU_initMicroPhysicalMemoryPool
+            printf("initMicroPhysicalMemoryPool::ptrTableAddr[%d]:%08lx\n", cursor, ptrTableAddr[cursor]);
+#endif
+        }
+        for (; cursor <= 47; cursor++)
+        {
+            ptrTableAddr[cursor] = ptrTableAddr[31] + cursor * 64;
+        }
+        for (; cursor <= 55; cursor++)
+        {
+            ptrTableAddr[cursor] = ptrTableAddr[47] + cursor * 128;
+        }
+        for (; cursor <= 59; cursor++)
+        {
+            ptrTableAddr[cursor] = ptrTableAddr[55] + cursor * 256;
+        }
+        for (; cursor <= 61; cursor++)
+        {
+            ptrTableAddr[cursor] = ptrTableAddr[59] + cursor * 512;
+        }
+        for (; cursor <= 63; cursor++)
+        {
+            ptrTableAddr[cursor] = ptrTableAddr[61] + cursor * 1024;
+        }
+#if DEBUG_MMU_initMicroPhysicalMemoryPool
+        printf("initMicroPhysicalMemoryPool::ptrTableAddr[63]:%08lx\n", ptrTableAddr[63]);
+#endif
+        printf("microPhysicalMemoryPool inited!\n");
+    }
 }
 
-static void enable_mmu(void)
+static void *microMalloc(uint64_t size)
 {
-    write_csr(satp, SATPMODE_RV39 | convert_pframe2ppn(KernelLevel3PageTableFrame));
+    if (size > 1024)
+    {
+        return (void *)0;
+    }
+    uint64_t usage = *poolBaseAddr;
+    uint16_t offset;
+    if (size <= 32)
+    {
+        offset = 0;
+    }
+    else if (32 < size && size <= 64)
+    {
+        offset = 32;
+    }
+    else if (64 < size && size <= 128)
+    {
+        offset = 48;
+    }
+    else if (128 < size && size <= 256)
+    {
+        offset = 56;
+    }
+    else if (256 < size && size <= 512)
+    {
+        offset = 60;
+    }
+    else /* 512 < size && size <= 1024 */
+    {
+        offset = 62;
+    }
+    uint16_t position;
+    for (position = offset; position <= 63; position++)
+    {
+        if (((1 << position) & usage) == 0x0)
+        {
+            usage = usage | (1 << position);
+            return (void *)ptrTableAddr[position];
+        }
+    }
+    return (void *)0;
+}
+
+static bool microDemalloc(void *ptr)
+{
+    uint16_t position;
+    for (position = 0; position <= 63; position++)
+    {
+        if (ptrTableAddr[position] == (phyAddr_t)ptr && ((1 << position) & *poolBaseAddr))
+        {
+            *poolBaseAddr = (*poolBaseAddr) & ~(1 << position);
+            return true;
+        }
+    }
+    return false;
 }

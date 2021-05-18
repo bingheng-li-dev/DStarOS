@@ -25,6 +25,10 @@
 /* Supervisor interrupt reason mask for 64 bit system, 0x7FFF FFFF FFFF FFFF */
 #define CAUSE_SUPERVISOR_IRQ_REASON_MASK  (CAUSE_SUPERVISOR_IRQ_MASK - 1)
 
+#define CAUSE_FAULT_INSTRUCTION_PAGE 0xc
+#define CAUSE_FAULT_LOAD_PAGE 0xd
+#define CAUSE_FAULT_STORE_PAGE 0xf
+
 struct int_stackframe
 {
     uint64_t scause;
@@ -61,8 +65,8 @@ struct int_stackframe
     uint64_t x31_t6;
     uint64_t sepc;
     uint64_t sstatus;
+    uint64_t sbadaddr;
 };
-
 typedef struct int_stackframe intstkf_t;
 
 void trap_init(void);

@@ -14,7 +14,7 @@ trap_init_asm:
 trap_entry:
   csrw sscratch, sp
 
-  addi  sp,  sp, -34 * REGBYTES
+  addi  sp,  sp, -35 * REGBYTES
 
   sd x1, 1*REGBYTES(sp)
 
@@ -59,6 +59,9 @@ trap_entry:
 
   csrr  x1, sstatus
   sd x1, 33*REGBYTES(sp)
+
+  csrr  x1, CSR_SBADADDR
+  sd x1, 34*REGBYTES(sp)
 
   mv a0, sp
 

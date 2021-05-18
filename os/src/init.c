@@ -4,7 +4,13 @@
 #include "trap.h"
 #include "tick.h"
 #include "pmm.h"
+#include "vmm.h"
+
 #define UNUSED(x) (void)(x)
+
+#if DEBUG_MAIN
+extern int main(int argc, char **args);
+#endif
 
 static void init_bss(void)
 {
@@ -30,8 +36,14 @@ void os_init(void)
     printf("%s\n", startmsg);
     trap_init();
     pmm_init();
+    // fs_init();
+    vmm_init();
     tick_init();
     irq_enable();
+
+#if DEBUG_MAIN
+    main(0, (void *)0);
+#endif
 
 #if DEBUG_INIT_os_init
     while (1)

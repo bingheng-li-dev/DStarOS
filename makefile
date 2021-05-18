@@ -1,5 +1,5 @@
 
-TOOLPATH?=/home/lbh/.platformio/packages/toolchain-kendryte210/bin/
+TOOLPATH?=/home/lbh/.platformio/packages/toolchain-kendryte210/bin
 TOOLPREFIX?=$(TOOLPATH)/riscv64-unknown-elf-
 
 CC := $(TOOLPREFIX)gcc
@@ -23,7 +23,7 @@ SRC_BASE := os
 OUTDIR := build
 
 INC_DIR:= debug include lib
-SRC_DIR:= src lib
+SRC_DIR:= src lib debug
 
 INC_DIR:=$(foreach n,$(INC_DIR),$(SRC_BASE)/$(n))
 CFLAGS+=$(foreach n,$(INC_DIR),-I$(n))
