@@ -1,11 +1,11 @@
 #include "pmm.h"
+#include "vmm.h"
 
 //@TODO:recyclePageTableRecursively(,cnt,...);
 
 pframe_t *PageListBegin;
 fslist_t FreeList;  /* Free memories will arrange from small size to large size,used for best fit. */
 fslist_t FreeAList; /* Free memories will arrange from small addr to large addr,used for merge. */
-pframe_t *KernelLevel3PageTableFrame;
 /* The following vars are used for micro memory alloc. */
 pframe_t *microPhysicalMemoryPoolBase;
 phyAddr_t *poolBaseAddr;
@@ -21,7 +21,7 @@ static void removePteFromPageTable(virAddr_t va, pte_t *pte);
 static pte_t *insertPteIntoPageTableRecursively(pframe_t *pageTable, virAddr_t va, uint16_t level, pteflg_t pteFlag);
 /* The following funs are used for micro memory alloc. */
 static void initMicroPhysicalMemoryPool(void);
-static void *microMalloc(uint64_t size);
+static void *microAlloc(uint64_t size);
 /* Maybe memories in pool have ran out.So return true if target memory has been dealloced in pool. */
 static bool microDemalloc(void *ptr);
 
@@ -93,7 +93,7 @@ void pmm_init(void)
     printf("FreeList.fnsize:%d, FreeAList.fnsize:%d\n", FreeList.fnsize, FreeAList.fnsize);
 #endif
 
-    microPhysicalMemoryPoolBase = (pframe_t *)0;
+    microPhysicalMemoryPoolBase = NULL;
     initMicroPhysicalMemoryPool();
 
     printf("pmm inited!\n");
@@ -101,14 +101,25 @@ void pmm_init(void)
 
 pframe_t *pmm_alloc(uint16_t nsize)
 {
-    pframe_t *ret = (pframe_t *)0;
+    pframe_t *ret = NULL;
     if (nsize > FreeList.fnsize)
     {
         printf("Frame has not been allocated!\n");
-        return ret;
+        printf("Begin  page replacement algorithm...\n");
+        goto f1;
     }
-    ret = BFallocator.bffa_deleteAndReinsert(nsize);
-    if (ret != (pframe_t *)0)
+    while (1)
+    {
+        // extern mm_t *currentProcessMm;
+        ret = BFallocator.bffa_deleteAndReinsert(nsize);
+        if (ret != NULL || readyToSwap == false || nsize > 1)
+        {
+            break;
+        }
+        // vmm_swapOut(currentProcessMm, &ret, nsize);
+    }
+
+    if (ret != NULL)
     {
         pframe_t *currentFrame;
         for (currentFrame = ret; currentFrame != ret + nsize; currentFrame++)
@@ -131,6 +142,7 @@ pframe_t *pmm_alloc(uint16_t nsize)
     printf("pmm_alloc::Frame has been allocated!ppn:%ld,pa:%08lx\n", convert_pframe2ppn(ret), convert_pframe2pa(ret));
 #endif
 
+f1:
     return ret;
 }
 
@@ -166,17 +178,17 @@ void pmm_deallocOneFrame(pframe_t *baseppn)
     pmm_dealloc(baseppn, (uint16_t)1);
 }
 
-pte_t *pmm_getPte(pframe_t *pageTable, virAddr_t va)
+pte_t *pmm_pteGet(pframe_t *pageTable, virAddr_t va)
 {
     return searchAndGetPteIfExists(pageTable, va, 3);
 }
 
-void pmm_removePte(virAddr_t va, pte_t *pte)
+void pmm_pteRemove(virAddr_t va, pte_t *pte)
 {
     removePteFromPageTable(va, pte);
 }
 
-pte_t *pmm_insertPte(pframe_t *pageTable, virAddr_t va, pteflg_t pteFlag)
+pte_t *pmm_pteInsert(pframe_t *pageTable, virAddr_t va, pteflg_t pteFlag)
 {
     return insertPteIntoPageTableRecursively(pageTable, va, 3, pteFlag);
 }
@@ -184,10 +196,10 @@ pte_t *pmm_insertPte(pframe_t *pageTable, virAddr_t va, pteflg_t pteFlag)
 void *kmalloc(uint64_t size)
 {
     void *ret;
-    if (microPhysicalMemoryPoolBase != (pframe_t *)0 && size <= 1024)
+    if (microPhysicalMemoryPoolBase != NULL && size <= 1024)
     {
-        ret = microMalloc(size);
-        if (ret != (void *)0)
+        ret = microAlloc(size);
+        if (ret != NULL)
         {
             return ret;
         }
@@ -199,11 +211,11 @@ void *kmalloc(uint64_t size)
 
 void kfree(void *ptr, uint64_t size)
 {
-    if (ptr == (void *)0)
+    if (ptr == NULL)
     {
         return;
     }
-    if (microPhysicalMemoryPoolBase != (pframe_t *)0 && size <= 1024)
+    if (microPhysicalMemoryPoolBase != NULL && size <= 1024)
     {
         if (microDemalloc(ptr))
         {
@@ -218,7 +230,7 @@ void kfree(void *ptr, uint64_t size)
 
 static pframe_t *deleteAndReinsert(uint16_t nsize)
 {
-    pframe_t *ret = (pframe_t *)0, *currentFrame;
+    pframe_t *ret = NULL, *currentFrame;
     struct list_head *currentEntry; /* "Current*" is used for temp. */
     list_for_each(currentEntry, &(FreeList.list_linker))
     {
@@ -233,7 +245,7 @@ static pframe_t *deleteAndReinsert(uint16_t nsize)
         }
     }
     /* If found the free block we need. */
-    if (ret != (pframe_t *)0)
+    if (ret != NULL)
     {
         /* Delete this entry in FreeList&FreeAList. */
         list_del(&(ret->list_linker_inFreeList));
@@ -315,7 +327,7 @@ static void insertAndMerge(pframe_t *baseppn, uint16_t nsize)
     pframe_t *prevFrameInFreeAList, *nextFrameInFreeAList;
     if (FreeAList.list_linker.next == &(baseppn->list_linker_inFreeAList))
     {
-        prevFrameInFreeAList = (pframe_t *)0;
+        prevFrameInFreeAList = NULL;
     }
     else
     {
@@ -323,7 +335,7 @@ static void insertAndMerge(pframe_t *baseppn, uint16_t nsize)
     }
     if (FreeAList.list_linker.prev == &(baseppn->list_linker_inFreeAList))
     {
-        nextFrameInFreeAList = (pframe_t *)0;
+        nextFrameInFreeAList = NULL;
     }
     else
     {
@@ -337,7 +349,7 @@ static void insertAndMerge(pframe_t *baseppn, uint16_t nsize)
 #endif
 
     pframe_t *frameClosestAfter = baseppn + baseppn->nsize;
-    if (nextFrameInFreeAList != (pframe_t *)0)
+    if (nextFrameInFreeAList != NULL)
     {
         if (frameClosestAfter == nextFrameInFreeAList) /* It means need merge with the after block. */
         {
@@ -347,7 +359,7 @@ static void insertAndMerge(pframe_t *baseppn, uint16_t nsize)
             mergedFrame = baseppn;
         }
     }
-    if (prevFrameInFreeAList != (pframe_t *)0)
+    if (prevFrameInFreeAList != NULL)
     {
         pframe_t *frameClosestForward = prevFrameInFreeAList + prevFrameInFreeAList->nsize;
         if (frameClosestForward == baseppn) /* It means need merge with the forwrd block. */
@@ -446,7 +458,7 @@ static pte_t *insertPteIntoPageTableRecursively(pframe_t *pageTable, virAddr_t v
         pte_t newPteOfThisLevelPageTable;
         newFrameOfNextLevelPageTable = pmm_allocOneFrame();
         newFrameOfNextLevelPageTable->reference = newFrameOfNextLevelPageTable->reference + 1;
-        if (newFrameOfNextLevelPageTable == (pframe_t *)0)
+        if (newFrameOfNextLevelPageTable == NULL)
         {
             printf("Failed to insert pte:No more free memories!\n");
             return (pte_t *)0;
@@ -455,6 +467,7 @@ static pte_t *insertPteIntoPageTableRecursively(pframe_t *pageTable, virAddr_t v
         if (level == 1)
         {
             newPteOfThisLevelPageTable = pte_create(convert_pframe2ppn(newFrameOfNextLevelPageTable), pteFlag);
+            newFrameOfNextLevelPageTable->va = va;
             *currentPte = newPteOfThisLevelPageTable;
             return currentPte;
         }
@@ -474,6 +487,7 @@ static pte_t *insertPteIntoPageTableRecursively(pframe_t *pageTable, virAddr_t v
             pte_t tempPte;
             tempPte = *currentPte;
             *currentPte = pte_create(convert_pframe2ppn(convert_pte2pframe(tempPte)), pteFlag);
+            convert_pte2pframe(tempPte)->va = va;
             return currentPte;
         }
     }
@@ -484,7 +498,7 @@ static pte_t *insertPteIntoPageTableRecursively(pframe_t *pageTable, virAddr_t v
 static void initMicroPhysicalMemoryPool(void)
 {
     microPhysicalMemoryPoolBase = pmm_alloc(2); /* Total size 8192 byte. */
-    if (microPhysicalMemoryPoolBase == (pframe_t *)0)
+    if (microPhysicalMemoryPoolBase == NULL)
     {
         printf("MicroPhysicalMemoryPool init failed!\n");
     }
@@ -532,11 +546,11 @@ static void initMicroPhysicalMemoryPool(void)
     }
 }
 
-static void *microMalloc(uint64_t size)
+static void *microAlloc(uint64_t size)
 {
     if (size > 1024)
     {
-        return (void *)0;
+        return NULL;
     }
     uint64_t usage = *poolBaseAddr;
     uint16_t offset;
@@ -569,11 +583,17 @@ static void *microMalloc(uint64_t size)
     {
         if (((1 << position) & usage) == 0x0)
         {
+            phyAddr_t *dst;
+            dst = (phyAddr_t *)ptrTableAddr[position];
+            while (dst != (phyAddr_t *)ptrTableAddr[position + (uint16_t)1])
+            {
+                *dst++ = 0;
+            }
             usage = usage | (1 << position);
             return (void *)ptrTableAddr[position];
         }
     }
-    return (void *)0;
+    return NULL;
 }
 
 static bool microDemalloc(void *ptr)

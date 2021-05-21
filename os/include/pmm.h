@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 
 #include "encoding.h"
 #include "list.h"
@@ -35,6 +36,7 @@ struct phyframe
     uint16_t nsize;     /* The size of this block which free or to be used. */
     uint16_t reference; /* Amount of vir page used. */
     bool canBeAlloc;    /* True:this frame is the head of a free block and can be alloc;false:this frame is in usage or it is not the head of a block. */
+    virAddr_t va;   /* Used for pra. */
     struct list_head list_linker_inFreeList;
     struct list_head list_linker_inFreeAList;
     struct list_head list_linker_inClockList;
@@ -58,16 +60,15 @@ struct bestfitFrameAllocator /* Best fit,it allows to allocate a continuous bloc
 extern pframe_t *PageListBegin;
 extern fslist_t FreeList;
 extern fslist_t FreeAList;
-extern pframe_t *KernelLevel3PageTableFrame;
 
 void pmm_init(void);
 pframe_t *pmm_alloc(uint16_t nsize);
 void pmm_dealloc(pframe_t *baseppn, uint16_t nsize);
 pframe_t *pmm_allocOneFrame(void);
 void pmm_deallocOneFrame(pframe_t *baseppn);
-pte_t *pmm_getPte(pframe_t *pageTable, virAddr_t va);
-void pmm_removePte(virAddr_t va, pte_t *pte);
-pte_t *pmm_insertPte(pframe_t *pageTable, virAddr_t va, pteflg_t pteFlag);
+pte_t *pmm_pteGet(pframe_t *pageTable, virAddr_t va);
+void pmm_pteRemove(virAddr_t va, pte_t *pte);
+pte_t *pmm_pteInsert(pframe_t *pageTable, virAddr_t va, pteflg_t pteFlag);
 
 void *kmalloc(uint64_t size);
 void kfree(void *ptr, uint64_t size);
