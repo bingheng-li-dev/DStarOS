@@ -2,6 +2,8 @@
 TOOLPATH?=/home/lbh/.platformio/packages/toolchain-kendryte210/bin
 TOOLPREFIX?=$(TOOLPATH)/riscv64-unknown-elf-
 
+# TOOLPREFIX?=riscv64-unknown-elf-
+
 CC := $(TOOLPREFIX)gcc
 AS := $(TOOLPREFIX)as
 LD := $(TOOLPREFIX)ld
@@ -60,6 +62,8 @@ $(C_OBJS_S): %.o:%.S $(C_OUTDIR)
 $(KERNEL_ELF): C_OBJS
 	$(LD) $(LDFLAGS) $(C_OBJS)
 	$(OBJCOPY) $(KERNEL_ELF) --strip-all -O binary $(KERNEL_BIN)
+	cd ./opensbi && make PLATFORM=kendryte/k210 FW_PAYLOAD_PATH=../build/kernel.bin O=opensbi_build CROSS_COMPILE=riscv64-unknown-elf-
+	mv ./opensbi/opensbi_build/platform/kendryte/k210/firmware/fw_payload.bin ./k210.bin
 
 clean:
 	rm -fv $(C_OBJS) $(KERNEL_ELF) $(KERNEL_BIN)

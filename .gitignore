@@ -3,3 +3,7 @@ bootloader/*
 build/*
 .vscode/*
 *.elf
+opensbi/opensbi_build/*
+opensbi/install/*
+opensbi/build/*
+*.bin
