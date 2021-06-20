@@ -588,7 +588,8 @@ static void *microAlloc(uint64_t size)
     for (position = offset; position <= 63; position++)
     {
 #if DEBUG_MMU_microAlloc
-        printf("microAlloc::offset:%d\t*usage:%lx\n", offset, *usage);
+        /* This bug has not been fixed completely,this "printf" can't be deleted.The reason is unknown,maybe not aligned. */
+        printf("microAlloc::offset:%d\t*usage:%08lx\n", offset, *usage);
 #endif
         if (((1 << position) & *usage) == 0x0)
         {

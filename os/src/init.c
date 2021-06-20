@@ -39,7 +39,7 @@ void os_init(void)
     trap_init();
     pmm_init();
     fs_init();
-    vmm_init();
+    // vmm_init();
     tick_init();
     irq_enable();
     proc_init();

@@ -8,7 +8,7 @@ mm_t *currentProcessMm;
 
 /* Must be called first before using functions about page table. */
 static void kernelPa2Va_IdentityMapping(void);
-static void enable_mmu(void);
+static void enable_mmu(void) __attribute__((used));
 static inline void pteChangeppn(pte_t *pte, ppn_t ppn);
 static vma_t *rbtree_vmaSearch(struct rb_root *root, virAddr_t va);
 static bool rbtree_vmaInsert(struct rb_root *root, vma_t *vma);

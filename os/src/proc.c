@@ -35,6 +35,9 @@ static void deallocPidMap(int16_t pid) __attribute__((used));
 /* Kernel's init process which pid is 1. */
 static int16_t init(void);
 static void fork_out(void);
+#if DEBUG_PROC_CTXSTK
+static void printCtxStk(ctx_t *ctx);
+#endif
 
 char *setProcName(pcb_t *proc, const char *name)
 {
@@ -94,6 +97,8 @@ f2:
 int16_t do_exit(int16_t error_code)
 {
     printf("exit not finished!!\n");
+    while (1)
+        ;
     return ENO0_NO_ERROR;
 }
 
@@ -125,7 +130,7 @@ void proc_init(void)
             ;
     }
     TaskCurrent = TaskIdle;
-#ifdef DEBUG_PROC_proc_init
+#if DEBUG_PROC_proc_init
     printf("proc_init::TaskCurrent->need_resched:%d TaskIdle->need_resched %d\n", TaskCurrent->need_resched, TaskIdle->need_resched);
     printf("proc_init::TaskCurrent addr:%lx TaskIdle addr %lx\n", (intptr_t)TaskCurrent, (intptr_t)TaskIdle);
 #endif
@@ -134,7 +139,7 @@ void proc_init(void)
     const char *name = "init";
     setProcName(pcb_init, name);
     TaskInit = pcb_init;
-#ifdef DEBUG_PROC_proc_init
+#if DEBUG_PROC_proc_init
     printf("proc_init::pcb_init pid:%d\n", id_init);
     printf("proc_init::TaskInit addr:%lx\n", (intptr_t)pcb_init);
 #endif
@@ -158,7 +163,7 @@ static pcb_t *allocNewProc(void)
         pcb->proc_state = UNINIT;
         pcb->need_resched = false;
 #if DEBUG_PROC_allocNewProc
-        printf("allocNewProc::new pcb addr:%lx,sizeof(pcb_t):%ld\n\n", (intptr_t)pcb, sizeof(pcb_t));
+        printf("allocNewProc::new pcb addr:%lx,sizeof(pcb_t):%ld\n", (intptr_t)pcb, sizeof(pcb_t));
 #endif
     }
     return pcb;
@@ -283,7 +288,7 @@ void idle(void)
 {
     while (1)
     {
-#ifdef DEBUG_PROC_idle
+#if DEBUG_PROC_idle
         printf("idle::TaskCurrent->need_resched:%d TaskIdle->need_resched %d\n", TaskCurrent->need_resched, TaskIdle->need_resched);
         printf("idle::TaskCurrent->proc_pname:%s TaskIdle->proc_pname %s\n", TaskCurrent->proc_pname, TaskIdle->proc_pname);
         printf("idle::TaskCurrent->proc_pid:%d TaskIdle->proc_pid %d\n", TaskCurrent->proc_pid, TaskIdle->proc_pid);
@@ -291,15 +296,15 @@ void idle(void)
         if (TaskCurrent->need_resched)
         {
             // sched();
-            irq_disable();
-            TaskCurrent = TaskInit;
-            switch_to(&(TaskCurrent->proc_context), &(TaskInit->proc_context));
-            irq_enable();
-        }
-#ifdef DEBUG_PROC_idle
-        while (1)
-            ;
+            // TaskCurrent = TaskInit;
+#if DEBUG_PROC_CTXSTK
+            printCtxStk(&(TaskCurrent->proc_context));
+            printCtxStk(&(TaskInit->proc_context));
 #endif
+            switch_to(&(TaskCurrent->proc_context), &(TaskInit->proc_context));
+            while (1)
+                ;
+        }
     }
 }
 
@@ -313,5 +318,29 @@ static int16_t init(void)
 static void fork_out(void)
 {
     extern void fork_out_asm(intstkf_t * regs);
+    printf("fork_out!!\n");
+    TaskCurrent = TaskInit;
     fork_out_asm(TaskCurrent->proc_int_stack);
 }
+
+#if DEBUG_PROC_CTXSTK
+static void printCtxStk(ctx_t *ctx)
+{
+    printf("\n=================================================================\n");
+    printf("  ra       0x%08lx\n", (ctx->x1_ra));
+    printf("  sp       0x%08lx\n", (ctx->x2_sp));
+    printf("  s0       0x%08lx\n", (ctx->x8_s0));
+    printf("  s1       0x%08lx\n", (ctx->x9_s1));
+    printf("  s2       0x%08lx\n", (ctx->x18_s2));
+    printf("  s3       0x%08lx\n", (ctx->x19_s3));
+    printf("  s4       0x%08lx\n", (ctx->x20_s4));
+    printf("  s5       0x%08lx\n", (ctx->x21_s5));
+    printf("  s6       0x%08lx\n", (ctx->x22_s6));
+    printf("  s7       0x%08lx\n", (ctx->x23_s7));
+    printf("  s8       0x%08lx\n", (ctx->x24_s8));
+    printf("  s9       0x%08lx\n", (ctx->x25_s9));
+    printf("  s10      0x%08lx\n", (ctx->x26_s10));
+    printf("  s11      0x%08lx\n", (ctx->x27_s11));
+    printf("=================================================================\n");
+}
+#endif
