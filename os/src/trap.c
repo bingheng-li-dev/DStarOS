@@ -1,5 +1,4 @@
 #include "trap.h"
-#include "vmm.h"
 
 void trap_init(void)
 {
@@ -15,7 +14,9 @@ void irq_disable(void)
 void irq_enable(void)
 {
     set_csr(sstatus, SSTATUS_SIE);
-    printf("irq enabled!!\n");
+#if DEBUG_LOCK_irq_enable
+    printf("irq_enable::irq enabled!!\n");
+#endif
 }
 
 void trap_handle(intstkf_t *sp)

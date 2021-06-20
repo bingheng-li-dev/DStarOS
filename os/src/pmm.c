@@ -1,5 +1,6 @@
 #include "pmm.h"
 #include "vmm.h"
+#include "stringops.h"
 
 //@TODO:recyclePageTableRecursively(,cnt,...);
 
@@ -506,7 +507,12 @@ static void initMicroPhysicalMemoryPool(void)
     {
         poolBaseAddr = (phyAddr_t *)convert_pframe2pa(microPhysicalMemoryPoolBase);
         *poolBaseAddr = 0x0;
+        /* When makes a pointer +1,++,-- and etc , that pointer will moves sizeof(T) bytes. */
+        /* So "ptrTableAddr" is offset to "poolBaseAddr" 8 bytes(64 bits). */
+        /* And this 64 bits will be used as usage table (mirco memories are total 64 blocks). */
         ptrTableAddr = poolBaseAddr + 1;
+        /* "ptrTableAddr" restores each micro memory's begin address,so "ptrTableAddr" is a array of phyAddr_t[64]. */
+        /* "poolBeginAddr" is the begin address of these micro memories. */
         phyAddr_t *poolBeginAddr = poolBaseAddr + 128;
 #if DEBUG_MMU_initMicroPhysicalMemoryPool
         printf("initMicroPhysicalMemoryPool::poolBaseAddr:%08lx poolBeginAddr:%08lx\n", (phyAddr_t)poolBaseAddr, (phyAddr_t)poolBeginAddr);
@@ -552,7 +558,7 @@ static void *microAlloc(uint64_t size)
     {
         return NULL;
     }
-    uint64_t usage = *poolBaseAddr;
+    phyAddr_t *usage = poolBaseAddr;
     uint16_t offset;
     if (size <= 32)
     {
@@ -581,7 +587,10 @@ static void *microAlloc(uint64_t size)
     uint16_t position;
     for (position = offset; position <= 63; position++)
     {
-        if (((1 << position) & usage) == 0x0)
+#if DEBUG_MMU_microAlloc
+        printf("microAlloc::offset:%d\t*usage:%lx\n", offset, *usage);
+#endif
+        if (((1 << position) & *usage) == 0x0)
         {
             phyAddr_t *dst;
             dst = (phyAddr_t *)ptrTableAddr[position];
@@ -589,7 +598,7 @@ static void *microAlloc(uint64_t size)
             {
                 *dst++ = 0;
             }
-            usage = usage | (1 << position);
+            *usage = *usage | (1 << position);
             return (void *)ptrTableAddr[position];
         }
     }

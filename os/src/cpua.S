@@ -111,3 +111,57 @@ trap_return:
   ld x2, 2*REGBYTES(sp)
 
   sret
+
+.section      .text
+  .globl switch_to
+  .align 2
+switch_to:
+  # save from's registers
+    sd ra, 0*REGBYTES(a0)
+    sd sp, 1*REGBYTES(a0)
+    sd s0, 2*REGBYTES(a0)
+    sd s1, 3*REGBYTES(a0)
+    sd s2, 4*REGBYTES(a0)
+    sd s3, 5*REGBYTES(a0)
+    sd s4, 6*REGBYTES(a0)
+    sd s5, 7*REGBYTES(a0)
+    sd s6, 8*REGBYTES(a0)
+    sd s7, 9*REGBYTES(a0)
+    sd s8, 10*REGBYTES(a0)
+    sd s9, 11*REGBYTES(a0)
+    sd s10, 12*REGBYTES(a0)
+    sd s11, 13*REGBYTES(a0)
+
+    # restore to's registers
+    ld ra, 0*REGBYTES(a1)
+    ld sp, 1*REGBYTES(a1)
+    ld s0, 2*REGBYTES(a1)
+    ld s1, 3*REGBYTES(a1)
+    ld s2, 4*REGBYTES(a1)
+    ld s3, 5*REGBYTES(a1)
+    ld s4, 6*REGBYTES(a1)
+    ld s5, 7*REGBYTES(a1)
+    ld s6, 8*REGBYTES(a1)
+    ld s7, 9*REGBYTES(a1)
+    ld s8, 10*REGBYTES(a1)
+    ld s9, 11*REGBYTES(a1)
+    ld s10, 12*REGBYTES(a1)
+    ld s11, 13*REGBYTES(a1)
+
+    ret
+
+  .globl fork_out_asm
+  .align 2
+fork_out_asm:
+  mv sp, a0
+  j  trap_return
+  
+  .globl kernel_thread_entry
+  .align 2
+kernel_thread_entry:
+  # "s1" restores the args,so move it to a0 as param.
+  mv a0, s1
+  # "s0" restores the address of the function,so jump to it.
+  jalr s0
+  # When the process ran over,jump to "do_exit",DO NOT USE "call" HERE!
+  jal  do_exit

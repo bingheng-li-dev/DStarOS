@@ -1,4 +1,9 @@
-#include "pmm.h"
+#include "fs.h"
+
+void fs_init(void)
+{
+    ;
+}
 
 int16_t swapfs_read(pte_t pte, pframe_t *frame)
 {

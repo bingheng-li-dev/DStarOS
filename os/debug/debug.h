@@ -16,6 +16,14 @@
 #define DEBUG_MMU_deleteAndReinsert 0
 #define DEBUG_MMU_insertAndMerge 0
 #define DEBUG_MMU_initMicroPhysicalMemoryPool 0
+#define DEBUG_MMU_microAlloc 0
+#define DEBUG_LOCK_irq_enable 1
+#define DEBUG_PROC_idle 1
+#define DEBUG_PROC_createFirstProcIdle 1
+#define DEBUG_PROC_proc_init 1
+#define DEBUG_PROC_do_fork 1
+#define DEBUG_PROC_findProcByPid 1
+#define DEBUG_PROC_allocNewProc 1
 
 #endif
 

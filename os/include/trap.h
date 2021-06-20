@@ -6,6 +6,7 @@
 #include "encoding.h"
 #include "tinyprintf.h"
 #include "debug.h"
+#include "vmm.h"
 
 /* Machine interrupt mask for 64 bit system, 0x8000 0000 0000 0000 */
 #define CAUSE_MACHINE_IRQ_MASK            (0x1ULL << 63)
