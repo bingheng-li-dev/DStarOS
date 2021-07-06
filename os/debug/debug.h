@@ -6,9 +6,9 @@
 #if DEBUG
 
 #define DEBUG_INIT_os_init 0
+#define DEBUG_INIT_MAIN 1
 #define DEBUG_TICK 0
 #define DEBUG_INTSTACK 0
-#define DEBUG_MAIN 0
 #define DEBUG_MMU_mm_init 0
 #define DEBUG_MMU_mm_alloc 0
 #define DEBUG_MMU_mm_dealloc 0

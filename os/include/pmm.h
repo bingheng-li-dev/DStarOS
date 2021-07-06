@@ -36,7 +36,7 @@ struct phyframe
     uint16_t nsize;     /* The size of this block which free or to be used. */
     uint16_t reference; /* Amount of vir page used. */
     bool canBeAlloc;    /* True:this frame is the head of a free block and can be alloc;false:this frame is in usage or it is not the head of a block. */
-    virAddr_t va;   /* Used for pra. */
+    virAddr_t va;       /* Used for pra. */
     struct list_head list_linker_inFreeList;
     struct list_head list_linker_inFreeAList;
     struct list_head list_linker_inClockList;
@@ -71,7 +71,7 @@ void pmm_pteRemove(virAddr_t va, pte_t *pte);
 pte_t *pmm_pteInsert(pframe_t *pageTable, virAddr_t va, pteflg_t pteFlag);
 
 void *kmalloc(uint64_t size);
-void kfree(void *ptr, uint64_t size);
+void kfree(void *ptr);
 
 static inline pte_t pte_create(ppn_t ppn, pteflg_t pteFlag)
 {
@@ -173,6 +173,30 @@ static inline void refreshTLB(virAddr_t va)
     asm volatile("sfence.vma %0"
                  :
                  : "r"(va));
+}
+
+/* conversion from malloc headers to user pointers, and back */
+/*
+ * ____ The allocated block ____
+ * /                             \
+ * +--------+--------------------+
+ * | Header | Your data area ... |
+ * +--------+--------------------+
+ *          ^
+ *          |
+ *          +-- The address you are given
+ */
+
+/* Convert the address of the allocated block to the address you are given. */
+static inline void *convert_chunk2mem(void *p)
+{
+    return p + 1;
+}
+
+/* Convert the address you are given to the address of the allocated block. */
+static inline void *convert_mem2chunk(void *mem)
+{
+    return mem - 1;
 }
 
 #endif

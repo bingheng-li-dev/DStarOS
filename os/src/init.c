@@ -10,7 +10,7 @@
 
 #define UNUSED(x) (void)(x)
 
-#if DEBUG_MAIN
+#if DEBUG_INIT_MAIN
 extern int main(int argc, char **args);
 #endif
 
@@ -42,10 +42,10 @@ void os_init(void)
     // vmm_init();
     tick_init();
     irq_enable();
-    proc_init();
-    idle();
+    // proc_init();
+    // idle();
 
-#if DEBUG_MAIN
+#if DEBUG_INIT_MAIN
     main(0, (void *)0);
 #endif
 

@@ -20,7 +20,7 @@ int main(int argc, char **args)
     test->a = 1;
     test->b = 2;
     printf("main::test:%08lx,test->a:%ld,test->b:%ld\n", (phyAddr_t)test, test->a, test->b);
-    // kfree(test, sizeof(*test));
+    kfree(test, sizeof(*test));
     struct debug *test1;
     test1 = kmalloc(sizeof(struct debug));
     test1->a = 3;
