@@ -12,6 +12,7 @@ pframe_t *microPhysicalMemoryPoolBase;
 phyAddr_t *poolBaseAddr;
 phyAddr_t *ptrTableAddr; /* Used for restore ptr who used micro mem. */
 
+static void pmm_dealloc(pframe_t *baseppn);
 static pframe_t *deleteAndReinsert(uint16_t nsize);
 static void insertAndMerge(pframe_t *baseppn, uint16_t nsize);
 /* Return null if not exists.When using:@param pageTable should be base page table,@param level should be 3. */
@@ -100,13 +101,13 @@ void pmm_init(void)
     printf("pmm inited!\n");
 }
 
-pframe_t *pmm_alloc(uint16_t nsize)
+void *pmm_alloc(uint16_t nsize)
 {
     pframe_t *ret = NULL;
     if (nsize > FreeList.fnsize)
     {
         printf("Frame has not been allocated!\n");
-        printf("Begin  page replacement algorithm...\n");
+        printf("Begin page replacement algorithm...\n");
         goto f1;
     }
     while (1)
@@ -127,12 +128,16 @@ pframe_t *pmm_alloc(uint16_t nsize)
         {
             currentFrame->canBeAlloc = 0;
         }
+
         phyAddr_t *dst;
         dst = (phyAddr_t *)convert_pframe2pa(ret);
         while (dst != (phyAddr_t *)convert_pframe2pa(ret + nsize))
         {
             *dst++ = 0;
         }
+
+        /* "ret->nsize" restores the size of this alloced block which is convenient to free block. */
+        ret->nsize = nsize;
     }
     else
     {
@@ -147,36 +152,9 @@ f1:
     return ret;
 }
 
-void pmm_dealloc(pframe_t *baseppn, uint16_t nsize)
-{
-    pframe_t *currentFrame;
-    for (currentFrame = baseppn; currentFrame != baseppn + nsize; currentFrame++)
-    {
-        currentFrame->canBeAlloc = 1;
-        currentFrame->reference = 0;
-    }
-    baseppn->nsize = nsize;
-
-#if DEBUG_MMU_mm_dealloc
-    ppn_t ppnDealloc;
-    ppnDealloc = convert_pframe2ppn(baseppn);
-#endif
-
-    BFallocator.bffa_insertAndMerge(baseppn, nsize);
-
-#if DEBUG_MMU_mm_dealloc
-    printf("pmm_dealloc::Frame has been deallocated!ppn:%ld,pa:%08lx,nsize:%d\n", ppnDealloc, convert_ppn2pa(ppnDealloc), nsize);
-#endif
-}
-
-pframe_t *pmm_allocOneFrame(void)
+void *pmm_allocOneFrame(void)
 {
     return pmm_alloc((u_int16_t)1);
-}
-
-void pmm_deallocOneFrame(pframe_t *baseppn)
-{
-    pmm_dealloc(baseppn, (uint16_t)1);
 }
 
 pte_t *pmm_pteGet(pframe_t *pageTable, virAddr_t va)
@@ -206,27 +184,56 @@ void *kmalloc(uint64_t size)
         }
     }
     /* "microPhysicalMemoryPoolBase" is null or "size" is more than 1024 or no remaining micro mem in pool. */
-    ret = pmm_alloc(convert_pa2ppn_cil(size)); /* Here "convert" is used for calculate amount of pframes. */
+    ret = pmm_alloc(convert_pa2ppn_cil(size)); /* Here "convert" is used to calculate amount of pframes. */
     return (void *)convert_pframe2pa(ret);
 }
 
-void kfree(void *ptr, uint64_t size)
+void kfree(void *ptr)
 {
     if (ptr == NULL)
     {
-        return;
+        goto f1;
     }
-    if (microPhysicalMemoryPoolBase != NULL && size <= 1024)
+    if (microPhysicalMemoryPoolBase != NULL)
     {
-        if (microDemalloc(ptr))
+        if (convert_pframe2pa(microPhysicalMemoryPoolBase) < (phyAddr_t)ptr && (phyAddr_t)ptr < convert_pframe2pa(microPhysicalMemoryPoolBase) + 2 * PGSIZE)
         {
-            return;
+            if (microDemalloc(ptr))
+            {
+                goto f1;
+            }
         }
     }
     /* Maybe memories in pool have ran out. */
     pframe_t *base;
-    base = convert_pa2pframe_flr((phyAddr_t)ptr); /* Here "convert" is used for calculate amount of pframes. */
-    pmm_dealloc(base, convert_pa2ppn_cil(size));
+    base = convert_pa2pframe_flr((phyAddr_t)ptr); /* Here "convert" is used to calculate amount of the pframe. */
+    pmm_dealloc(base);
+
+f1:
+    return;
+}
+
+static void pmm_dealloc(pframe_t *baseppn)
+{
+    pframe_t *currentFrame;
+    uint16_t nsize;
+    nsize = baseppn->nsize;
+    for (currentFrame = baseppn; currentFrame != baseppn + nsize; currentFrame++)
+    {
+        currentFrame->canBeAlloc = 1;
+        currentFrame->reference = 0;
+    }
+
+#if DEBUG_MMU_mm_dealloc
+    ppn_t ppnDealloc;
+    ppnDealloc = convert_pframe2ppn(baseppn);
+#endif
+
+    BFallocator.bffa_insertAndMerge(baseppn, nsize);
+
+#if DEBUG_MMU_mm_dealloc
+    printf("pmm_dealloc::Frame has been deallocated!ppn:%ld,pa:%08lx,nsize:%d\n", ppnDealloc, convert_ppn2pa(ppnDealloc), nsize);
+#endif
 }
 
 static pframe_t *deleteAndReinsert(uint16_t nsize)
@@ -409,7 +416,7 @@ static pte_t *searchAndGetPteIfExists(pframe_t *pageTable, virAddr_t va, uint16_
     pageTableAddrPointer = (pte_t *)convert_pframe2pa(pageTable);
     currentVpn = convert_va2vpn(va, level);
     currentPte = &(pageTableAddrPointer[currentVpn]);
-    if (!pte_is_valid(*currentPte))
+    if (!pteIsValid(*currentPte))
     {
         return (pte_t *)0;
     }
@@ -418,7 +425,7 @@ static pte_t *searchAndGetPteIfExists(pframe_t *pageTable, virAddr_t va, uint16_
         if (level > 1)
         {
             ppn_t ppnOfNextLevelPageTable;
-            ppnOfNextLevelPageTable = pte_get_ppn(*currentPte);
+            ppnOfNextLevelPageTable = pteGetPpn(*currentPte);
             return searchAndGetPteIfExists(convert_ppn2pframe(ppnOfNextLevelPageTable), va, level - 1);
         }
         else /* level == 1 */
@@ -430,14 +437,14 @@ static pte_t *searchAndGetPteIfExists(pframe_t *pageTable, virAddr_t va, uint16_
 
 static void removePteFromPageTable(virAddr_t va, pte_t *pte)
 {
-    if (pte_is_valid(*pte))
+    if (pteIsValid(*pte))
     {
         pframe_t *currentFrame;
         currentFrame = convert_pte2pframe(*pte);
         currentFrame->reference = currentFrame->reference - 1;
         if (currentFrame->reference == 0)
         {
-            pmm_deallocOneFrame(currentFrame);
+            pmm_dealloc(currentFrame);
         }
         *pte = (pte_t)0;
         refreshTLB(va);
@@ -453,7 +460,7 @@ static pte_t *insertPteIntoPageTableRecursively(pframe_t *pageTable, virAddr_t v
     pageTableAddrPointer = (pte_t *)convert_pframe2pa(pageTable);
     currentVpn = convert_va2vpn(va, level);
     currentPte = &(pageTableAddrPointer[currentVpn]);
-    if (!pte_is_valid(*currentPte)) /* Current pte does not exist. */
+    if (!pteIsValid(*currentPte)) /* Current pte does not exist. */
     {
         pframe_t *newFrameOfNextLevelPageTable;
         pte_t newPteOfThisLevelPageTable;
@@ -467,7 +474,7 @@ static pte_t *insertPteIntoPageTableRecursively(pframe_t *pageTable, virAddr_t v
         /* When level is 1,it means this is level1 page table so newFrameOfNextLevelPageTable is the physical frame but not the page table. */
         if (level == 1)
         {
-            newPteOfThisLevelPageTable = pte_create(convert_pframe2ppn(newFrameOfNextLevelPageTable), pteFlag);
+            newPteOfThisLevelPageTable = pteCreate(convert_pframe2ppn(newFrameOfNextLevelPageTable), pteFlag);
             newFrameOfNextLevelPageTable->va = va;
             *currentPte = newPteOfThisLevelPageTable;
             return currentPte;
@@ -475,7 +482,7 @@ static pte_t *insertPteIntoPageTableRecursively(pframe_t *pageTable, virAddr_t v
         /* Middle pte and page table. */
         else
         {
-            newPteOfThisLevelPageTable = pte_create(convert_pframe2ppn(newFrameOfNextLevelPageTable), PTE_V);
+            newPteOfThisLevelPageTable = pteCreate(convert_pframe2ppn(newFrameOfNextLevelPageTable), PTE_V);
             *currentPte = newPteOfThisLevelPageTable;
         }
     }
@@ -487,7 +494,7 @@ static pte_t *insertPteIntoPageTableRecursively(pframe_t *pageTable, virAddr_t v
         {
             pte_t tempPte;
             tempPte = *currentPte;
-            *currentPte = pte_create(convert_pframe2ppn(convert_pte2pframe(tempPte)), pteFlag);
+            *currentPte = pteCreate(convert_pframe2ppn(convert_pte2pframe(tempPte)), pteFlag);
             convert_pte2pframe(tempPte)->va = va;
             return currentPte;
         }

@@ -24,8 +24,8 @@ KERNEL_BIN:=kernel.bin
 SRC_BASE := os
 OUTDIR := build
 
-INC_DIR:= debug include lib bsp/include drivers/include
-SRC_DIR:= src lib debug bsp drivers
+INC_DIR:= debug include lib bsp/include
+SRC_DIR:= src lib debug 
 
 INC_DIR:=$(foreach n,$(INC_DIR),$(SRC_BASE)/$(n))
 CFLAGS+=$(foreach n,$(INC_DIR),-I$(n))

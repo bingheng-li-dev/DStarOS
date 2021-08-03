@@ -55,7 +55,7 @@ void vmm_mmDestroy(mm_t *mm)
         list_del(current);
         vmm_vmaDestroy(currentVma);
     }
-    kfree(mm, sizeof(mm_t));
+    kfree(mm);
     mm = NULL;
 }
 
@@ -78,7 +78,7 @@ void vmm_vmaDestroy(vma_t *vma)
 {
     if (vma != NULL)
     {
-        kfree(vma, sizeof(vma_t));
+        kfree(vma);
         vma = NULL;
     }
 }
@@ -181,7 +181,7 @@ uint16_t vmm_swapOut(mm_t *mm, pframe_t **framePtr, uint16_t n)
         {
             printf("swap_out: i %d, store page in vaddr %08lx to disk swap entry %ld\n", i, va, page->va / PGSIZE + 1);
             *ptep = (page->va / PGSIZE + 1) << 8;
-            pmm_deallocOneFrame(page);
+            kfree((phyAddr_t *)convert_pframe2pa(page));
         }
         refreshTLB(va);
     }
@@ -250,7 +250,7 @@ static void kernelPa2Va_IdentityMapping(void)
 #if DEBUG_MMU_kernelPa2Va_IdentityMapping
         printf("kernelPa2Va_IdentityMapping::Changed cursorPte pa:%08lx,pte:%lx\n\n", (phyAddr_t)cursorPte, *cursorPte);
 #endif
-        pmm_deallocOneFrame(cursorFrame);
+        kfree((phyAddr_t *)convert_pframe2pa(cursorFrame));
     }
 
     for (; ppnCursor <= ppn_erodata; ppnCursor++)
@@ -261,7 +261,7 @@ static void kernelPa2Va_IdentityMapping(void)
 #if DEBUG_MMU_kernelPa2Va_IdentityMapping
         printf("kernelPa2Va_IdentityMapping::Changed cursorPte pa:%08lx,pte:%lx\n\n", (phyAddr_t)cursorPte, *cursorPte);
 #endif
-        pmm_deallocOneFrame(cursorFrame);
+        kfree((phyAddr_t *)convert_pframe2pa(cursorFrame));
     }
 
     for (; ppnCursor <= ppn_edata; ppnCursor++)
@@ -272,7 +272,7 @@ static void kernelPa2Va_IdentityMapping(void)
 #if DEBUG_MMU_kernelPa2Va_IdentityMapping
         printf("kernelPa2Va_IdentityMapping::Changed cursorPte pa:%08lx,pte:%lx\n\n", (phyAddr_t)cursorPte, *cursorPte);
 #endif
-        pmm_deallocOneFrame(cursorFrame);
+        kfree((phyAddr_t *)convert_pframe2pa(cursorFrame));
     }
 
     for (; ppnCursor <= ppn_ebss; ppnCursor++)
@@ -283,7 +283,7 @@ static void kernelPa2Va_IdentityMapping(void)
 #if DEBUG_MMU_kernelPa2Va_IdentityMapping
         printf("kernelPa2Va_IdentityMapping::Changed cursorPte pa:%08lx,pte:%lx\n\n", (phyAddr_t)cursorPte, *cursorPte);
 #endif
-        pmm_deallocOneFrame(cursorFrame);
+        kfree((phyAddr_t *)convert_pframe2pa(cursorFrame));
     }
 
     /* All remaining physical memories should be identically mapped to virtual address in order kernel directly accesses physical memories. */
@@ -295,7 +295,7 @@ static void kernelPa2Va_IdentityMapping(void)
 #if DEBUG_MMU_kernelPa2Va_IdentityMapping
         printf("kernelPa2Va_IdentityMapping::Changed cursorPte pa:%08lx,pte:%lx\n\n", (phyAddr_t)cursorPte, *cursorPte);
 #endif
-        pmm_deallocOneFrame(cursorFrame);
+        kfree((phyAddr_t *)convert_pframe2pa(cursorFrame));
     }
 }
 
@@ -306,7 +306,7 @@ static void enable_mmu(void)
 
 static inline void pteChangeppn(pte_t *pte, ppn_t ppn)
 {
-    *pte = pte_create(ppn, pte_get_flag(*pte));
+    *pte = pteCreate(ppn, pteGetFlag(*pte));
 }
 
 static vma_t *rbtree_vmaSearch(struct rb_root *root, virAddr_t va)

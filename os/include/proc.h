@@ -64,8 +64,8 @@ struct controlBlockOfProcess
     char proc_pname[PNAME_MAX_LENGTH + 1];
     sta_t proc_state;
     ctx_t proc_context;
-    pframe_t *pageTableBase;
-    uintptr_t kernel_stack;
+    phyAddr_t pageTableBase;
+    phyAddr_t kernel_stack;
     pcb_t *proc_parent;
     intstkf_t *proc_int_stack;
     mm_t *proc_mm;

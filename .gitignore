@@ -7,3 +7,5 @@ opensbi/opensbi_build/*
 opensbi/install/*
 opensbi/build/*
 *.bin
+.gdb*
+core

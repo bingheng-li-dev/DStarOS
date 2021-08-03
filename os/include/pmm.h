@@ -62,10 +62,8 @@ extern fslist_t FreeList;
 extern fslist_t FreeAList;
 
 void pmm_init(void);
-pframe_t *pmm_alloc(uint16_t nsize);
-void pmm_dealloc(pframe_t *baseppn, uint16_t nsize);
-pframe_t *pmm_allocOneFrame(void);
-void pmm_deallocOneFrame(pframe_t *baseppn);
+void *pmm_alloc(uint16_t nsize);
+void *pmm_allocOneFrame(void);
 pte_t *pmm_pteGet(pframe_t *pageTable, virAddr_t va);
 void pmm_pteRemove(virAddr_t va, pte_t *pte);
 pte_t *pmm_pteInsert(pframe_t *pageTable, virAddr_t va, pteflg_t pteFlag);
@@ -73,38 +71,38 @@ pte_t *pmm_pteInsert(pframe_t *pageTable, virAddr_t va, pteflg_t pteFlag);
 void *kmalloc(uint64_t size);
 void kfree(void *ptr);
 
-static inline pte_t pte_create(ppn_t ppn, pteflg_t pteFlag)
+static inline pte_t pteCreate(ppn_t ppn, pteflg_t pteFlag)
 {
     return (pte_t)((ppn << PTE_PPN_OFFSET) | pteFlag | PTE_V);
 }
 
-static inline pteflg_t pte_get_flag(pte_t pte)
+static inline pteflg_t pteGetFlag(pte_t pte)
 {
     return (pteflg_t)(pte & (pte_t)((1 << 8) - 0x1));
 }
 
-static inline ppn_t pte_get_ppn(pte_t pte)
+static inline ppn_t pteGetPpn(pte_t pte)
 {
     return (ppn_t)((pte >> PTE_PPN_OFFSET) & (pte_t)(((pte_t)1 << 44) - 0x1));
 }
 
 /* Return true if(PTE_V & pte).  */
-static inline bool pte_is_valid(pte_t pte)
+static inline bool pteIsValid(pte_t pte)
 {
     return (pte & PTE_V) != 0x0;
 }
 
-static inline bool pte_readable(pte_t pte)
+static inline bool pteReadable(pte_t pte)
 {
     return (pte & PTE_R) != 0x0;
 }
 
-static inline bool pte_writable(pte_t pte)
+static inline bool pteWritable(pte_t pte)
 {
     return (pte & PTE_W) != 0x0;
 }
 
-static inline bool pte_executable(pte_t pte)
+static inline bool pteExecutable(pte_t pte)
 {
     return (pte & PTE_X) != 0x0;
 }
@@ -155,7 +153,7 @@ static inline pframe_t *convert_ppn2pframe(ppn_t ppn)
 
 static inline pframe_t *convert_pte2pframe(pte_t pte)
 {
-    return (convert_ppn2pframe(pte_get_ppn(pte)));
+    return (convert_ppn2pframe(pteGetPpn(pte)));
 }
 
 static inline pframe_t *convert_pa2pframe_flr(phyAddr_t pa)
@@ -173,30 +171,6 @@ static inline void refreshTLB(virAddr_t va)
     asm volatile("sfence.vma %0"
                  :
                  : "r"(va));
-}
-
-/* conversion from malloc headers to user pointers, and back */
-/*
- * ____ The allocated block ____
- * /                             \
- * +--------+--------------------+
- * | Header | Your data area ... |
- * +--------+--------------------+
- *          ^
- *          |
- *          +-- The address you are given
- */
-
-/* Convert the address of the allocated block to the address you are given. */
-static inline void *convert_chunk2mem(void *p)
-{
-    return p + 1;
-}
-
-/* Convert the address you are given to the address of the allocated block. */
-static inline void *convert_mem2chunk(void *mem)
-{
-    return mem - 1;
 }
 
 #endif

@@ -153,7 +153,7 @@ static pcb_t *allocNewProc(void)
     {
         pcb->kernel_stack = 0;
         /* Only Kernel processes all share the same page dictionary kernel page table(KernelLevel3PageTableFrame). */
-        pcb->pageTableBase = KernelLevel3PageTableFrame;
+        pcb->pageTableBase = convert_pframe2pa(KernelLevel3PageTableFrame);
         memset(&(pcb->proc_context), 0, sizeof(ctx_t));
         pcb->proc_int_stack = NULL;
         pcb->proc_mm = NULL;
@@ -173,16 +173,16 @@ static void deallocAProcNotDeeply(pcb_t *pcb)
 {
     if (pcb != NULL)
     {
-        kfree(pcb, sizeof(pcb_t));
+        kfree(pcb);
     }
 }
 
 static int16_t allocKernelStack(pcb_t *pcb)
 {
-    pframe_t *kernelStackPage = kmalloc(KERNRL_STKSIZE);
-    if (kernelStackPage != NULL)
+    phyAddr_t *kernelStackPageAddr = kmalloc(KERNRL_STKSIZE);
+    if (kernelStackPageAddr != NULL)
     {
-        pcb->kernel_stack = convert_pframe2pa(kernelStackPage);
+        pcb->kernel_stack = (phyAddr_t)kernelStackPageAddr;
         return ENO0_NO_ERROR;
     }
     return ENO1_NOMORE_MEM;
@@ -190,7 +190,7 @@ static int16_t allocKernelStack(pcb_t *pcb)
 
 static int16_t deallocKernelStack(pcb_t *pcb)
 {
-    pmm_dealloc(convert_pa2pframe_flr(pcb->kernel_stack), KERNEL_STACKPSIZE);
+    kfree((void *)(pcb->kernel_stack));
     return ENO0_NO_ERROR;
 }
 
@@ -218,8 +218,7 @@ static pcb_t *createFirstProcIdle(void)
     if (idle != NULL)
     {
         idle->proc_pid = 0;
-        idle->kernel_stack = boot_stack_top;
-        idle->pageTableBase = KernelLevel3PageTableFrame;
+        idle->kernel_stack = (phyAddr_t)boot_stack_top;
         idle->proc_state = READY;
         idle->need_resched = true;
         const char *name = "idle";
@@ -264,7 +263,7 @@ static int16_t allocPidMap(void)
         pids_t *cur = list_entry(currentEntry, pids_t, pid_stk_linker);
         list_del_init(currentEntry);
         ret = cur->pid;
-        kfree(cur, sizeof(pids_t));
+        kfree(cur);
         goto f1;
     }
     /* If there is no dealloced pid,alloc a new one. */
