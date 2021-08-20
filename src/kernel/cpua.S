@@ -3,15 +3,15 @@
 
   .section      .text.entry
   .align 2
-  .globl trap_init_asm
-trap_init_asm:
-  la t0, trap_entry
+  .globl trapInit_asm
+trapInit_asm:
+  la t0, trapEntry
   csrw stvec, t0
   ret
 
-  .globl trap_entry
+  .globl trapEntry
   .align 2
-trap_entry:
+trapEntry:
   csrw sscratch, sp
 
   addi  sp,  sp, -35 * REGBYTES
@@ -65,11 +65,11 @@ trap_entry:
 
   mv a0, sp
 
-  call trap_handle
+  call kernelTrapHandler
 
-  .globl trap_return
+  .globl trapReturn
   .align 2
-trap_return:
+trapReturn:
   ld x1, 32*REGBYTES(sp)
   csrw sepc, x1
 
@@ -154,7 +154,7 @@ switch_to:
   .align 2
 fork_out_asm:
   mv sp, a0
-  j  trap_return
+  j  trapReturn
   
   .globl kernel_thread_entry
   .align 2

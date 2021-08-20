@@ -12,15 +12,19 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+#ifndef QEMU
+
 #include "fpioa.h"
 #include "gpiohs.h"
 #include "sysctl.h"
 #include "utils.h"
 #include "platform.h"
+#include "periph_layout.h"
 
 #define GPIOHS_MAX_PINNO 32
 
-volatile gpiohs_t *const gpiohs = (volatile gpiohs_t *)GPIOHS_BASE_ADDR;
+volatile gpiohs_t *const gpiohs = (volatile gpiohs_t *)GPIOHS_V;
 
 // typedef struct _gpiohs_pin_instance
 // {
@@ -83,3 +87,5 @@ void gpiohs_set_pin(uint8_t pin, gpio_pin_value_t value)
     // configASSERT(pin < GPIOHS_MAX_PINNO);
     set_gpio_bit(gpiohs->output_val.u32, pin, value);
 }
+
+#endif

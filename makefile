@@ -4,6 +4,8 @@ TOOLPREFIX?=$(TOOLPATH)/riscv64-unknown-elf-
 
 # TOOLPREFIX?=riscv64-unknown-elf-
 
+PLATFORM?=QEMU
+
 CC := $(TOOLPREFIX)gcc
 AS := $(TOOLPREFIX)as
 LD := $(TOOLPREFIX)ld
@@ -14,6 +16,7 @@ CFLAGS := -O -ggdb3
 CFLAGS += -nostdlib -fno-pic -Wall -Werror
 CFLAGS += -mcmodel=medany -march=rv64imafdc -mabi=lp64d
 CFLAGS += -ffreestanding -fno-common -mno-relax
+CFLAGS += -D $(PLATFORM)
 
 LDSCRIPT:=./lds/linker_qemu.ld
 LDFLAGS := -z max-page-size=4096
@@ -21,11 +24,11 @@ LDFLAGS := -z max-page-size=4096
 KERNEL_ELF:=kernel.elf
 KERNEL_BIN:=kernel.bin
 
-SRC_BASE := os
+SRC_BASE := src
 OUTDIR := build
 
-INC_DIR:= debug include lib bsp/include drivers/include
-SRC_DIR:= src lib debug drivers
+INC_DIR:= kernel/include lib/bsp/include lib/core/include lib/drivers/include debug
+SRC_DIR:= kernel lib/bsp lib/core lib/drivers debug
 
 INC_DIR:=$(foreach n,$(INC_DIR),$(SRC_BASE)/$(n))
 CFLAGS+=$(foreach n,$(INC_DIR),-I$(n))
@@ -62,8 +65,6 @@ $(C_OBJS_S): %.o:%.S $(C_OUTDIR)
 $(KERNEL_ELF): C_OBJS
 	$(LD) $(LDFLAGS) $(C_OBJS)
 	$(OBJCOPY) $(KERNEL_ELF) --strip-all -O binary $(KERNEL_BIN)
-	cd ../opensbi && make PLATFORM=kendryte/k210 FW_PAYLOAD_PATH=../DStarOS/build/kernel.bin O=opensbi_build CROSS_COMPILE=riscv64-unknown-elf-
-	mv ../opensbi/opensbi_build/platform/kendryte/k210/firmware/fw_payload.bin ./build/k210.bin
 
 clean:
 	rm -fv $(C_OBJS) $(KERNEL_ELF) $(KERNEL_BIN)

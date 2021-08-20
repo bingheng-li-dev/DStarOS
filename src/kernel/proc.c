@@ -1,4 +1,10 @@
 #include "proc.h"
+#include "kmalloc.h"
+#include "stringops.h"
+#include "errorcode.h"
+#include "sched.h"
+#include "console.h"
+#include "pmm.h"
 
 /* List of all processes. */
 struct list_head ProcList;
@@ -212,13 +218,13 @@ static void copyProcStk(pcb_t *pcb, uintptr_t stack, intstkf_t *regs)
 
 static pcb_t *createFirstProcIdle(void)
 {
-    extern uintptr_t boot_stack_top;
+    extern uintptr_t boot_stack_top1;       //warning:stack top unsolved
 
     pcb_t *idle = allocNewProc();
     if (idle != NULL)
     {
         idle->proc_pid = 0;
-        idle->kernel_stack = (phyAddr_t)boot_stack_top;
+        idle->kernel_stack = (phyAddr_t)boot_stack_top1;
         idle->proc_state = READY;
         idle->need_resched = true;
         const char *name = "idle";

@@ -9,22 +9,10 @@
 #include "list.h"
 #include "debug.h"
 
-#define PGSHIFT RISCV_PGSHIFT
-#define PGSIZE RISCV_PGSIZE
-#define PTE_PPN_OFFSET 10
-#define KERNEL_START 0x80200000
-#define MEMORY_BASE DRAM_BASE
-#define MEMORY_END 0x80800000
+#include "memtype.h"
 
 #define SATPMODE_BARE 0x0000000000000000
 #define SATPMODE_RV39 0x8000000000000000
-
-typedef uintptr_t phyAddr_t;
-typedef uintptr_t virAddr_t;
-typedef uint64_t ppn_t;
-typedef uint64_t vpn_t;
-typedef uint64_t pte_t;
-typedef uint16_t pteflg_t;
 
 typedef struct phyframe pframe_t;
 typedef struct freeSpaceList fslist_t;
@@ -63,48 +51,13 @@ extern fslist_t FreeAList;
 void pmm_init(void);
 void *pmm_alloc(uint16_t nsize);
 void *pmm_allocOneFrame(void);
+void pmm_dealloc(pframe_t *baseppn);
 pte_t *pmm_pteGet(pframe_t *pageTable, virAddr_t va);
 void pmm_pteRemove(virAddr_t va, pte_t *pte);
 pte_t *pmm_pteInsert(pframe_t *pageTable, virAddr_t va, pteflg_t pteFlag);
-
-void *kmalloc(uint64_t size);
-void kfree(void *ptr);
-
-static inline pte_t pteCreate(ppn_t ppn, pteflg_t pteFlag)
-{
-    return (pte_t)((ppn << PTE_PPN_OFFSET) | pteFlag | PTE_V);
-}
-
-static inline pteflg_t pteGetFlag(pte_t pte)
-{
-    return (pteflg_t)(pte & (pte_t)((1 << 8) - 0x1));
-}
-
-static inline ppn_t pteGetPpn(pte_t pte)
-{
-    return (ppn_t)((pte >> PTE_PPN_OFFSET) & (pte_t)(((pte_t)1 << 44) - 0x1));
-}
-
-/* Return true if(PTE_V & pte).  */
-static inline bool pteIsValid(pte_t pte)
-{
-    return (pte & PTE_V) != 0x0;
-}
-
-static inline bool pteReadable(pte_t pte)
-{
-    return (pte & PTE_R) != 0x0;
-}
-
-static inline bool pteWritable(pte_t pte)
-{
-    return (pte & PTE_W) != 0x0;
-}
-
-static inline bool pteExecutable(pte_t pte)
-{
-    return (pte & PTE_X) != 0x0;
-}
+void *microAlloc(uint64_t size);
+/* Maybe memories in pool have ran out.So return true if target memory has been dealloced in pool. */
+bool microDemalloc(void *ptr);
 
 /* RoundDown(Left)*/
 static inline ppn_t convert_pa2ppn_flr(phyAddr_t pa)
@@ -158,18 +111,6 @@ static inline pframe_t *convert_pte2pframe(pte_t pte)
 static inline pframe_t *convert_pa2pframe_flr(phyAddr_t pa)
 {
     return convert_ppn2pframe(convert_pa2ppn_flr(pa));
-}
-
-static inline void dropTLB(void)
-{
-    asm volatile("sfence.vma");
-}
-
-static inline void refreshTLB(virAddr_t va)
-{
-    asm volatile("sfence.vma %0"
-                 :
-                 : "r"(va));
 }
 
 #endif

@@ -12,6 +12,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+#ifndef QEMU
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -19,8 +22,10 @@
 #include "fpioa.h"
 #include "sysctl.h"
 #include "utils.h"
+#include "periph_layout.h"
+#include "io.h"
 
-volatile dmac_t *const dmac = (dmac_t *)DMAC_BASE_ADDR;
+volatile dmac_t *const dmac = (dmac_t *)DMAC_V;
 
 static int is_memory(uintptr_t address)
 {
@@ -331,11 +336,12 @@ int dmac_is_idle(dmac_channel_number_t channel_num)
         return 1;
 }
 
-static void *dmac_chan = (void *) DMAC_BASE_ADDR;
+static void *dmac_chan = (void *) DMAC_V;
 
 void dmac_wait_idle(dmac_channel_number_t channel_num)
 {
     while(!dmac_is_idle(channel_num)) {
+        dmac_chan = dmac_chan;
         // acquire(&myproc()->lock);
         // sleep(dmac_chan, &myproc()->lock);
         // release(&myproc()->lock);
@@ -347,3 +353,5 @@ void dmac_intr(dmac_channel_number_t channel_num)
     dmac_chanel_interrupt_clear(channel_num);
     // wakeup(dmac_chan);
 }
+
+#endif

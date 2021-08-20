@@ -1,7 +1,7 @@
 #include "pmm.h"
 #include "vmm.h"
 #include "stringops.h"
-#include "tinyprintf.h"
+#include "console.h"
 
 //@TODO:recyclePageTableRecursively(,cnt,...);
 
@@ -13,7 +13,6 @@ pframe_t *microPhysicalMemoryPoolBase;
 phyAddr_t *poolBaseAddr;
 phyAddr_t *ptrTableAddr; /* Used for restore ptr who used micro mem. */
 
-static void pmm_dealloc(pframe_t *baseppn);
 static pframe_t *deleteAndReinsert(uint16_t nsize);
 static void insertAndMerge(pframe_t *baseppn, uint16_t nsize);
 /* Return null if not exists.When using:@param pageTable should be base page table,@param level should be 3. */
@@ -24,9 +23,6 @@ static void removePteFromPageTable(virAddr_t va, pte_t *pte);
 static pte_t *insertPteIntoPageTableRecursively(pframe_t *pageTable, virAddr_t va, uint16_t level, pteflg_t pteFlag);
 /* The following funs are used for micro memory alloc. */
 static void initMicroPhysicalMemoryPool(void);
-static void *microAlloc(uint64_t size);
-/* Maybe memories in pool have ran out.So return true if target memory has been dealloced in pool. */
-static bool microDemalloc(void *ptr);
 
 const bffa_t BFallocator = {
     .bffa_deleteAndReinsert = deleteAndReinsert,
@@ -155,7 +151,7 @@ f1:
 
 void *pmm_allocOneFrame(void)
 {
-    return pmm_alloc((u_int16_t)1);
+    return pmm_alloc((uint16_t)1);
 }
 
 pte_t *pmm_pteGet(pframe_t *pageTable, virAddr_t va)
@@ -173,48 +169,75 @@ pte_t *pmm_pteInsert(pframe_t *pageTable, virAddr_t va, pteflg_t pteFlag)
     return insertPteIntoPageTableRecursively(pageTable, va, 3, pteFlag);
 }
 
-void *kmalloc(uint64_t size)
+void *microAlloc(uint64_t size)
 {
-    void *ret;
-    if (microPhysicalMemoryPoolBase != NULL && size <= 1024)
+    if (size > 1024)
     {
-        ret = microAlloc(size);
-        if (ret != NULL)
-        {
-            return ret;
-        }
+        return NULL;
     }
-    /* "microPhysicalMemoryPoolBase" is null or "size" is more than 1024 or no remaining micro mem in pool. */
-    ret = pmm_alloc(convert_pa2ppn_cil(size)); /* Here "convert" is used to calculate amount of pframes. */
-    return (void *)convert_pframe2pa(ret);
-}
-
-void kfree(void *ptr)
-{
-    if (ptr == NULL)
+    phyAddr_t *usage = poolBaseAddr;
+    uint16_t offset;
+    if (size <= 32)
     {
-        goto f1;
+        offset = 0;
     }
-    if (microPhysicalMemoryPoolBase != NULL)
+    else if (32 < size && size <= 64)
     {
-        if (convert_pframe2pa(microPhysicalMemoryPoolBase) < (phyAddr_t)ptr && (phyAddr_t)ptr < convert_pframe2pa(microPhysicalMemoryPoolBase) + 2 * PGSIZE)
+        offset = 32;
+    }
+    else if (64 < size && size <= 128)
+    {
+        offset = 48;
+    }
+    else if (128 < size && size <= 256)
+    {
+        offset = 56;
+    }
+    else if (256 < size && size <= 512)
+    {
+        offset = 60;
+    }
+    else /* 512 < size && size <= 1024 */
+    {
+        offset = 62;
+    }
+    uint16_t position;
+    for (position = offset; position <= 63; position++)
+    {
+#if DEBUG_MMU_microAlloc
+        /* This bug has not been fixed completely,this "printf" can't be deleted.The reason is unknown,maybe not aligned. */
+        printf("microAlloc::offset:%d\t*usage:%08lx\n", offset, *usage);
+#endif
+        if (((1 << position) & *usage) == 0x0)
         {
-            if (microDemalloc(ptr))
+            phyAddr_t *dst;
+            dst = (phyAddr_t *)ptrTableAddr[position];
+            while (dst != (phyAddr_t *)ptrTableAddr[position + (uint16_t)1])
             {
-                goto f1;
+                *dst++ = 0;
             }
+            *usage = *usage | (1 << position);
+            return (void *)ptrTableAddr[position];
         }
     }
-    /* Maybe memories in pool have ran out. */
-    pframe_t *base;
-    base = convert_pa2pframe_flr((phyAddr_t)ptr); /* Here "convert" is used to calculate amount of the pframe. */
-    pmm_dealloc(base);
-
-f1:
-    return;
+    return NULL;
 }
 
-static void pmm_dealloc(pframe_t *baseppn)
+bool microDemalloc(void *ptr)
+{
+    uint16_t position;
+    for (position = 0; position <= 63; position++)
+    {
+        if (ptrTableAddr[position] == (phyAddr_t)ptr && ((1 << position) & *poolBaseAddr))
+        {
+            *poolBaseAddr = (*poolBaseAddr) & ~(1 << position);
+            return true;
+        }
+    }
+    return false;
+}
+
+void pmm_dealloc(pframe_t *baseppn)
 {
     pframe_t *currentFrame;
     uint16_t nsize;
@@ -558,72 +581,4 @@ static void initMicroPhysicalMemoryPool(void)
 #endif
         printf("microPhysicalMemoryPool inited!\n");
     }
-}
-
-static void *microAlloc(uint64_t size)
-{
-    if (size > 1024)
-    {
-        return NULL;
-    }
-    phyAddr_t *usage = poolBaseAddr;
-    uint16_t offset;
-    if (size <= 32)
-    {
-        offset = 0;
-    }
-    else if (32 < size && size <= 64)
-    {
-        offset = 32;
-    }
-    else if (64 < size && size <= 128)
-    {
-        offset = 48;
-    }
-    else if (128 < size && size <= 256)
-    {
-        offset = 56;
-    }
-    else if (256 < size && size <= 512)
-    {
-        offset = 60;
-    }
-    else /* 512 < size && size <= 1024 */
-    {
-        offset = 62;
-    }
-    uint16_t position;
-    for (position = offset; position <= 63; position++)
-    {
-#if DEBUG_MMU_microAlloc
-        /* This bug has not been fixed completely,this "printf" can't be deleted.The reason is unknown,maybe not aligned. */
-        printf("microAlloc::offset:%d\t*usage:%08lx\n", offset, *usage);
-#endif
-        if (((1 << position) & *usage) == 0x0)
-        {
-            phyAddr_t *dst;
-            dst = (phyAddr_t *)ptrTableAddr[position];
-            while (dst != (phyAddr_t *)ptrTableAddr[position + (uint16_t)1])
-            {
-                *dst++ = 0;
-            }
-            *usage = *usage | (1 << position);
-            return (void *)ptrTableAddr[position];
-        }
-    }
-    return NULL;
-}
-
-static bool microDemalloc(void *ptr)
-{
-    uint16_t position;
-    for (position = 0; position <= 63; position++)
-    {
-        if (ptrTableAddr[position] == (phyAddr_t)ptr && ((1 << position) & *poolBaseAddr))
-        {
-            *poolBaseAddr = (*poolBaseAddr) & ~(1 << position);
-            return true;
-        }
-    }
-    return false;
 }

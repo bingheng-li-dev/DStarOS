@@ -4,9 +4,7 @@
 #include <stdint.h>
 
 #include "encoding.h"
-#include "tinyprintf.h"
 #include "debug.h"
-#include "vmm.h"
 
 /* Machine interrupt mask for 64 bit system, 0x8000 0000 0000 0000 */
 #define CAUSE_MACHINE_IRQ_MASK            (0x1ULL << 63)
@@ -70,17 +68,16 @@ struct int_stackframe
 };
 typedef struct int_stackframe intstkf_t;
 
-void trap_init(void);
+void trapInit(void);
 void irq_disable(void);
 void irq_enable(void);
-void trap_handle(intstkf_t *sp);
-
+void kernelTrapHandler(intstkf_t *sp);
+void print_intstk(intstkf_t *sp);
 
 #if DEBUG_INTSTACK
 void print_intstk(intstkf_t *sp);
 #endif
 
-extern void trap_init_asm(void);
-extern void tick_int_handler(void);
+extern void tickIntHandler(void);
 
 #endif

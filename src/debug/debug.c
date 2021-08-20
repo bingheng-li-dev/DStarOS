@@ -1,5 +1,6 @@
 #include "sbi.h"
-#include "tinyprintf.h"
+#include "console.h"
+#include "kmalloc.h"
 #include "pmm.h"
 
 int main(int argc, char **args)

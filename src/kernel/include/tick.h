@@ -3,20 +3,16 @@
 
 #include <stdint.h>
 
-#include "debug.h"
-#include "sbi.h"
-#include "tinyprintf.h"
-#include "encoding.h"
+#include "cpu.h"
 
-void tick_init(void);
-void tick_int_handler(void);
+extern osslock_t ticksLock;
 
-static inline uint64_t readtime(void)
-{
-    uint64_t x;
-    asm volatile("csrr %0, time"
-                 : "=r"(x));
-    return x;
-}
+void tickInit(void);
+void tickIntHandler(void);
+/* 系统TICK是唯一的，既系统暴露给延时函数等的TICK值是唯一的，即核0上的tick计数值. */
+uint64_t getOSTick(void);
+/* 多核都有独立的定时器中断和tick计数,getCurrentTick()返回当前core的tick计数. */
+uint64_t getCurrentTick(void);
+void setOSTick(uint64_t tick);
 
 #endif

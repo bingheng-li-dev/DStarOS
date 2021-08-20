@@ -1,16 +1,7 @@
 #include "fs.h"
+#include "kmalloc.h"
 
 void fs_init(void)
 {
     ;
-}
-
-int16_t swapfs_read(pte_t pte, pframe_t *frame)
-{
-    return 0;
-}
-
-int16_t swapfs_write(pte_t pte, pframe_t *frame)
-{
-    return 0;
 }

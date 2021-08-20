@@ -1,37 +1,69 @@
 #include "tick.h"
+#include "console.h"
+#include "cpu.h"
+#include "sbi.h"
+#include "debug.h"
+#include "encoding.h"
 
-static uint64_t TIMEBASE = 100000;
+#define osTick getSpecifiedCpu(0)->tick
 
-#if DEBUG_TICK
-volatile uint64_t tick;
-#endif
+osslock_t ticksLock;
+static uint64_t TIMEBASE = (390000000 / 200);
 
-void tick_set_next_int(uint64_t stime)
+static inline uint64_t readtime(void)
+{
+    uint64_t x;
+    asm volatile("csrr %0, time"
+                 : "=r"(x));
+    return x;
+}
+
+static void tickSetNextInt(uint64_t stime)
 {
     sbi_set_timer(readtime() + stime);
 #if DEBUG_TICK
-    printf("++ setup timer interrupts\n");
+    // printf("++ setup timer interrupts\n");
 #endif
 }
 
-void tick_init(void)
+/* 必须在trapInit()之后被调用 */
+void tickInit(void)
 {
-    tick_set_next_int(TIMEBASE);
-#if DEBUG_TICK
-    tick = 0;
-    printf("tick inited!\n");
-#endif
-    set_csr(sie, MIP_STIP);
-    printf("tick inited!\n");
+    spinlockInit(&ticksLock);
+    tickSetNextInt(TIMEBASE);
+    getCurrentCpu()->tick = 0;
+    printf("core %d tick inited!\n", getCoreId());
 }
 
-void tick_int_handler(void)
+void tickIntHandler(void)
 {
+    spinlockAcquire(&ticksLock);
+    getCurrentCpu()->tick += 1;
+    // printf("core %ld : %ld ticks\n", getCoreId(), getCurrentCpu()->tick);
 #if DEBUG_TICK
-    if (++tick % 100 == 0)
+    if (getCurrentCpu()->tick % 100 == 0)
     {
-        printf("%ld ticks\n", tick);
+        // printf("core %ld : %ld ticks\n", getCurrentCpu()->tick);
     }
 #endif
-    tick_set_next_int(TIMEBASE);
+    //There seems sth to do on proc...
+    spinlockRelease(&ticksLock);
+    tickSetNextInt(TIMEBASE);
+}
+
+uint64_t getOSTick(void)
+{
+    return osTick;
+}
+
+uint64_t getCurrentTick(void)
+{
+    return getCurrentCpu()->tick;
+}
+
+void setOSTick(uint64_t tick)
+{
+    //interrupt_disable
+    osTick = tick;
+    //interrupt_enable
 }

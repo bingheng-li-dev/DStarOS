@@ -1,4 +1,7 @@
 #include "vmm.h"
+#include "pmm.h"
+#include "kmalloc.h"
+#include "console.h"
 
 /* Kernel base page table. */
 pframe_t *KernelLevel3PageTableFrame;
@@ -159,33 +162,35 @@ void vmm_pageFaultHander(virAddr_t badva)
 
 uint16_t vmm_swapOut(mm_t *mm, pframe_t **framePtr, uint16_t n)
 {
-    int i;
-    for (i = 0; i != n; ++i)
-    {
-        virAddr_t va;
-        pframe_t *page = NULL;
-        int r = swap_out_victim(mm, &page);
-        if (r != 0)
-        {
-            printf("i %d, swap_out: call swap_out_victim failed\n", i);
-            break;
-        }
-        va = page->va;
-        pte_t *ptep = pmm_pteGet(mm->pageTable, va);
-        if (swapfs_write((page->va / PGSIZE + 1) << 8, page) != 0)
-        {
-            printf("SWAP: failed to save\n");
-            continue;
-        }
-        else
-        {
-            printf("swap_out: i %d, store page in vaddr %08lx to disk swap entry %ld\n", i, va, page->va / PGSIZE + 1);
-            *ptep = (page->va / PGSIZE + 1) << 8;
-            kfree((phyAddr_t *)convert_pframe2pa(page));
-        }
-        refreshTLB(va);
-    }
-    return i;
+    // int i;
+    // for (i = 0; i != n; ++i)
+    // {
+    //     virAddr_t va;
+    //     pframe_t *page = NULL;
+    //     int r = swap_out_victim(mm, &page);
+    //     if (r != 0)
+    //     {
+    //         printf("i %d, swap_out: call swap_out_victim failed\n", i);
+    //         break;
+    //     }
+    //     va = page->va;
+    //     pte_t *ptep = pmm_pteGet(mm->pageTable, va);
+    //     if (swapfs_write((page->va / PGSIZE + 1) << 8, page) != 0)
+    //     {
+    //         printf("SWAP: failed to save\n");
+    //         continue;
+    //     }
+    //     else
+    //     {
+    //         printf("swap_out: i %d, store page in vaddr %08lx to disk swap entry %ld\n", i, va, page->va / PGSIZE + 1);
+    //         *ptep = (page->va / PGSIZE + 1) << 8;
+    //         kfree((phyAddr_t *)convert_pframe2pa(page));
+    //     }
+    //     refreshTLB(va);
+    // }
+    // return i;
+    swap_out_victim(NULL,NULL);
+    return 0;
 }
 
 static void kernelPa2Va_IdentityMapping(void)
@@ -388,18 +393,18 @@ static uint16_t swap_out_victim(mm_t *mm, pframe_t **currentFramePtr)
 
 static void swap_in(mm_t *mm, virAddr_t va, pframe_t **resultFramePtr)
 {
-    pframe_t *ret = pmm_allocOneFrame();
-    if (ret != (pframe_t *)0)
-    {
-        int16_t rt;
-        rt = swapfs_read(*pmm_pteGet(mm->pageTable, va), ret);
-        if (rt == 0)
-        {
-            *resultFramePtr = ret;
-            return;
-        }
-    }
-    printf("Swap in failed!\n");
-    while (1)
-        ;
+    // pframe_t *ret = pmm_allocOneFrame();
+    // if (ret != (pframe_t *)0)
+    // {
+    //     int16_t rt;
+    //     rt = swapfs_read(*pmm_pteGet(mm->pageTable, va), ret);
+    //     if (rt == 0)
+    //     {
+    //         *resultFramePtr = ret;
+    //         return;
+    //     }
+    // }
+    // printf("Swap in failed!\n");
+    // while (1)
+    //     ;
 }

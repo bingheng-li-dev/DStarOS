@@ -97,4 +97,8 @@ static inline void sbi_remote_sfence_vma_asid(const unsigned long *hart_mask,
 	SBI_CALL_1(SBI_REMOTE_SFENCE_VMA_ASID, hart_mask);
 }
 
+static inline void sbi_set_mie(void) {
+	SBI_CALL_0(0x0A000005);
+}
+
 #endif /* !__SBI_H__ */

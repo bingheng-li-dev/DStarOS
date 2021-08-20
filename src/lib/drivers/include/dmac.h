@@ -597,7 +597,7 @@ typedef struct _dmac_commonreg_intclear
      * in DMAC_COMMONREG_INTSTATUSREG
      * 0x0 for inactive signal
      */
-    uint64_t cear_slvif_dec_err_intstat : 1;
+    uint64_t clear_slvif_dec_err_intstat : 1;
     /**
      * Bit 1 is Slave Interface Common Register Write
      * to Read only Error Interrupt clear Bit

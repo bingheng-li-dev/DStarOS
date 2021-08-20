@@ -1,7 +1,8 @@
 #ifndef _VMM_H
 #define _VMM_H
 
-#include "pmm.h"
+#include "memtype.h"
+#include "list.h"
 #include "rbtree.h"
 #include "rbtree_augmented.h"
 
@@ -10,6 +11,7 @@
 #define VMP_X 0x4
 
 typedef uint16_t pgprot_t;
+typedef struct phyframe pframe_t;
 
 typedef struct continuousVmAreaStruct vma_t;
 typedef struct processVmmStruct mm_t;

@@ -12,10 +12,14 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+#ifndef QEMU
+
 #include <stdint.h>
 #include "encoding.h"
 #include "platform.h"
 #include "sysctl.h"
+#include "periph_layout.h"
 
 #define SYSCTRL_CLOCK_FREQ_IN0 (26000000UL)
 
@@ -45,7 +49,7 @@ const uint8_t get_source_aclk[] =
         [1] = SYSCTL_SOURCE_PLL0,
 };
 
-volatile sysctl_t *const sysctl = (volatile sysctl_t *)SYSCTL_BASE_ADDR;
+volatile sysctl_t *const sysctl = (volatile sysctl_t *)SYSCTL_V;
 
 uint32_t sysctl_get_git_id(void)
 {
@@ -330,3 +334,5 @@ int sysctl_dma_select(sysctl_dma_channel_t channel, sysctl_dma_select_t select)
 
     return 0;
 }
+
+#endif

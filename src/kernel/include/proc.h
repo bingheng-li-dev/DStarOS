@@ -8,12 +8,9 @@
 #include "list.h"
 #include "rbtree.h"
 #include "rbtree_augmented.h"
-#include "errorcode.h"
-#include "pmm.h"
-#include "vmm.h"
+#include "memtype.h"
 #include "trap.h"
-#include "stringops.h"
-#include "sched.h"
+#include "vmm.h"
 
 #define PNAME_MAX_LENGTH 64
 #define KERNEL_STACKPSIZE 1

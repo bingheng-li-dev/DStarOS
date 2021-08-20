@@ -1,9 +1,55 @@
 #include "trap.h"
+#include "memtype.h"
+#include "console.h"
+#include "cpu.h"
+#include "plic.h"
+#include "sbi.h"
 
-void trap_init(void)
+extern void trapInit_asm(void);
+
+static void kernelExternIrqHandler(void)
 {
-    trap_init_asm();
-    printf("trap inited!\n");
+    /* 如果确实是有外部中断。理论上这个if语句可以去掉。 */
+    if (read_csr(sip) & MIP_SEIP)
+    {
+        uint64_t irq = plicClaim();
+        if (UART_IRQ == irq)
+        {
+            int c = sbi_console_getchar();
+            if (-1 != c)
+            {
+                //Sth to do on console...
+                printf("%c\n", c);
+            }
+        }
+        else if (DISK_IRQ == irq)
+        {
+            //disk_intr();
+        }
+        else if (irq)
+        {
+            printf("unexpected interrupt irq = %d\n", irq);
+        }
+        if (irq)
+        {
+            plicComplete(irq);
+        }
+#ifndef QEMU
+        /* clear pending bit. */
+        set_csr(sip, read_csr(sip) & ~0x2);
+        sbi_set_mie();
+#endif
+    }
+}
+
+void trapInit(void)
+{
+    trapInit_asm();
+    /* sstatus寄存器的sie位是中断全局使能。 */
+    set_csr(sstatus, SSTATUS_SIE);
+    /* 全局使能以后，在sie寄存器中分别使能软件中断，时钟中断，外部中断；S态外部中断需要rustSBI的支持。 */
+    set_csr(sie, MIP_SSIP | MIP_STIP | MIP_SEIP);
+    printf("core %ld trap inited!\n", getCoreId());
 }
 
 void irq_disable(void)
@@ -19,30 +65,52 @@ void irq_enable(void)
 #endif
 }
 
-void trap_handle(intstkf_t *sp)
+/* 返回当前core(local core)的全局中断是否处于使能状态。 */
+bool getLocoreIntr(void)
 {
-    int cause = sp->scause & CAUSE_MACHINE_IRQ_REASON_MASK;
+    return (read_csr(sstatus) & SSTATUS_SIE) != 0;
+}
+
+void kernelTrapHandler(intstkf_t *sp)
+{
+    int cause = sp->scause & CAUSE_SUPERVISOR_IRQ_REASON_MASK;
+
+    /* 发生异常之前的权限模式保留在 sstatus 的 SPP 域中。 */
+    if ((read_csr(sstatus) & SSTATUS_SPP) == 0)
+        panic("kernelTrapHandler::not from supervisor mode.");
+    if (getLocoreIntr())
+        /* 发生中断后，硬件会自动将SSTATUS_SIE位置0。如果不是0说明出错了。 */
+        panic("kernelTrapHandler::interrupts enabled.");
 
 #if DEBUG_INTSTACK
-    print_intstk(sp);
+    // print_intstk(sp);
 #endif
 
     if (sp->scause & (1UL << 63))
     {
+        
         switch (cause)
         {
         case IRQ_S_SOFT:
             printf("Supervisor software interrupt\n");
             break;
         case IRQ_S_TIMER:
-            // printf("Supervisor timer interrupt\n");
-            tick_int_handler();
+            // printf("Supervisor timer interrupt\n");s
+            tickIntHandler();
             break;
-        case IRQ_S_EXT:
-            printf("Supervisor external interrupt\n");
-            break;
+        // case IRQ_S_EXT:
+        //     printf("Supervisor external interrupt\n");
+        //     kernelExternIrqHandler();
+        // break;
         default:
-            printf("Unknown interrupt\n");
+            print_intstk(sp);
+            if (0x8000000000000001L == sp->scause && 9 == read_csr(stval))
+            {
+                printf("Supervisor external interrupt\n");
+                kernelExternIrqHandler();
+            }
+            else
+                printf("Unknown interrupt\n");
             break;
         }
     }
@@ -53,29 +121,35 @@ void trap_handle(intstkf_t *sp)
         {
         case CAUSE_MISALIGNED_FETCH:
             printf("Instruction address misaligned");
+            goto panic1;
             break;
         case CAUSE_FAULT_FETCH:
             printf("Instruction access fault");
+            goto panic1;
             break;
         case CAUSE_ILLEGAL_INSTRUCTION:
             printf("Illegal instruction");
+            goto panic1;
             break;
         case CAUSE_BREAKPOINT:
             printf("Breakpoint");
+            goto panic1;
             break;
         case CAUSE_MISALIGNED_LOAD:
             printf("Load address misaligned");
+            goto panic1;
             break;
         case CAUSE_FAULT_LOAD:
             printf("Load access fault");
-            vmm_pageFaultHander((virAddr_t)sp->sbadaddr);
+            // vmm_pageFaultHander((virAddr_t)sp->sbadaddr);
             break;
         case CAUSE_MISALIGNED_STORE:
             printf("Store address misaligned");
+            goto panic1;
             break;
         case CAUSE_FAULT_STORE:
             printf("Store access fault");
-            vmm_pageFaultHander((virAddr_t)sp->sbadaddr);
+            // vmm_pageFaultHander((virAddr_t)sp->sbadaddr);
             break;
         case CAUSE_USER_ECALL:
             printf("Environment call from U-mode");
@@ -85,27 +159,31 @@ void trap_handle(intstkf_t *sp)
             break;
         case CAUSE_HYPERVISOR_ECALL:
             printf("Environment call from H-mode");
+            goto panic1;
             break;
         case CAUSE_MACHINE_ECALL:
             printf("Environment call from M-mode");
+            goto panic1;
             break;
         case CAUSE_FAULT_INSTRUCTION_PAGE:
             printf("Instruction page fault");
+            goto panic1;
             break;
         case CAUSE_FAULT_LOAD_PAGE:
-            vmm_pageFaultHander((virAddr_t)sp->sbadaddr);
+            // vmm_pageFaultHander((virAddr_t)sp->sbadaddr);
             break;
         case CAUSE_FAULT_STORE_PAGE:
-            vmm_pageFaultHander((virAddr_t)sp->sbadaddr);
+            // vmm_pageFaultHander((virAddr_t)sp->sbadaddr);
             break;
         default:
             printf("Unknown exception : %08x", cause);
             break;
         }
+    panic1:
+        panic("\nNot pageFaultHander or Ecall Exception!!");
     }
 }
 
-#if DEBUG_INTSTACK
 void print_intstk(intstkf_t *sp)
 {
     printf("\n=================================================================\n");
@@ -145,4 +223,3 @@ void print_intstk(intstkf_t *sp)
     printf("  sbadaddr 0x%08lx\n", sp->sbadaddr);
     printf("=================================================================\n");
 }
-#endif

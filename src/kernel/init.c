@@ -1,20 +1,27 @@
 #include "sbi.h"
+#include "atomic.h"
 #include "debug.h"
-#include "tinyprintf.h"
+#include "console.h"
 #include "trap.h"
 #include "tick.h"
-#include "pmm.h"
+#include "kmalloc.h"
 #include "vmm.h"
 #include "proc.h"
 #include "fs.h"
+#include "cpu.h"
+#include "plic.h"
 
-#define UNUSED(x) (void)(x)
+#ifndef QEMU
+#include "sdcard.h"
+#include "fpioa.h"
+#include "dmac.h"
+#endif
 
 #if DEBUG_INIT_MAIN
 extern int main(int argc, char **args);
 #endif
 
-static void init_bss(void)
+static void bssInit(void)
 {
     extern unsigned int edata;
     extern unsigned int ebss;
@@ -25,23 +32,40 @@ static void init_bss(void)
         *dst++ = 0;
 }
 
-static void stdout_putc(void *unused, char ch)
+void osInit(uint64_t hartid)
 {
-    sbi_console_putchar((int)ch);
-}
+    setCoreId(hartid);
+    if (hartid == 0)
+    {
+        bssInit();
+        consoleInit();
+        const char *startmsg = "DStarOS is starting...";
+        printf("%s\n", startmsg);
+        trapInit();
+        tickInit();
 
-void os_init(void)
-{
-    init_bss();
-    init_printf(0, stdout_putc);
-    const char *startmsg = "os start...";
-    printf("%s\n", startmsg);
-    trap_init();
-    pmm_init();
-    fs_init();
+        // plicInit();
+
+#ifndef QEMU
+        fpioa_pin_init();
+        dmac_init();
+#endif
+        printf("hart %ld init done\n", getCoreId());
+        core2Enable();
+    }
+    else
+    {
+        mb();
+        trapInit();
+        tickInit();
+        // plicInit();
+
+        printf("hart %ld init done\n", getCoreId());
+    }
+
+    // pmm_init();
+    // fs_init();
     // vmm_init();
-    tick_init();
-    irq_enable();
     // proc_init();
     // idle();
 

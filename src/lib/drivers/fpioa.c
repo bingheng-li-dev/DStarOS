@@ -12,13 +12,17 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+#ifndef QEMU
+
 #include <stddef.h>
 #include <stdint.h>
 #include "fpioa.h"
 #include "sysctl.h"
 #include "platform.h"
+#include "periph_layout.h"
 
-volatile fpioa_t *const fpioa = (volatile fpioa_t *)FPIOA_BASE_ADDR;
+volatile fpioa_t *const fpioa = (volatile fpioa_t *)FPIOA_V;
 
 /**
  * @brief      Internal used FPIOA function initialize cell
@@ -4940,3 +4944,5 @@ void fpioa_pin_init() {
     printf("fpioa_pin_init\n");
     #endif
 }
+
+#endif
