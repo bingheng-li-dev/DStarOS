@@ -2,6 +2,7 @@
 #include "vmm.h"
 #include "stringops.h"
 #include "console.h"
+#include "cpu.h"
 
 //@TODO:recyclePageTableRecursively(,cnt,...);
 
@@ -9,9 +10,10 @@ pframe_t *PageListBegin;
 fslist_t FreeList;  /* Free memories will arrange from small size to large size,used for best fit. */
 fslist_t FreeAList; /* Free memories will arrange from small addr to large addr,used for merge. */
 /* The following vars are used for micro memory alloc. */
-pframe_t *microPhysicalMemoryPoolBase;
-phyAddr_t *poolBaseAddr;
-phyAddr_t *ptrTableAddr; /* Used for restore ptr who used micro mem. */
+pframe_t *MicroPhysicalMemoryPoolBase;
+phyAddr_t *PtrTableAddr;          /* Used for restore ptr who used micro mem. */
+bool MicroMemUsage[64] = {false}; /* 64位对应64块小段内存，记录小块内存的使用情况。 */
+osslock_t PmmLock;
 
 static pframe_t *deleteAndReinsert(uint16_t nsize);
 static void insertAndMerge(pframe_t *baseppn, uint16_t nsize);
@@ -29,7 +31,7 @@ const bffa_t BFallocator = {
     .bffa_insertAndMerge = insertAndMerge,
 };
 
-void pmm_init(void)
+void physicalMemoryManagementInit(void)
 {
     extern unsigned int ekernel;
     extern unsigned int skernel;
@@ -92,13 +94,13 @@ void pmm_init(void)
     printf("FreeList.fnsize:%d, FreeAList.fnsize:%d\n", FreeList.fnsize, FreeAList.fnsize);
 #endif
 
-    microPhysicalMemoryPoolBase = NULL;
+    MicroPhysicalMemoryPoolBase = NULL;
     initMicroPhysicalMemoryPool();
-
-    printf("pmm inited!\n");
+    spinlockInit(&PmmLock);
+    printf("physicalMemoryManagement inited!\n");
 }
 
-void *pmm_alloc(uint16_t nsize)
+void *alloc(uint16_t nsize)
 {
     pframe_t *ret = NULL;
     if (nsize > FreeList.fnsize)
@@ -138,33 +140,34 @@ void *pmm_alloc(uint16_t nsize)
     }
     else
     {
-        printf("Frame has not been allocated!\n");
+        //在实现页面置换算之前，这里只能panic
+        panic("Frame has not been allocated!\n");
     }
 
 #if DEBUG_MMU_mm_alloc
-    printf("pmm_alloc::Frame has been allocated!ppn:%ld,pa:%08lx\n", convert_pframe2ppn(ret), convert_pframe2pa(ret));
+    printf("alloc::Frame has been allocated!ppn:%ld,pa:%08lx\n", convert_pframe2ppn(ret), convert_pframe2pa(ret));
 #endif
 
 f1:
     return ret;
 }
 
-void *pmm_allocOneFrame(void)
+void *allocOneFrame(void)
 {
-    return pmm_alloc((uint16_t)1);
+    return alloc((uint16_t)1);
 }
 
-pte_t *pmm_pteGet(pframe_t *pageTable, virAddr_t va)
+pte_t *getPTE(pframe_t *pageTable, virAddr_t va)
 {
     return searchAndGetPteIfExists(pageTable, va, 3);
 }
 
-void pmm_pteRemove(virAddr_t va, pte_t *pte)
+void removePTE(virAddr_t va, pte_t *pte)
 {
     removePteFromPageTable(va, pte);
 }
 
-pte_t *pmm_pteInsert(pframe_t *pageTable, virAddr_t va, pteflg_t pteFlag)
+pte_t *insertPTE(pframe_t *pageTable, virAddr_t va, pteflg_t pteFlag)
 {
     return insertPteIntoPageTableRecursively(pageTable, va, 3, pteFlag);
 }
@@ -173,9 +176,8 @@ void *microAlloc(uint64_t size)
 {
     if (size > 1024)
     {
-        return NULL;
+        goto f2;
     }
-    phyAddr_t *usage = poolBaseAddr;
     uint16_t offset;
     if (size <= 32)
     {
@@ -204,22 +206,25 @@ void *microAlloc(uint64_t size)
     uint16_t position;
     for (position = offset; position <= 63; position++)
     {
-#if DEBUG_MMU_microAlloc
-        /* This bug has not been fixed completely,this "printf" can't be deleted.The reason is unknown,maybe not aligned. */
-        printf("microAlloc::offset:%d\t*usage:%08lx\n", offset, *usage);
-#endif
-        if (((1 << position) & *usage) == 0x0)
+        if (MicroMemUsage[position] == false)
         {
             phyAddr_t *dst;
-            dst = (phyAddr_t *)ptrTableAddr[position];
-            while (dst != (phyAddr_t *)ptrTableAddr[position + (uint16_t)1])
+            dst = (phyAddr_t *)PtrTableAddr[position];
+            while (dst != (phyAddr_t *)PtrTableAddr[position + (uint16_t)1])
             {
                 *dst++ = 0;
             }
-            *usage = *usage | (1 << position);
-            return (void *)ptrTableAddr[position];
+            MicroMemUsage[position] = true;
+#if DEBUG_MMU_microAlloc
+            printf("microAlloc::offset:%d\tusage:%ld\tposition:%ld\n", offset, MicroMemUsage[position], position);
+#endif
+            goto f1;
         }
     }
+    goto f2;
+f1:
+    return (void *)PtrTableAddr[position];
+f2:
     return NULL;
 }
 
@@ -228,16 +233,16 @@ bool microDemalloc(void *ptr)
     uint16_t position;
     for (position = 0; position <= 63; position++)
     {
-        if (ptrTableAddr[position] == (phyAddr_t)ptr && ((1 << position) & *poolBaseAddr))
+        if (PtrTableAddr[position] == (phyAddr_t)ptr && MicroMemUsage[position] == true)
         {
-            *poolBaseAddr = (*poolBaseAddr) & ~(1 << position);
+            MicroMemUsage[position] = false;
             return true;
         }
     }
     return false;
 }
 
-void pmm_dealloc(pframe_t *baseppn)
+void dealloc(pframe_t *baseppn)
 {
     pframe_t *currentFrame;
     uint16_t nsize;
@@ -256,7 +261,7 @@ void pmm_dealloc(pframe_t *baseppn)
     BFallocator.bffa_insertAndMerge(baseppn, nsize);
 
 #if DEBUG_MMU_mm_dealloc
-    printf("pmm_dealloc::Frame has been deallocated!ppn:%ld,pa:%08lx,nsize:%d\n", ppnDealloc, convert_ppn2pa(ppnDealloc), nsize);
+    printf("dealloc::Frame has been deallocated!ppn:%ld,pa:%08lx,nsize:%d\n", ppnDealloc, convert_ppn2pa(ppnDealloc), nsize);
 #endif
 }
 
@@ -325,6 +330,9 @@ static pframe_t *deleteAndReinsert(uint16_t nsize)
     return ret;
 }
 
+/* @param baseppn 被回收的物理块的首个物理页pframe_t地址
+ * @param nsize 被回收的物理块的大小（含有几个物理页）
+ */
 static void insertAndMerge(pframe_t *baseppn, uint16_t nsize)
 {
     pframe_t *currentFrame;
@@ -380,6 +388,7 @@ static void insertAndMerge(pframe_t *baseppn, uint16_t nsize)
            convert_pframe2ppn(prevFrameInFreeAList), convert_pframe2ppn(nextFrameInFreeAList));
 #endif
 
+    /* 先与后面的合并，因为可能存在需要同时合并前面和后面的情况。 */
     pframe_t *frameClosestAfter = baseppn + baseppn->nsize;
     if (nextFrameInFreeAList != NULL)
     {
@@ -387,6 +396,7 @@ static void insertAndMerge(pframe_t *baseppn, uint16_t nsize)
         {
             list_del(&(nextFrameInFreeAList->list_linker_inFreeAList));
             list_del(&(nextFrameInFreeAList->list_linker_inFreeList));
+            /* 注意baseppn->nsize在此时发生了变化，变成了与后面合并后的总的nsize大小，要使用回收的大小使用参数nsize。 */
             baseppn->nsize = baseppn->nsize + nextFrameInFreeAList->nsize;
             mergedFrame = baseppn;
         }
@@ -398,7 +408,7 @@ static void insertAndMerge(pframe_t *baseppn, uint16_t nsize)
         {
             list_del(&(baseppn->list_linker_inFreeAList));
             list_del(&(prevFrameInFreeAList->list_linker_inFreeList));
-            prevFrameInFreeAList->nsize = prevFrameInFreeAList->nsize + nsize;
+            prevFrameInFreeAList->nsize = prevFrameInFreeAList->nsize + baseppn->nsize;
             mergedFrame = prevFrameInFreeAList;
         }
     }
@@ -468,7 +478,7 @@ static void removePteFromPageTable(virAddr_t va, pte_t *pte)
         currentFrame->reference = currentFrame->reference - 1;
         if (currentFrame->reference == 0)
         {
-            pmm_dealloc(currentFrame);
+            dealloc(currentFrame);
         }
         *pte = (pte_t)0;
         refreshTLB(va);
@@ -488,7 +498,7 @@ static pte_t *insertPteIntoPageTableRecursively(pframe_t *pageTable, virAddr_t v
     {
         pframe_t *newFrameOfNextLevelPageTable;
         pte_t newPteOfThisLevelPageTable;
-        newFrameOfNextLevelPageTable = pmm_allocOneFrame();
+        newFrameOfNextLevelPageTable = allocOneFrame();
         newFrameOfNextLevelPageTable->reference = newFrameOfNextLevelPageTable->reference + 1;
         if (newFrameOfNextLevelPageTable == NULL)
         {
@@ -529,20 +539,20 @@ static pte_t *insertPteIntoPageTableRecursively(pframe_t *pageTable, virAddr_t v
 
 static void initMicroPhysicalMemoryPool(void)
 {
-    microPhysicalMemoryPoolBase = pmm_alloc(2); /* Total size 8192 byte. */
-    if (microPhysicalMemoryPoolBase == NULL)
+    MicroPhysicalMemoryPoolBase = alloc(2); /* Total size 8192 byte. */
+    if (MicroPhysicalMemoryPoolBase == NULL)
     {
-        printf("MicroPhysicalMemoryPool init failed!\n");
+        panic("MicroPhysicalMemoryPool init failed!\n");
     }
     else
     {
-        poolBaseAddr = (phyAddr_t *)convert_pframe2pa(microPhysicalMemoryPoolBase);
+        phyAddr_t *poolBaseAddr;
+        poolBaseAddr = (phyAddr_t *)convert_pframe2pa(MicroPhysicalMemoryPoolBase);
         *poolBaseAddr = 0x0;
         /* When makes a pointer +1,++,-- and etc , that pointer will moves sizeof(T) bytes. */
-        /* So "ptrTableAddr" is offset to "poolBaseAddr" 8 bytes(64 bits). */
-        /* And this 64 bits will be used as usage table (mirco memories are total 64 blocks). */
-        ptrTableAddr = poolBaseAddr + 1;
-        /* "ptrTableAddr" restores each micro memory's begin address,so "ptrTableAddr" is a array of phyAddr_t[64]. */
+        /* So "PtrTableAddr" is offset to "poolBaseAddr" 8 bytes(64 bits). */
+        PtrTableAddr = poolBaseAddr + 1;
+        /* "PtrTableAddr" restores each micro memory's begin address,so "PtrTableAddr" is a array of phyAddr_t[64]. */
         /* "poolBeginAddr" is the begin address of these micro memories. */
         phyAddr_t *poolBeginAddr = poolBaseAddr + 128;
 #if DEBUG_MMU_initMicroPhysicalMemoryPool
@@ -551,34 +561,46 @@ static void initMicroPhysicalMemoryPool(void)
         uint16_t cursor;
         for (cursor = 0; cursor <= 31; cursor++)
         {
-            ptrTableAddr[cursor] = (phyAddr_t)poolBeginAddr + cursor * 32;
+            PtrTableAddr[cursor] = (phyAddr_t)poolBeginAddr + cursor * 32;
 #if DEBUG_MMU_initMicroPhysicalMemoryPool
-            printf("initMicroPhysicalMemoryPool::ptrTableAddr[%d]:%08lx\n", cursor, ptrTableAddr[cursor]);
+            printf("initMicroPhysicalMemoryPool::PtrTableAddr[%d]:%08lx\n", cursor, PtrTableAddr[cursor]);
 #endif
         }
         for (; cursor <= 47; cursor++)
         {
-            ptrTableAddr[cursor] = ptrTableAddr[31] + cursor * 64;
+            PtrTableAddr[cursor] = PtrTableAddr[31] + cursor * 64;
+#if DEBUG_MMU_initMicroPhysicalMemoryPool
+            printf("initMicroPhysicalMemoryPool::PtrTableAddr[%d]:%08lx\n", cursor, PtrTableAddr[cursor]);
+#endif
         }
         for (; cursor <= 55; cursor++)
         {
-            ptrTableAddr[cursor] = ptrTableAddr[47] + cursor * 128;
+            PtrTableAddr[cursor] = PtrTableAddr[47] + cursor * 128;
+#if DEBUG_MMU_initMicroPhysicalMemoryPool
+            printf("initMicroPhysicalMemoryPool::PtrTableAddr[%d]:%08lx\n", cursor, PtrTableAddr[cursor]);
+#endif
         }
         for (; cursor <= 59; cursor++)
         {
-            ptrTableAddr[cursor] = ptrTableAddr[55] + cursor * 256;
+            PtrTableAddr[cursor] = PtrTableAddr[55] + cursor * 256;
+#if DEBUG_MMU_initMicroPhysicalMemoryPool
+            printf("initMicroPhysicalMemoryPool::PtrTableAddr[%d]:%08lx\n", cursor, PtrTableAddr[cursor]);
+#endif
         }
         for (; cursor <= 61; cursor++)
         {
-            ptrTableAddr[cursor] = ptrTableAddr[59] + cursor * 512;
+            PtrTableAddr[cursor] = PtrTableAddr[59] + cursor * 512;
+#if DEBUG_MMU_initMicroPhysicalMemoryPool
+            printf("initMicroPhysicalMemoryPool::PtrTableAddr[%d]:%08lx\n", cursor, PtrTableAddr[cursor]);
+#endif
         }
         for (; cursor <= 63; cursor++)
         {
-            ptrTableAddr[cursor] = ptrTableAddr[61] + cursor * 1024;
-        }
+            PtrTableAddr[cursor] = PtrTableAddr[61] + cursor * 1024;
 #if DEBUG_MMU_initMicroPhysicalMemoryPool
-        printf("initMicroPhysicalMemoryPool::ptrTableAddr[63]:%08lx\n", ptrTableAddr[63]);
+            printf("initMicroPhysicalMemoryPool::PtrTableAddr[%d]:%08lx\n", cursor, PtrTableAddr[cursor]);
 #endif
+        }
         printf("microPhysicalMemoryPool inited!\n");
     }
 }

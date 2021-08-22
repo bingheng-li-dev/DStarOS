@@ -7,4 +7,6 @@
 void *kmalloc(uint64_t size);
 void kfree(void *ptr);
 
+extern void physicalMemoryManagementInit(void);
+
 #endif

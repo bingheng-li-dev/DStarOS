@@ -1,33 +1,42 @@
 #include "pmm.h"
 #include "kmalloc.h"
+#include "cpu.h"
 
-extern pframe_t *microPhysicalMemoryPoolBase;
+extern pframe_t *MicroPhysicalMemoryPoolBase;
+extern osslock_t PmmLock;
 
 void *kmalloc(uint64_t size)
 {
-    void *ret;
-    if (microPhysicalMemoryPoolBase != NULL && size <= 1024)
+    void *ret = NULL, *tmp = NULL;
+    spinlockAcquire(&PmmLock);
+    if (MicroPhysicalMemoryPoolBase != NULL && size <= 1024)
     {
-        ret = microAlloc(size);
-        if (ret != NULL)
+        tmp = microAlloc(size);
+        if (tmp != NULL)
         {
-            return ret;
+            ret = tmp;
         }
     }
-    /* "microPhysicalMemoryPoolBase" is null or "size" is more than 1024 or no remaining micro mem in pool. */
-    ret = pmm_alloc(convert_pa2ppn_cil(size)); /* Here "convert" is used to calculate amount of pframes. */
-    return (void *)convert_pframe2pa(ret);
+    else
+    {
+        /* "MicroPhysicalMemoryPoolBase" is null or "size" is more than 1024 or no remaining micro mem in pool. */
+        tmp = alloc(convert_pa2ppn_cil(size)); /* Here "convert" is used to calculate amount of pframes. */
+        ret = (void *)convert_pframe2pa(tmp);
+    }
+    spinlockRelease(&PmmLock);
+    return ret;
 }
 
 void kfree(void *ptr)
 {
+    spinlockAcquire(&PmmLock);
     if (ptr == NULL)
     {
         goto f1;
     }
-    if (microPhysicalMemoryPoolBase != NULL)
+    if (MicroPhysicalMemoryPoolBase != NULL)
     {
-        if (convert_pframe2pa(microPhysicalMemoryPoolBase) < (phyAddr_t)ptr && (phyAddr_t)ptr < convert_pframe2pa(microPhysicalMemoryPoolBase) + 2 * PGSIZE)
+        if (convert_pframe2pa(MicroPhysicalMemoryPoolBase) < (phyAddr_t)ptr && (phyAddr_t)ptr < convert_pframe2pa(MicroPhysicalMemoryPoolBase) + 2 * PGSIZE)
         {
             if (microDemalloc(ptr))
             {
@@ -38,8 +47,8 @@ void kfree(void *ptr)
     /* Maybe memories in pool have ran out. */
     pframe_t *base;
     base = convert_pa2pframe_flr((phyAddr_t)ptr); /* Here "convert" is used to calculate amount of the pframe. */
-    pmm_dealloc(base);
-
+    dealloc(base);
 f1:
+    spinlockRelease(&PmmLock);
     return;
 }

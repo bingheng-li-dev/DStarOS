@@ -4,7 +4,7 @@ qemu-system-riscv64 \
     -bios ./bootloader/RustSBI/sbi-qemu \
     -smp 2  \
     -kernel build/kernel.elf    \
-    -nographic -s
+    -nographic -s 
 
 # qemu-system-riscv64 \
 #     -M  virt \

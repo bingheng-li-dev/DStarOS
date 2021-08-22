@@ -17,7 +17,7 @@
 #include "dmac.h"
 #endif
 
-#if DEBUG_INIT_MAIN
+#if DEBUG_INIT_main
 extern int main(int argc, char **args);
 #endif
 
@@ -41,16 +41,18 @@ void osInit(uint64_t hartid)
         consoleInit();
         const char *startmsg = "DStarOS is starting...";
         printf("%s\n", startmsg);
+        physicalMemoryManagementInit();
         trapInit();
         tickInit();
-
-        // plicInit();
 
 #ifndef QEMU
         fpioa_pin_init();
         dmac_init();
 #endif
-        printf("hart %ld init done\n", getCoreId());
+        printf("core %ld init done\n", getCoreId());
+#if DEBUG_INIT_main_core0
+        main(0, (void *)0);
+#endif
         core2Enable();
     }
     else
@@ -58,20 +60,20 @@ void osInit(uint64_t hartid)
         mb();
         trapInit();
         tickInit();
-        // plicInit();
-
-        printf("hart %ld init done\n", getCoreId());
+        printf("core %ld init done\n", getCoreId());
+#if DEBUG_INIT_main_core1
+        main(0, (void *)0);
+#endif
     }
 
-    // pmm_init();
+#if DEBUG_INIT_main_bothcore
+    main(0, (void *)0);
+#endif
+    // plicInit();
     // fs_init();
     // vmm_init();
     // proc_init();
     // idle();
-
-#if DEBUG_INIT_MAIN
-    main(0, (void *)0);
-#endif
 
 #if DEBUG_INIT_os_init
     while (1)

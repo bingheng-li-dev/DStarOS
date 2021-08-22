@@ -180,7 +180,7 @@ void kernelTrapHandler(intstkf_t *sp)
             break;
         }
     panic1:
-        panic("\nNot pageFaultHander or Ecall Exception!!");
+        panic("Not pageFaultHander or Ecall Exception!!");
     }
 }
 

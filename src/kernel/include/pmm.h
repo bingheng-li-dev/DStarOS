@@ -48,13 +48,13 @@ extern pframe_t *PageListBegin;
 extern fslist_t FreeList;
 extern fslist_t FreeAList;
 
-void pmm_init(void);
-void *pmm_alloc(uint16_t nsize);
-void *pmm_allocOneFrame(void);
-void pmm_dealloc(pframe_t *baseppn);
-pte_t *pmm_pteGet(pframe_t *pageTable, virAddr_t va);
-void pmm_pteRemove(virAddr_t va, pte_t *pte);
-pte_t *pmm_pteInsert(pframe_t *pageTable, virAddr_t va, pteflg_t pteFlag);
+void physicalMemoryManagementInit(void);
+void *alloc(uint16_t nsize);
+void *allocOneFrame(void);
+void dealloc(pframe_t *baseppn);
+pte_t *getPTE(pframe_t *pageTable, virAddr_t va);
+void removePTE(virAddr_t va, pte_t *pte);
+pte_t *insertPTE(pframe_t *pageTable, virAddr_t va, pteflg_t pteFlag);
 void *microAlloc(uint64_t size);
 /* Maybe memories in pool have ran out.So return true if target memory has been dealloced in pool. */
 bool microDemalloc(void *ptr);

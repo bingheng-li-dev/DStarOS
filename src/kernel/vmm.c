@@ -174,7 +174,7 @@ uint16_t vmm_swapOut(mm_t *mm, pframe_t **framePtr, uint16_t n)
     //         break;
     //     }
     //     va = page->va;
-    //     pte_t *ptep = pmm_pteGet(mm->pageTable, va);
+    //     pte_t *ptep = getPTE(mm->pageTable, va);
     //     if (swapfs_write((page->va / PGSIZE + 1) << 8, page) != 0)
     //     {
     //         printf("SWAP: failed to save\n");
@@ -195,7 +195,7 @@ uint16_t vmm_swapOut(mm_t *mm, pframe_t **framePtr, uint16_t n)
 
 static void kernelPa2Va_IdentityMapping(void)
 {
-    KernelLevel3PageTableFrame = pmm_allocOneFrame(); /* Used for level3 page table. */
+    KernelLevel3PageTableFrame = allocOneFrame(); /* Used for level3 page table. */
     KernelLevel3PageTableFrame->reference = KernelLevel3PageTableFrame->reference + 1;
 
 #if DEBUG_MMU_kernelPa2Va_IdentityMapping
@@ -249,7 +249,7 @@ static void kernelPa2Va_IdentityMapping(void)
 
     for (ppnCursor = ppnBase; ppnCursor <= ppn_etext; ppnCursor++)
     {
-        cursorPte = pmm_pteInsert(kernelBasePageTable, convert_ppn2pa(ppnCursor), kernelPageFlag_text);
+        cursorPte = insertPTE(kernelBasePageTable, convert_ppn2pa(ppnCursor), kernelPageFlag_text);
         cursorFrame = convert_pte2pframe(*cursorPte);
         pteChangeppn(cursorPte, ppnCursor);
 #if DEBUG_MMU_kernelPa2Va_IdentityMapping
@@ -260,7 +260,7 @@ static void kernelPa2Va_IdentityMapping(void)
 
     for (; ppnCursor <= ppn_erodata; ppnCursor++)
     {
-        cursorPte = pmm_pteInsert(kernelBasePageTable, convert_ppn2pa(ppnCursor), kernelPageFlag_rodata);
+        cursorPte = insertPTE(kernelBasePageTable, convert_ppn2pa(ppnCursor), kernelPageFlag_rodata);
         cursorFrame = convert_pte2pframe(*cursorPte);
         pteChangeppn(cursorPte, ppnCursor);
 #if DEBUG_MMU_kernelPa2Va_IdentityMapping
@@ -271,7 +271,7 @@ static void kernelPa2Va_IdentityMapping(void)
 
     for (; ppnCursor <= ppn_edata; ppnCursor++)
     {
-        cursorPte = pmm_pteInsert(kernelBasePageTable, convert_ppn2pa(ppnCursor), kernelPageFlag_data);
+        cursorPte = insertPTE(kernelBasePageTable, convert_ppn2pa(ppnCursor), kernelPageFlag_data);
         cursorFrame = convert_pte2pframe(*cursorPte);
         pteChangeppn(cursorPte, ppnCursor);
 #if DEBUG_MMU_kernelPa2Va_IdentityMapping
@@ -282,7 +282,7 @@ static void kernelPa2Va_IdentityMapping(void)
 
     for (; ppnCursor <= ppn_ebss; ppnCursor++)
     {
-        cursorPte = pmm_pteInsert(kernelBasePageTable, convert_ppn2pa(ppnCursor), kernelPageFlag_bss);
+        cursorPte = insertPTE(kernelBasePageTable, convert_ppn2pa(ppnCursor), kernelPageFlag_bss);
         cursorFrame = convert_pte2pframe(*cursorPte);
         pteChangeppn(cursorPte, ppnCursor);
 #if DEBUG_MMU_kernelPa2Va_IdentityMapping
@@ -294,7 +294,7 @@ static void kernelPa2Va_IdentityMapping(void)
     /* All remaining physical memories should be identically mapped to virtual address in order kernel directly accesses physical memories. */
     for (; ppnCursor <= ppnEnd; ppnCursor++)
     {
-        cursorPte = pmm_pteInsert(kernelBasePageTable, convert_ppn2pa(ppnCursor), kernelPageFlag_data);
+        cursorPte = insertPTE(kernelBasePageTable, convert_ppn2pa(ppnCursor), kernelPageFlag_data);
         cursorFrame = convert_pte2pframe(*cursorPte);
         pteChangeppn(cursorPte, ppnCursor);
 #if DEBUG_MMU_kernelPa2Va_IdentityMapping
@@ -393,11 +393,11 @@ static uint16_t swap_out_victim(mm_t *mm, pframe_t **currentFramePtr)
 
 static void swap_in(mm_t *mm, virAddr_t va, pframe_t **resultFramePtr)
 {
-    // pframe_t *ret = pmm_allocOneFrame();
+    // pframe_t *ret = allocOneFrame();
     // if (ret != (pframe_t *)0)
     // {
     //     int16_t rt;
-    //     rt = swapfs_read(*pmm_pteGet(mm->pageTable, va), ret);
+    //     rt = swapfs_read(*getPTE(mm->pageTable, va), ret);
     //     if (rt == 0)
     //     {
     //         *resultFramePtr = ret;

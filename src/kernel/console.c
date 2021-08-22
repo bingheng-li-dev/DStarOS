@@ -5,7 +5,7 @@
 
 #define UNUSED(x) (void)(x)
 
-osslock_t consoleLock;
+osslock_t ConsoleLock;
 volatile bool panicked = false;
 
 static void stdout_putc(void *unused, char ch)
@@ -15,7 +15,7 @@ static void stdout_putc(void *unused, char ch)
 
 void consoleInit(void)
 {
-    spinlockInit(&consoleLock);
+    spinlockInit(&ConsoleLock);
     init_printf(0, stdout_putc);
 }
 
@@ -23,18 +23,18 @@ void consoleInit(void)
 
 void printf(char *fmt, ...)
 {
-    spinlockAcquire(&consoleLock);
+    spinlockAcquire(&ConsoleLock);
     tfp_printf(fmt);
-    spinlockRelease(&consoleLock);
+    spinlockRelease(&ConsoleLock);
 }
 
 void panic(char *s)
 {
-    printf("panic: ");
+    printf("\npanic: ");
     printf(s);
     printf("\n");
     /* freeze uart output from other CPUs. */
-    panicked = true; 
+    panicked = true;
     while (true)
         ;
 }
