@@ -32,6 +32,7 @@ void spinlockInit(osslock_t *lock)
     ((spinlock_t *)lock)->lock = 0;
 }
 
+/* 自旋锁即申请即用，这里不做额外的死锁预防和处理。 */
 void spinlockAcquire(osslock_t *lock)
 {
     spinlock_lock((spinlock_t *)lock);

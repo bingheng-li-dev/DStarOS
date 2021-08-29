@@ -22,7 +22,7 @@ static void tickSetNextInt(uint64_t stime)
 {
     sbi_set_timer(readtime() + stime);
 #if DEBUG_TICK
-    // printf("++ setup timer interrupts\n");
+    printf("++ setup timer interrupts\n");
 #endif
 }
 
@@ -39,11 +39,10 @@ void tickIntHandler(void)
 {
     spinlockAcquire(&ticksLock);
     getCurrentCpu()->tick += 1;
-    // printf("core %ld : %ld ticks\n", getCoreId(), getCurrentCpu()->tick);
 #if DEBUG_TICK
     if (getCurrentCpu()->tick % 100 == 0)
     {
-        // printf("core %ld : %ld ticks\n", getCurrentCpu()->tick);
+        printf("core %ld : %ld ticks\n", getCurrentCpu()->tick);
     }
 #endif
     //There seems sth to do on proc...
@@ -66,4 +65,16 @@ void setOSTick(uint64_t tick)
     //interrupt_disable
     osTick = tick;
     //interrupt_enable
+}
+
+void delay(uint64_t ticks)
+{
+    uint64_t tick_start = getOSTick();
+    uint64_t tick;
+    do
+    {
+        tick = getOSTick();
+        if (tick - tick_start == ticks)
+            return;
+    } while (1);
 }
