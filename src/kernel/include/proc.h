@@ -30,9 +30,9 @@ typedef struct pidMap pids_t;
 
 enum statusOfProcess
 {
-    RUNNING = 0,
-    SLEEPING,
-    READY,
+    RUNNING = 0,     /* READY和RUNNING统称为RUNNING状态。 */
+    UNINTERRUPTIBLE, /*  处于等待队伍中，等待资源有效时唤醒且不可以被中断唤醒。 */
+    INTERRUPTIBLE,   /*  处于等待队伍中，等待资源有效时唤醒且可以被中断唤醒。 */
     ZOMBIE,
     UNINIT,
 };
@@ -61,8 +61,8 @@ struct controlBlockOfProcess
     char proc_pname[PNAME_MAX_LENGTH + 1];
     sta_t proc_state;
     ctx_t proc_context;
-    phyAddr_t pageTableBase;
-    phyAddr_t kernel_stack;
+    uintptr_t pageTableBase;
+    uintptr_t kernel_stack;
     pcb_t *proc_parent;
     intstkf_t *proc_int_stack;
     mm_t *proc_mm;
@@ -87,5 +87,6 @@ int16_t createKernelThreadByFork(void *func(void *), void *args, uint32_t clone_
 void proc_init(void);
 /* Kernel's idle process which pid is 0. */
 void idle(void) __attribute__((noreturn));
+void wakeup(pcb_t* proc);
 
 #endif

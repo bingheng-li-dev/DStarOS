@@ -8,7 +8,7 @@
 #include "vmm.h"
 #include "proc.h"
 #include "fs.h"
-#include "cpu.h"
+#include "sync.h"
 #include "plic.h"
 
 #ifndef QEMU

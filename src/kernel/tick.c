@@ -1,6 +1,6 @@
 #include "tick.h"
 #include "console.h"
-#include "cpu.h"
+#include "sync.h"
 #include "sbi.h"
 #include "debug.h"
 #include "encoding.h"

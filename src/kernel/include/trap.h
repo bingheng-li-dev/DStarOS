@@ -2,27 +2,28 @@
 #define _TRAP_H
 
 #include <stdint.h>
+#include <stdbool.h>
 
 #include "encoding.h"
 #include "debug.h"
 
 /* Machine interrupt mask for 64 bit system, 0x8000 0000 0000 0000 */
-#define CAUSE_MACHINE_IRQ_MASK            (0x1ULL << 63)
+#define CAUSE_MACHINE_IRQ_MASK (0x1ULL << 63)
 
 /* Machine interrupt reason mask for 64 bit system, 0x7FFF FFFF FFFF FFFF */
-#define CAUSE_MACHINE_IRQ_REASON_MASK     (CAUSE_MACHINE_IRQ_MASK - 1)
+#define CAUSE_MACHINE_IRQ_REASON_MASK (CAUSE_MACHINE_IRQ_MASK - 1)
 
 /* Hypervisor interrupt mask for 64 bit system, 0x8000 0000 0000 0000 */
-#define CAUSE_HYPERVISOR_IRQ_MASK         (0x1ULL << 63)
+#define CAUSE_HYPERVISOR_IRQ_MASK (0x1ULL << 63)
 
 /* Hypervisor interrupt reason mask for 64 bit system, 0x7FFF FFFF FFFF FFFF */
-#define CAUSE_HYPERVISOR_IRQ_REASON_MASK  (CAUSE_HYPERVISOR_IRQ_MASK - 1)
+#define CAUSE_HYPERVISOR_IRQ_REASON_MASK (CAUSE_HYPERVISOR_IRQ_MASK - 1)
 
 /* Supervisor interrupt mask for 64 bit system, 0x8000 0000 0000 0000 */
-#define CAUSE_SUPERVISOR_IRQ_MASK         (0x1ULL << 63)
+#define CAUSE_SUPERVISOR_IRQ_MASK (0x1ULL << 63)
 
 /* Supervisor interrupt reason mask for 64 bit system, 0x7FFF FFFF FFFF FFFF */
-#define CAUSE_SUPERVISOR_IRQ_REASON_MASK  (CAUSE_SUPERVISOR_IRQ_MASK - 1)
+#define CAUSE_SUPERVISOR_IRQ_REASON_MASK (CAUSE_SUPERVISOR_IRQ_MASK - 1)
 
 #define CAUSE_FAULT_INSTRUCTION_PAGE 0xc
 #define CAUSE_FAULT_LOAD_PAGE 0xd
@@ -68,16 +69,46 @@ struct int_stackframe
 };
 typedef struct int_stackframe intstkf_t;
 
+/* 保存当前中断状态并关闭中断；do{}while(0)用于保证外部操作与宏之间不会相互影响。必须与"localIntrRestore"成对使用。 */
+#define __localIntrSave(x) \
+    do                     \
+    {                      \
+        x = __intrSave();  \
+    } while (0)
+
+/* 还原上一次的中断状态；必须与"localIntrSave"成对使用。 */
+#define __localIntrRestore(x) __intrRestore(x)
+
 void trapInit(void);
-void irq_disable(void);
-void irq_enable(void);
+/* 关闭当前CPU的中断。 */
+void localIntrDisable(void);
+/* 打开当前CPU的中断。 */
+void localIntrEnable(void);
 void kernelTrapHandler(intstkf_t *sp);
 void print_intstk(intstkf_t *sp);
-
 #if DEBUG_INTSTACK
 void print_intstk(intstkf_t *sp);
 #endif
 
 extern void tickIntHandler(void);
+
+/* 返回中断的打开/关闭状态；并且关闭中断（如果处于打开状态）。 */
+static inline bool __intrSave(void)
+{
+    if (read_csr(sstatus) & SSTATUS_SIE)
+    {
+        localIntrDisable();
+        return true;
+    }
+    return false;
+}
+
+static inline void __intrRestore(bool flag)
+{
+    if (flag)
+    {
+        localIntrEnable();
+    }
+}
 
 #endif

@@ -3,7 +3,7 @@
 #include "plic.h"
 #include "console.h"
 #include "periph_layout.h"
-#include "cpu.h"
+#include "sync.h"
 
 /* the riscv Platform Level Interrupt Controller (PLIC). */
 

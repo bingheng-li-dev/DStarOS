@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-#include "cpu.h"
+#include "sync.h"
 
 extern osslock_t ticksLock;
 

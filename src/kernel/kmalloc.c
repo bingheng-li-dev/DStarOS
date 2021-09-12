@@ -1,6 +1,6 @@
 #include "pmm.h"
 #include "kmalloc.h"
-#include "cpu.h"
+#include "sync.h"
 
 extern pframe_t *MicroPhysicalMemoryPoolBase;
 extern osslock_t PmmLock;

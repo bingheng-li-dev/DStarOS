@@ -19,7 +19,7 @@ secondary_cpu_entry:
     call osInit
 loop2:   j     loop2                    # enter the infinite loop
 
-    .data
+    .data                               # 注意不是.section .data，后者会将此关键词以下的代码放到.data段中！
     .globl core2Enabled
     .align 3
 core2Enabled:

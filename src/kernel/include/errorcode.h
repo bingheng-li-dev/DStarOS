@@ -5,5 +5,6 @@
 #define ENO1_NOMORE_MEM -1
 #define ENO2_ALLOCPROC_FAILED -2
 #define ENO3_NOFREE_PID -3
+#define ENO4_BUSY -4 /* Device/File is Busy */
 
 #endif

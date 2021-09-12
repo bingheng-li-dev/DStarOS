@@ -3,7 +3,7 @@
 #include "kmalloc.h"
 #include "memtype.h"
 #include "tick.h"
-#include "cpu.h"
+#include "sync.h"
 
 osslock_t lock1;
 osslock_t lock2;

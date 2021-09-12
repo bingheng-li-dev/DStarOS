@@ -152,6 +152,12 @@ void proc_init(void)
     TaskCount = TaskCount + 1;
 }
 
+void wakeup(pcb_t *proc)
+{
+    //未完成的：这里没有重新挂到就绪队列中。
+    proc->proc_state = RUNNING;
+}
+
 static pcb_t *allocNewProc(void)
 {
     pcb_t *pcb = kmalloc(sizeof(pcb_t));
@@ -218,14 +224,14 @@ static void copyProcStk(pcb_t *pcb, uintptr_t stack, intstkf_t *regs)
 
 static pcb_t *createFirstProcIdle(void)
 {
-    extern uintptr_t boot_stack_top1;       //warning:stack top unsolved
+    extern uintptr_t boot_stack_top1; //warning:stack top unsolved
 
     pcb_t *idle = allocNewProc();
     if (idle != NULL)
     {
         idle->proc_pid = 0;
         idle->kernel_stack = (phyAddr_t)boot_stack_top1;
-        idle->proc_state = READY;
+        idle->proc_state = RUNNING;
         idle->need_resched = true;
         const char *name = "idle";
         setProcName(idle, name);

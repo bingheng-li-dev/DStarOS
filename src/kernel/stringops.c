@@ -42,3 +42,37 @@ void *memset(void *s, int c, size_t n)
         *su = uc;
     return s;
 }
+
+/* *
+ * memmove - copies the values of @n bytes from the location pointed by @src to
+ * the memory area pointed by @dst. @src and @dst are allowed to overlap.
+ * @dst     pointer to the destination array where the content is to be copied
+ * @src     pointer to the source of data to by copied
+ * @n:      number of bytes to copy
+ *
+ * The memmove() function returns @dst.
+ * 
+ * 比memcpy更安全：memmove在copy两个有重叠区域的内存时可以保证copy的正确
+ * 
+ * */
+void *memmove(void *dst, const void *src, size_t n)
+{
+    const char *s = src;
+    char *d = dst;
+    if (s < d && s + n > d)
+    {
+        s += n, d += n;
+        while (n-- > 0)
+        {
+            *--d = *--s;
+        }
+    }
+    else
+    {
+        while (n-- > 0)
+        {
+            *d++ = *s++;
+        }
+    }
+    return dst;
+}

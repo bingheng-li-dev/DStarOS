@@ -2,7 +2,7 @@
 #include "vmm.h"
 #include "stringops.h"
 #include "console.h"
-#include "cpu.h"
+#include "sync.h"
 
 //@TODO:recyclePageTableRecursively(,cnt,...);
 

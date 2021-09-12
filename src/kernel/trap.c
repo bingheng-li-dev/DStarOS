@@ -1,7 +1,7 @@
 #include "trap.h"
 #include "memtype.h"
 #include "console.h"
-#include "cpu.h"
+#include "sync.h"
 #include "plic.h"
 #include "sbi.h"
 
@@ -52,16 +52,18 @@ void trapInit(void)
     printf("core %ld trap inited!\n", getCoreId());
 }
 
-void irq_disable(void)
+void localIntrDisable(void)
 {
+    /* sstatus寄存器的sie位是中断全局使能。 */
     clear_csr(sstatus, SSTATUS_SIE);
 }
 
-void irq_enable(void)
+void localIntrEnable(void)
 {
+    /* sstatus寄存器的sie位是中断全局使能。 */
     set_csr(sstatus, SSTATUS_SIE);
 #if DEBUG_LOCK_irq_enable
-    printf("irq_enable::irq enabled!!\n");
+    printf("localIntrEnable::irq enabled!!\n");
 #endif
 }
 

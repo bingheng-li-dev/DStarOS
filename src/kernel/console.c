@@ -1,5 +1,5 @@
 #include "console.h"
-#include "cpu.h"
+#include "sync.h"
 #include "tinyprintf.h"
 #include "sbi.h"
 
@@ -28,10 +28,12 @@ void printf(char *fmt, ...)
     spinlockRelease(&ConsoleLock);
 }
 
-void panic(char *s)
+void panic(char *s, ...)
 {
+    char msg[50];
     printf("\npanic: ");
-    printf(s);
+    sprintf(msg, s);
+    printf("%s", msg);
     printf("\n");
     /* freeze uart output from other CPUs. */
     panicked = true;

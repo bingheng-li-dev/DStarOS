@@ -1,7 +1,7 @@
 #include "sbi.h"
 #include "console.h"
 #include "kmalloc.h"
-#include "cpu.h"
+#include "sync.h"
 #include "pmm.h"
 
 int main(int argc, char **args)

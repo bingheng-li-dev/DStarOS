@@ -4,9 +4,7 @@
 
 void sched(void)
 {
-    irq_disable();
-    
-    irq_enable();
+
 }
 
 void schedStart(void)
