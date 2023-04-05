@@ -67,6 +67,7 @@ struct controlBlockOfProcess
     intstkf_t *proc_int_stack;
     mm_t *proc_mm;
     volatile bool need_resched;
+    // pfs_t *filesp;
     struct list_head proc_list_linker;
     struct rb_node proc_rbtree_node;
 };
@@ -87,6 +88,7 @@ int16_t createKernelThreadByFork(void *func(void *), void *args, uint32_t clone_
 void proc_init(void);
 /* Kernel's idle process which pid is 0. */
 void idle(void) __attribute__((noreturn));
-void wakeup(pcb_t* proc);
+void sleep(void);
+void wakeup(pcb_t *proc);
 
 #endif

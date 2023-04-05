@@ -158,6 +158,14 @@ void wakeup(pcb_t *proc)
     proc->proc_state = RUNNING;
 }
 
+void sleep(void)
+{
+    //未完成的：这里没有挂到睡眠队列中。
+    pcb_t *proc = getCurrentProc();
+    proc->proc_state = INTERRUPTIBLE;
+    sched();
+}
+
 static pcb_t *allocNewProc(void)
 {
     pcb_t *pcb = kmalloc(sizeof(pcb_t));

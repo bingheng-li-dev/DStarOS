@@ -6,7 +6,6 @@
 #include <stdbool.h>
 
 #include "proc.h"
-#include "sync.h"
 
 /* 1 <= CORE_NUMBER. */
 #define CORE_NUMBER 2

@@ -93,7 +93,7 @@ void semUp(ossem_t *sem)
     if (!list_empty(&(sem->wait_list)))
     {
         pcb_t *proc;
-        struct list_head *wait_entry = &(sem->wait_list).next;
+        struct list_head *wait_entry = (sem->wait_list).next;
         proc = getContainer(wait_entry, pcb_t, proc_list_linker);
         list_del(&(proc->proc_list_linker));
         wakeup(proc);

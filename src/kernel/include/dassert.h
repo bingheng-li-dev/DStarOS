@@ -3,7 +3,7 @@
 
 #include "console.h"
 
-#  define dassert(expr)							\
+#define dassert(expr)							\
   ((void) sizeof ((expr) ? 1 : 0), __extension__ ({			\
       if (expr)								\
         ; /* empty */							\

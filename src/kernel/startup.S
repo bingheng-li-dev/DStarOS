@@ -25,6 +25,7 @@ loop2:   j     loop2                    # enter the infinite loop
 core2Enabled:
     .dword 0
 
+    .section .text.entry
     .globl getCoreId_asm
     .align 2
 getCoreId_asm:
