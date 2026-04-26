@@ -19,23 +19,27 @@ void consoleInit(void)
     init_printf(0, stdout_putc);
 }
 
-//
-
 void printf(char *fmt, ...)
 {
+    va_list args;
+    va_start(args, fmt);
     spinlockAcquire(&ConsoleLock);
-    tfp_printf(fmt);
+    tfp_format(NULL, stdout_putc, fmt, args);
     spinlockRelease(&ConsoleLock);
+    va_end(args);
 }
 
 void panic(char *s, ...)
 {
-    char msg[50];
-    printf("\npanic: ");
-    sprintf(msg, s);
-    printf("%s", msg);
-    printf("\n");
-    /* freeze uart output from other CPUs. */
+    va_list args;
+    va_start(args, s);
+    /* bypass ConsoleLock: panic may be called from within a locked context */
+    const char *prefix = "\npanic: ";
+    for (const char *p = prefix; *p; p++)
+        sbi_console_putchar((int)*p);
+    tfp_format(NULL, stdout_putc, s, args);
+    sbi_console_putchar('\n');
+    va_end(args);
     panicked = true;
     while (true)
         ;

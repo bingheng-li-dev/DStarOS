@@ -34,7 +34,9 @@ void spinlockInit(osslock_t *lock)
 }
 
 /* 自旋锁即申请即用，这里不做额外的死锁预防和处理。 */
-
+// trylock?
+/* corelock_lock：获取核间锁，核之间互斥的锁，同核内该锁会嵌套，
+只有异核之间会阻塞。不建议在中断使用该函数，中断中可以使用corelock_trylock。*/
 /* 申请spinlock并且保存irq状况。 */
 void spinlockAcquire(osslock_t *lock)
 {

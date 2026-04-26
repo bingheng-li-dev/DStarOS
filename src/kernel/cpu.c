@@ -1,6 +1,7 @@
 #include "cpu.h"
 #include "atomic.h"
 #include "sbi.h"
+#include "sync.h"
 
 extern volatile uint64_t core2Enabled;
 

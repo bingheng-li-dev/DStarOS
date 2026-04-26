@@ -11,7 +11,7 @@ int strncmp(const char *p, const char *q, uint32_t n);
 char *strchr(const char *s, char c);
 void snstr(char *dst, uint16_t const *src, int len);
 int wcsncmp(uint16_t const *s1, uint16_t const *s2, int len);
-int strlen(const char *s);
+size_t strlen(const char *s);
 void wnstr(uint16_t *dst, char const *src, int len);
 char *strncpy(char *s, const char *t, int n);
 

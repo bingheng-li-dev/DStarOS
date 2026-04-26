@@ -120,9 +120,9 @@ int wcsncmp(uint16_t const *s1, uint16_t const *s2, int len)
     return ret;
 }
 
-int strlen(const char *s)
+size_t strlen(const char *s)
 {
-    int n;
+    size_t n;
 
     for (n = 0; s[n]; n++)
         ;

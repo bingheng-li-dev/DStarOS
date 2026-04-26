@@ -559,6 +559,7 @@ static void initMicroPhysicalMemoryPool(void)
         printf("initMicroPhysicalMemoryPool::poolBaseAddr:%08lx poolBeginAddr:%08lx\n", (phyAddr_t)poolBaseAddr, (phyAddr_t)poolBeginAddr);
 #endif
         uint16_t cursor;
+        /* 32-byte slots: cursor 0..31 */
         for (cursor = 0; cursor <= 31; cursor++)
         {
             PtrTableAddr[cursor] = (phyAddr_t)poolBeginAddr + cursor * 32;
@@ -566,41 +567,48 @@ static void initMicroPhysicalMemoryPool(void)
             printf("initMicroPhysicalMemoryPool::PtrTableAddr[%d]:%08lx\n", cursor, PtrTableAddr[cursor]);
 #endif
         }
+        /* 64-byte slots: cursor 32..47; relative index = cursor - 32 */
         for (; cursor <= 47; cursor++)
         {
-            PtrTableAddr[cursor] = PtrTableAddr[31] + cursor * 64;
+            PtrTableAddr[cursor] = PtrTableAddr[31] + 32 + (cursor - 32) * 64;
 #if DEBUG_MMU_initMicroPhysicalMemoryPool
             printf("initMicroPhysicalMemoryPool::PtrTableAddr[%d]:%08lx\n", cursor, PtrTableAddr[cursor]);
 #endif
         }
+        /* 128-byte slots: cursor 48..55; relative index = cursor - 48 */
         for (; cursor <= 55; cursor++)
         {
-            PtrTableAddr[cursor] = PtrTableAddr[47] + cursor * 128;
+            PtrTableAddr[cursor] = PtrTableAddr[47] + 64 + (cursor - 48) * 128;
 #if DEBUG_MMU_initMicroPhysicalMemoryPool
             printf("initMicroPhysicalMemoryPool::PtrTableAddr[%d]:%08lx\n", cursor, PtrTableAddr[cursor]);
 #endif
         }
+        /* 256-byte slots: cursor 56..59; relative index = cursor - 56 */
         for (; cursor <= 59; cursor++)
         {
-            PtrTableAddr[cursor] = PtrTableAddr[55] + cursor * 256;
+            PtrTableAddr[cursor] = PtrTableAddr[55] + 128 + (cursor - 56) * 256;
 #if DEBUG_MMU_initMicroPhysicalMemoryPool
             printf("initMicroPhysicalMemoryPool::PtrTableAddr[%d]:%08lx\n", cursor, PtrTableAddr[cursor]);
 #endif
         }
+        /* 512-byte slots: cursor 60..61; relative index = cursor - 60 */
         for (; cursor <= 61; cursor++)
         {
-            PtrTableAddr[cursor] = PtrTableAddr[59] + cursor * 512;
+            PtrTableAddr[cursor] = PtrTableAddr[59] + 256 + (cursor - 60) * 512;
 #if DEBUG_MMU_initMicroPhysicalMemoryPool
             printf("initMicroPhysicalMemoryPool::PtrTableAddr[%d]:%08lx\n", cursor, PtrTableAddr[cursor]);
 #endif
         }
+        /* 1024-byte slots: cursor 62..63; relative index = cursor - 62 */
         for (; cursor <= 63; cursor++)
         {
-            PtrTableAddr[cursor] = PtrTableAddr[61] + cursor * 1024;
+            PtrTableAddr[cursor] = PtrTableAddr[61] + 512 + (cursor - 62) * 1024;
 #if DEBUG_MMU_initMicroPhysicalMemoryPool
             printf("initMicroPhysicalMemoryPool::PtrTableAddr[%d]:%08lx\n", cursor, PtrTableAddr[cursor]);
 #endif
         }
+        /* Sentinel: marks end of last slot, used by microAlloc's zero-fill loop */
+        PtrTableAddr[64] = PtrTableAddr[63] + 1024;
         printf("microPhysicalMemoryPool inited!\n");
     }
 }

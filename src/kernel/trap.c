@@ -63,7 +63,11 @@ void localIntrEnable(void)
     /* sstatus寄存器的sie位是中断全局使能。 */
     set_csr(sstatus, SSTATUS_SIE);
 #if DEBUG_LOCK_irq_enable
-    printf("localIntrEnable::irq enabled!!\n");
+    /* 不能用 printf：printf 经过 ConsoleLock→spinlockRelease→localIntrEnable，
+     * 会无限递归直到栈溢出。改用绕过锁的原始 SBI 输出。 */
+    const char *msg = "localIntrEnable::irq enabled!!\n";
+    for (const char *p = msg; *p; p++)
+        sbi_console_putchar((int)*p);
 #endif
 }
 

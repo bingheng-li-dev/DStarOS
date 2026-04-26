@@ -9,9 +9,9 @@
 
 #define DEBUG_INIT_main 1
 #if DEBUG_INIT_main
-#define DEBUG_INIT_main_core0 0
+#define DEBUG_INIT_main_core0 1
 #define DEBUG_INIT_main_core1 0
-#define DEBUG_INIT_main_bothcore 1
+#define DEBUG_INIT_main_bothcore 0
 #endif
 
 #define DEBUG_TICK 0
@@ -24,7 +24,7 @@
 #define DEBUG_MMU_insertAndMerge 0
 #define DEBUG_MMU_initMicroPhysicalMemoryPool 0
 #define DEBUG_MMU_microAlloc 0
-#define DEBUG_LOCK_irq_enable 1
+#define DEBUG_LOCK_irq_enable 0
 #define DEBUG_PROC_idle 1
 #define DEBUG_PROC_createFirstProcIdle 1
 #define DEBUG_PROC_proc_init 1

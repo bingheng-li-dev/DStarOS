@@ -1,7 +1,7 @@
 #include "encoding.h"
 #define REGBYTES 8
 
-  .section      .text.entry
+  .section      .text
   .align 2
   .globl trapInit_asm
 trapInit_asm:

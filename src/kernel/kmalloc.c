@@ -15,14 +15,14 @@ void *kmalloc(uint64_t size)
         if (tmp != NULL)
         {
             ret = tmp;
+            goto done;
         }
+        /* microAlloc pool exhausted, fall through to PMM page allocator */
     }
-    else
-    {
-        /* "MicroPhysicalMemoryPoolBase" is null or "size" is more than 1024 or no remaining micro mem in pool. */
-        tmp = alloc(convert_pa2ppn_cil(size)); /* Here "convert" is used to calculate amount of pframes. */
-        ret = (void *)convert_pframe2pa(tmp);
-    }
+    /* "MicroPhysicalMemoryPoolBase" is null, size > 1024, or micro pool is full */
+    tmp = alloc(convert_pa2ppn_cil(size)); /* Here "convert" is used to calculate amount of pframes. */
+    ret = (void *)convert_pframe2pa(tmp);
+done:
     spinlockRelease(&PmmLock);
     return ret;
 }
