@@ -5,3 +5,7 @@ build/*
 *.bin
 .gdb*
 *.img
+*.bk
+CLAUDE.md
+*.log
+RustSBI/

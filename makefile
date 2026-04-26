@@ -1,8 +1,6 @@
 
-TOOLPATH?=/home/lbh/.platformio/packages/toolchain-kendryte210/bin
+TOOLPATH?="/root/riscv/toolchain-kendryte210/bin"
 TOOLPREFIX?=$(TOOLPATH)/riscv64-unknown-elf-
-
-# TOOLPREFIX?=riscv64-unknown-elf-
 
 PLATFORM?=QEMU
 
@@ -12,7 +10,7 @@ LD := $(TOOLPREFIX)ld
 OBJCOPY := $(TOOLPREFIX)objcopy
 OBJDUMP := $(TOOLPREFIX)objdump
 
-CFLAGS := -O -ggdb3
+CFLAGS := -O
 CFLAGS += -nostdlib -fno-pic -Wall -Werror
 CFLAGS += -mcmodel=medany -march=rv64imafdc -mabi=lp64d
 CFLAGS += -ffreestanding -fno-common -mno-relax
@@ -27,8 +25,8 @@ KERNEL_BIN:=kernel.bin
 SRC_BASE := src
 OUTDIR := build
 
-INC_DIR:= kernel/include lib/bsp/include lib/core/include lib/drivers/include debug
-SRC_DIR:= kernel lib/bsp lib/core lib/drivers debug
+INC_DIR:= kernel/include lib/bsp/include lib/core/include lib/drivers/include lib/fatfs/include debug
+SRC_DIR:= kernel lib/bsp lib/core lib/drivers lib/fatfs debug
 
 INC_DIR:=$(foreach n,$(INC_DIR),$(SRC_BASE)/$(n))
 CFLAGS+=$(foreach n,$(INC_DIR),-I$(n))
@@ -38,31 +36,34 @@ C_OUTDIR:=$(addprefix $(OUTDIR)/,$(SRC_DIR))
 
 C_SRC_C := $(foreach n,$(SRC_DIR),$(wildcard $(n)/*.c))
 C_SRC_S := $(foreach n,$(SRC_DIR),$(wildcard $(n)/*.S))
-C_OBJS_C := $(patsubst %.c,%.o,$(C_SRC_C))
-C_OBJS_S := $(patsubst %.S,%.o,$(C_SRC_S))
 
-C_OBJS := $(C_OBJS_C) $(C_OBJS_S)
-C_OBJS := $(addprefix $(OUTDIR)/,$(C_OBJS))
+C_OBJS_C := $(patsubst %.c,$(OUTDIR)/%.o,$(C_SRC_C))
+C_OBJS_S := $(patsubst %.S,$(OUTDIR)/%.o,$(C_SRC_S))
+C_OBJS   := $(C_OBJS_C) $(C_OBJS_S)
 
 KERNEL_ELF := $(OUTDIR)/$(KERNEL_ELF)
 KERNEL_BIN := $(OUTDIR)/$(KERNEL_BIN)
 LDFLAGS += -T $(LDSCRIPT) -o $(KERNEL_ELF)
 
-.PHONY: all clean
+.PHONY: all debug clean
 
 all: $(KERNEL_ELF)
 
-C_OBJS:$(C_OBJS_C) $(C_OBJS_S)
+# debug前需要clean掉之前的.o文件，否则可能会因为之前的.o文件没有调试信息而导致debug失败
+debug: CFLAGS += -ggdb3
+debug: $(KERNEL_ELF)
+
+# 用 order-only 依赖（|）创建输出目录：目录时间戳不触发重编
+$(OUTDIR)/%.o: %.c | $(C_OUTDIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(OUTDIR)/%.o: %.S | $(C_OUTDIR)
+	$(CC) $(CFLAGS) -c $< -o $@
 
 $(C_OUTDIR):
 	mkdir -p $@
 
-$(C_OBJS_C): %.o:%.c $(C_OUTDIR)
-	$(CC) $(CFLAGS) -c $< -o $(OUTDIR)/$@
-$(C_OBJS_S): %.o:%.S $(C_OUTDIR)
-	$(CC) $(CFLAGS) -c $< -o $(OUTDIR)/$@
-
-$(KERNEL_ELF): C_OBJS
+$(KERNEL_ELF): $(C_OBJS)
 	$(LD) $(LDFLAGS) $(C_OBJS)
 	$(OBJCOPY) $(KERNEL_ELF) --strip-all -O binary $(KERNEL_BIN)
 
