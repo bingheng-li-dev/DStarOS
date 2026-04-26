@@ -1,230 +1,227 @@
-/*-----------------------------------------------------------------------*/
-/* Low level disk I/O module skeleton for FatFs     (C)ChaN, 2014        */
-/*-----------------------------------------------------------------------*/
-/* If a working storage control module is available, it should be        */
-/* attached to the FatFs via a glue function rather than modifying it.   */
-/* This is an example of glue functions to attach various exsisting      */
-/* storage control modules to the FatFs module with a defined API.       */
-/*-----------------------------------------------------------------------*/
+/*
+ * diskio.c - VFS/FatFS 磁盘 I/O 层
+ *
+ * QEMU 平台：使用内存 ramdisk（2MB，4096 个 512 字节扇区），
+ *            存放在 BSS 段，内核启动时由 bssInit() 清零。
+ * K210 平台：使用 SD 卡驱动（通过 sdcard.h 接口）。
+ */
 
-#include "diskio.h"		/* FatFs lower layer API */
-#include "usbdisk.h"	/* Example: Header file of existing USB MSD control module */
-#include "atadrive.h"	/* Example: Header file of existing ATA harddisk control module */
-#include "sdcard.h"		/* Example: Header file of existing MMC/SDC contorl module */
+#include "diskio.h"
+#include "stringops.h"
 
-/* Definitions of physical drive number for each drive */
-#define ATA		0	/* Example: Map ATA harddisk to physical drive 0 */
-#define MMC		1	/* Example: Map MMC/SD card to physical drive 1 */
-#define USB		2	/* Example: Map USB MSD to physical drive 2 */
+#ifdef QEMU
 
+/* ================================================================
+ * QEMU Ramdisk 实现
+ * ================================================================ */
 
-/*-----------------------------------------------------------------------*/
-/* Get Drive Status                                                      */
-/*-----------------------------------------------------------------------*/
+#define RAMDISK_SECTOR_SIZE    512
+#define RAMDISK_SECTOR_COUNT   4096   /* 共 2MB */
 
-DSTATUS disk_status (
-	BYTE pdrv		/* Physical drive nmuber to identify the drive */
-)
+/* ramdisk 数据区（位于 BSS 段，内核启动时由 bssInit() 清零）*/
+static unsigned char ramdisk_buf[RAMDISK_SECTOR_SIZE * RAMDISK_SECTOR_COUNT];
+
+/* ramdisk 初始化状态标志 */
+static int ramdisk_initialized = 0;
+
+/*
+ * disk_initialize - 初始化磁盘驱动
+ * @pdrv: 物理驱动器编号（仅支持 0）
+ * 返回：0 表示就绪；STA_NOINIT 表示失败
+ */
+DSTATUS disk_initialize(BYTE pdrv)
 {
-	DSTATUS stat;
-	int result;
-
-	switch (pdrv) {
-	case ATA :
-		result = ATA_disk_status();
-
-		// translate the reslut code here
-
-		return stat;
-
-	case MMC :
-		result = MMC_disk_status();
-
-		// translate the reslut code here
-
-		return stat;
-
-	case USB :
-		result = USB_disk_status();
-
-		// translate the reslut code here
-
-		return stat;
-	}
-	return STA_NOINIT;
+    if (pdrv != 0)
+    {
+        return STA_NOINIT;
+    }
+    ramdisk_initialized = 1;
+    return 0;
 }
 
-
-
-/*-----------------------------------------------------------------------*/
-/* Inidialize a Drive                                                    */
-/*-----------------------------------------------------------------------*/
-
-DSTATUS disk_initialize (
-	BYTE pdrv				/* Physical drive nmuber to identify the drive */
-)
+/*
+ * disk_status - 获取磁盘驱动器状态
+ * @pdrv: 物理驱动器编号
+ * 返回：0 表示就绪；STA_NOINIT 表示未初始化
+ */
+DSTATUS disk_status(BYTE pdrv)
 {
-	DSTATUS stat;
-	int result;
-
-	switch (pdrv) {
-	case ATA :
-		result = ATA_disk_initialize();
-
-		// translate the reslut code here
-
-		return stat;
-
-	case MMC :
-		result = MMC_disk_initialize();
-
-		// translate the reslut code here
-
-		return stat;
-
-	case USB :
-		result = USB_disk_initialize();
-
-		// translate the reslut code here
-
-		return stat;
-	}
-	return STA_NOINIT;
+    if (pdrv != 0)
+    {
+        return STA_NOINIT;
+    }
+    return ramdisk_initialized ? 0 : STA_NOINIT;
 }
 
-
-
-/*-----------------------------------------------------------------------*/
-/* Read Sector(s)                                                        */
-/*-----------------------------------------------------------------------*/
-
-DRESULT disk_read (
-	BYTE pdrv,		/* Physical drive nmuber to identify the drive */
-	BYTE *buff,		/* Data buffer to store read data */
-	DWORD sector,	/* Sector address in LBA */
-	UINT count		/* Number of sectors to read */
-)
+/*
+ * disk_read - 从 ramdisk 读取扇区数据
+ * @pdrv:   物理驱动器编号
+ * @buff:   读取数据的目标缓冲区
+ * @sector: 起始扇区地址（LBA）
+ * @count:  读取的扇区数量
+ */
+DRESULT disk_read(BYTE pdrv, BYTE *buff, DWORD sector, UINT count)
 {
-	DRESULT res;
-	int result;
-
-	switch (pdrv) {
-	case ATA :
-		// translate the arguments here
-
-		result = ATA_disk_read(buff, sector, count);
-
-		// translate the reslut code here
-
-		return res;
-
-	case MMC :
-		// translate the arguments here
-
-		result = MMC_disk_read(buff, sector, count);
-
-		// translate the reslut code here
-
-		return res;
-
-	case USB :
-		// translate the arguments here
-
-		result = USB_disk_read(buff, sector, count);
-
-		// translate the reslut code here
-
-		return res;
-	}
-
-	return RES_PARERR;
+    if (pdrv != 0 || !ramdisk_initialized)
+    {
+        return RES_NOTRDY;
+    }
+    if (sector + count > RAMDISK_SECTOR_COUNT)
+    {
+        return RES_PARERR;
+    }
+    memcpy(buff,
+           ramdisk_buf + sector * RAMDISK_SECTOR_SIZE,
+           (unsigned long)count * RAMDISK_SECTOR_SIZE);
+    return RES_OK;
 }
 
-
-
-/*-----------------------------------------------------------------------*/
-/* Write Sector(s)                                                       */
-/*-----------------------------------------------------------------------*/
-
-#if _USE_WRITE
-DRESULT disk_write (
-	BYTE pdrv,			/* Physical drive nmuber to identify the drive */
-	const BYTE *buff,	/* Data to be written */
-	DWORD sector,		/* Sector address in LBA */
-	UINT count			/* Number of sectors to write */
-)
+/*
+ * disk_write - 向 ramdisk 写入扇区数据
+ * @pdrv:   物理驱动器编号
+ * @buff:   待写入数据的源缓冲区
+ * @sector: 起始扇区地址（LBA）
+ * @count:  写入的扇区数量
+ */
+DRESULT disk_write(BYTE pdrv, const BYTE *buff, DWORD sector, UINT count)
 {
-	DRESULT res;
-	int result;
-
-	switch (pdrv) {
-	case ATA :
-		// translate the arguments here
-
-		result = ATA_disk_write(buff, sector, count);
-
-		// translate the reslut code here
-
-		return res;
-
-	case MMC :
-		// translate the arguments here
-
-		result = MMC_disk_write(buff, sector, count);
-
-		// translate the reslut code here
-
-		return res;
-
-	case USB :
-		// translate the arguments here
-
-		result = USB_disk_write(buff, sector, count);
-
-		// translate the reslut code here
-
-		return res;
-	}
-
-	return RES_PARERR;
+    if (pdrv != 0 || !ramdisk_initialized)
+    {
+        return RES_NOTRDY;
+    }
+    if (sector + count > RAMDISK_SECTOR_COUNT)
+    {
+        return RES_PARERR;
+    }
+    memcpy(ramdisk_buf + sector * RAMDISK_SECTOR_SIZE,
+           buff,
+           (unsigned long)count * RAMDISK_SECTOR_SIZE);
+    return RES_OK;
 }
-#endif
 
-
-/*-----------------------------------------------------------------------*/
-/* Miscellaneous Functions                                               */
-/*-----------------------------------------------------------------------*/
-
-#if _USE_IOCTL
-DRESULT disk_ioctl (
-	BYTE pdrv,		/* Physical drive nmuber (0..) */
-	BYTE cmd,		/* Control code */
-	void *buff		/* Buffer to send/receive control data */
-)
+/*
+ * disk_ioctl - 磁盘设备控制
+ * @pdrv: 物理驱动器编号
+ * @cmd:  控制命令
+ * @buff: 命令参数缓冲区
+ */
+DRESULT disk_ioctl(BYTE pdrv, BYTE cmd, void *buff)
 {
-	DRESULT res;
-	int result;
-
-	switch (pdrv) {
-	case ATA :
-
-		// Process of the command for the ATA drive
-
-		return res;
-
-	case MMC :
-
-		// Process of the command for the MMC/SD card
-
-		return res;
-
-	case USB :
-
-		// Process of the command the USB drive
-
-		return res;
-	}
-
-	return RES_PARERR;
+    if (pdrv != 0)
+    {
+        return RES_PARERR;
+    }
+    switch (cmd)
+    {
+    case CTRL_SYNC:
+        /* ramdisk 无需同步 */
+        return RES_OK;
+    case GET_SECTOR_COUNT:
+        *(DWORD *)buff = RAMDISK_SECTOR_COUNT;
+        return RES_OK;
+    case GET_SECTOR_SIZE:
+        *(WORD *)buff = RAMDISK_SECTOR_SIZE;
+        return RES_OK;
+    case GET_BLOCK_SIZE:
+        /* ramdisk 的擦除块大小为 1 个扇区 */
+        *(DWORD *)buff = 1;
+        return RES_OK;
+    default:
+        return RES_PARERR;
+    }
 }
-#endif
+
+/* ================================================================
+ * 导出 ramdisk 扇区总数供 fatfs_vfs.c 使用
+ * ================================================================ */
+unsigned int ramdisk_get_sector_count(void)
+{
+    return RAMDISK_SECTOR_COUNT;
+}
+
+#else  /* !QEMU —— K210 SD 卡实现 */
+
+/* ================================================================
+ * K210 SD 卡实现
+ * ================================================================ */
+
+#include "sdcard.h"
+
+DSTATUS disk_initialize(BYTE pdrv)
+{
+    if (pdrv != 0)
+    {
+        return STA_NOINIT;
+    }
+    if (sdcard_init() != 0)
+    {
+        return STA_NOINIT;
+    }
+    return 0;
+}
+
+DSTATUS disk_status(BYTE pdrv)
+{
+    if (pdrv != 0)
+    {
+        return STA_NOINIT;
+    }
+    return 0;
+}
+
+DRESULT disk_read(BYTE pdrv, BYTE *buff, DWORD sector, UINT count)
+{
+    if (pdrv != 0)
+    {
+        return RES_PARERR;
+    }
+    if (sdcard_read_sector_dma(buff, sector, count) != 0)
+    {
+        return RES_ERROR;
+    }
+    return RES_OK;
+}
+
+DRESULT disk_write(BYTE pdrv, const BYTE *buff, DWORD sector, UINT count)
+{
+    if (pdrv != 0)
+    {
+        return RES_PARERR;
+    }
+    if (sdcard_write_sector_dma((BYTE *)buff, sector, count) != 0)
+    {
+        return RES_ERROR;
+    }
+    return RES_OK;
+}
+
+DRESULT disk_ioctl(BYTE pdrv, BYTE cmd, void *buff)
+{
+    if (pdrv != 0)
+    {
+        return RES_PARERR;
+    }
+    switch (cmd)
+    {
+    case CTRL_SYNC:
+        return RES_OK;
+    case GET_SECTOR_COUNT:
+        *(DWORD *)buff = sdcard_get_sector_count();
+        return RES_OK;
+    case GET_SECTOR_SIZE:
+        *(WORD *)buff = 512;
+        return RES_OK;
+    case GET_BLOCK_SIZE:
+        *(DWORD *)buff = 1;
+        return RES_OK;
+    default:
+        return RES_PARERR;
+    }
+}
+
+unsigned int ramdisk_get_sector_count(void)
+{
+    return (unsigned int)sdcard_get_sector_count();
+}
+
+#endif /* QEMU */

@@ -12,6 +12,10 @@
 #include "trap.h"
 #include "vmm.h"
 
+/* 前向声明：避免与 vfs.h 形成循环包含 */
+struct dentry;
+typedef struct dentry dentry_t;
+
 #define PNAME_MAX_LENGTH 64
 #define KERNEL_STACKPSIZE 1
 #define KERNRL_STKSIZE KERNEL_STACKPSIZE *PGSIZE
@@ -67,7 +71,7 @@ struct controlBlockOfProcess
     intstkf_t *proc_int_stack;
     mm_t *proc_mm;
     volatile bool need_resched;
-    // pfs_t *filesp;
+    dentry_t   *proc_cwd;           /* 当前工作目录的目录项；NULL 表示使用 VFS 根目录 */
     struct list_head proc_list_linker;
     struct rb_node proc_rbtree_node;
 };

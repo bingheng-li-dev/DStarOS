@@ -5,6 +5,8 @@
 #include "sched.h"
 #include "console.h"
 #include "pmm.h"
+#include "vfs.h"
+#include "cpu.h"
 
 /* List of all processes. */
 struct list_head ProcList;
@@ -80,6 +82,14 @@ int16_t do_fork(uint32_t clone_flags, uintptr_t stack, intstkf_t *regs)
 
     copyProcMm(clone_flags, newProc);
     copyProcStk(newProc, stack, regs);
+
+    /* 子进程继承父进程的当前工作目录 */
+    newProc->proc_cwd = TaskCurrent->proc_cwd;
+    if (newProc->proc_cwd)
+    {
+        /* 增加 cwd 目录项的引用计数，防止父进程 chdir 后 dentry 被释放 */
+        dentry_get_pub(newProc->proc_cwd);
+    }
 
     int16_t pid = ENO3_NOFREE_PID;
     pid = allocPidMap();
@@ -182,6 +192,7 @@ static pcb_t *allocNewProc(void)
         memset(pcb->proc_pname, 0, PNAME_MAX_LENGTH);
         pcb->proc_state = UNINIT;
         pcb->need_resched = false;
+        pcb->proc_cwd = NULL;  /* NULL 表示当前工作目录为 VFS 根目录 */
 #if DEBUG_PROC_allocNewProc
         printf("allocNewProc::new pcb addr:%lx,sizeof(pcb_t):%ld\n", (intptr_t)pcb, sizeof(pcb_t));
 #endif
@@ -241,6 +252,7 @@ static pcb_t *createFirstProcIdle(void)
         idle->kernel_stack = (phyAddr_t)boot_stack_top1;
         idle->proc_state = RUNNING;
         idle->need_resched = true;
+        idle->proc_cwd = NULL;  /* idle 进程使用 VFS 根目录 */
         const char *name = "idle";
         setProcName(idle, name);
         TaskCount = TaskCount + 1;

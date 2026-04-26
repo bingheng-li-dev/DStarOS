@@ -49,10 +49,14 @@ void osInit(uint64_t hartid)
         fpioa_pin_init();
         dmac_init();
 #endif
+        // plicInit();
+        fs_init();
         printf("core %ld init done\n", getCoreId());
+
 #if DEBUG_INIT_main_core0
         main(0, (void *)0);
 #endif
+
         core2Enable();
     }
     else
@@ -65,15 +69,13 @@ void osInit(uint64_t hartid)
         main(0, (void *)0);
 #endif
     }
-
+    // vmm_init();
+    proc_init();
+    // idle();
+    
 #if DEBUG_INIT_main_bothcore
     main(0, (void *)0);
 #endif
-    // plicInit();
-    // fs_init();
-    // vmm_init();
-    // proc_init();
-    // idle();
 
 #if DEBUG_INIT_os_init
     while (1)

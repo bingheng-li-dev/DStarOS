@@ -47,8 +47,8 @@
 /  f_findfirst() and f_findnext(). (0:Disable or 1:Enable) */
 
 
-#define	_USE_MKFS		0
-/* This option switches f_mkfs() function. (0:Disable or 1:Enable) */
+#define	_USE_MKFS		1
+/* 已修改为 1：启用 f_mkfs() 格式化功能（用于 QEMU ramdisk 首次格式化）*/
 
 
 #define	_USE_FASTSEEK	0
@@ -69,27 +69,14 @@
 / Locale and Namespace Configurations
 /---------------------------------------------------------------------------*/
 
-#define _CODE_PAGE	936
-/* This option specifies the OEM code page to be used on the target system.
-/  Incorrect setting of the code page can cause a file open failure.
+#define _CODE_PAGE	437
+/* 已修改为 437（US ASCII）：原 936（GBK）需要 option/cc936.c 字码表文件，
+/  该文件不在项目中。437 不需要额外字码表文件。
 /
 /   1    - ASCII (No extended character. Non-LFN cfg. only)
 /   437  - U.S.
-/   720  - Arabic
-/   737  - Greek
-/   775  - Baltic
-/   850  - Multilingual Latin 1
-/   852  - Latin 2
-/   855  - Cyrillic
-/   857  - Turkish
-/   858  - Multilingual Latin 1 + Euro
-/   862  - Hebrew
-/   866  - Russian
-/   874  - Thai
-/   932  - Japanese Shift_JIS (DBCS)
+/   ...
 /   936  - Simplified Chinese GBK (DBCS)
-/   949  - Korean (DBCS)
-/   950  - Traditional Chinese Big5 (DBCS)
 */
 
 
@@ -100,41 +87,24 @@
 /   0: Disable LFN feature. _MAX_LFN has no effect.
 /   1: Enable LFN with static working buffer on the BSS. Always NOT thread-safe.
 /   2: Enable LFN with dynamic working buffer on the STACK.
-/   3: Enable LFN with dynamic working buffer on the HEAP.
-/
-/  When enable the LFN feature, Unicode handling functions (option/unicode.c) must
-/  be added to the project. The LFN working buffer occupies (_MAX_LFN + 1) * 2 bytes.
-/  When use stack for the working buffer, take care on stack overflow. When use heap
-/  memory for the working buffer, memory management functions, ff_memalloc() and
-/  ff_memfree(), must be added to the project. */
+/   3: Enable LFN with dynamic working buffer on the HEAP. */
 
 
 #define	_LFN_UNICODE	0
-/* This option switches character encoding on the API. (0:ANSI/OEM or 1:Unicode)
-/  To use Unicode string for the path name, enable LFN feature and set _LFN_UNICODE
-/  to 1. This option also affects behavior of string I/O functions. */
+/* This option switches character encoding on the API. (0:ANSI/OEM or 1:Unicode) */
 
 
 #define _STRF_ENCODE	3
-/* When _LFN_UNICODE is 1, this option selects the character encoding on the file to
-/  be read/written via string I/O functions, f_gets(), f_putc(), f_puts and f_printf().
-/
-/  0: ANSI/OEM
-/  1: UTF-16LE
-/  2: UTF-16BE
-/  3: UTF-8
-/
-/  When _LFN_UNICODE is 0, this option has no effect. */
+/* When _LFN_UNICODE is 1, this option selects the character encoding on the file. */
 
 
 #define _FS_RPATH	0
 /* This option configures relative path feature.
+/  VFS 层负责相对路径解析，fatfs 不需要此功能，保持 0。
 /
 /   0: Disable relative path feature and remove related functions.
 /   1: Enable relative path feature. f_chdir() and f_chdrive() are available.
-/   2: f_getcwd() function is available in addition to 1.
-/
-/  Note that directory items read via f_readdir() are affected by this option. */
+/   2: f_getcwd() function is available in addition to 1. */
 
 
 /*---------------------------------------------------------------------------/
@@ -147,125 +117,41 @@
 
 #define _STR_VOLUME_ID	0
 #define _VOLUME_STRS	"RAM","NAND","CF","SD1","SD2","USB1","USB2","USB3"
-/* _STR_VOLUME_ID option switches string volume ID feature.
-/  When _STR_VOLUME_ID is set to 1, also pre-defined strings can be used as drive
-/  number in the path name. _VOLUME_STRS defines the drive ID strings for each
-/  logical drives. Number of items must be equal to _VOLUMES. Valid characters for
-/  the drive ID strings are: A-Z and 0-9. */
 
 
 #define	_MULTI_PARTITION	0
-/* This option switches multi-partition feature. By default (0), each logical drive
-/  number is bound to the same physical drive number and only an FAT volume found on
-/  the physical drive will be mounted. When multi-partition feature is enabled (1),
-/  each logical drive number is bound to arbitrary physical drive and partition
-/  listed in the VolToPart[]. Also f_fdisk() funciton will be available. */
 
 
 #define	_MIN_SS		512
 #define	_MAX_SS		512
-/* These options configure the range of sector size to be supported. (512, 1024,
-/  2048 or 4096) Always set both 512 for most systems, all type of memory cards and
-/  harddisk. But a larger value may be required for on-board flash memory and some
-/  type of optical media. When _MAX_SS is larger than _MIN_SS, FatFs is configured
-/  to variable sector size and GET_SECTOR_SIZE command must be implemented to the
-/  disk_ioctl() function. */
 
 
 #define	_USE_TRIM	0
-/* This option switches ATA-TRIM feature. (0:Disable or 1:Enable)
-/  To enable Trim feature, also CTRL_TRIM command should be implemented to the
-/  disk_ioctl() function. */
 
 
 #define _FS_NOFSINFO	0
-/* If you need to know correct free space on the FAT32 volume, set bit 0 of this
-/  option, and f_getfree() function at first time after volume mount will force
-/  a full FAT scan. Bit 1 controls the use of last allocated cluster number.
-/
-/  bit0=0: Use free cluster count in the FSINFO if available.
-/  bit0=1: Do not trust free cluster count in the FSINFO.
-/  bit1=0: Use last allocated cluster number in the FSINFO if available.
-/  bit1=1: Do not trust last allocated cluster number in the FSINFO.
-*/
-
 
 
 /*---------------------------------------------------------------------------/
 / System Configurations
 /---------------------------------------------------------------------------*/
 
-#define _FS_NORTC	0
-#define _NORTC_MON	2
+#define _FS_NORTC	1
+#define _NORTC_MON	1
 #define _NORTC_MDAY	1
-#define _NORTC_YEAR	2015
-/* The _FS_NORTC option switches timestamp feature. If the system does not have
-/  an RTC function or valid timestamp is not needed, set _FS_NORTC to 1 to disable
-/  the timestamp feature. All objects modified by FatFs will have a fixed timestamp
-/  defined by _NORTC_MON, _NORTC_MDAY and _NORTC_YEAR.
-/  When timestamp feature is enabled (_FS_NORTC	== 0), get_fattime() function need
-/  to be added to the project to read current time form RTC. _NORTC_MON,
-/  _NORTC_MDAY and _NORTC_YEAR have no effect. 
-/  These options have no effect at read-only configuration (_FS_READONLY == 1). */
+#define _NORTC_YEAR	2024
+/* 已修改为 1：系统无 RTC，禁用时间戳功能，使用固定时间戳。
+/  原值为 0 时需要实现 get_fattime()，嵌入式内核中通常无 RTC。*/
 
 
 #define	_FS_LOCK	0
-/* The _FS_LOCK option switches file lock feature to control duplicated file open
-/  and illegal operation to open objects. This option must be 0 when _FS_READONLY
-/  is 1.
-/
-/  0:  Disable file lock feature. To avoid volume corruption, application program
-/      should avoid illegal open, remove and rename to the open objects.
-/  >0: Enable file lock feature. The value defines how many files/sub-directories
-/      can be opened simultaneously under file lock control. Note that the file
-/      lock feature is independent of re-entrancy. */
 
 
 #define _FS_REENTRANT	0
 #define _FS_TIMEOUT		1000
-#define	_SYNC_t			HANDLE
-/* The _FS_REENTRANT option switches the re-entrancy (thread safe) of the FatFs
-/  module itself. Note that regardless of this option, file access to different
-/  volume is always re-entrant and volume control functions, f_mount(), f_mkfs()
-/  and f_fdisk() function, are always not re-entrant. Only file/directory access
-/  to the same volume is under control of this feature.
-/
-/   0: Disable re-entrancy. _FS_TIMEOUT and _SYNC_t have no effect.
-/   1: Enable re-entrancy. Also user provided synchronization handlers,
-/      ff_req_grant(), ff_rel_grant(), ff_del_syncobj() and ff_cre_syncobj()
-/      function, must be added to the project. Samples are available in
-/      option/syscall.c.
-/
-/  The _FS_TIMEOUT defines timeout period in unit of time tick.
-/  The _SYNC_t defines O/S dependent sync object type. e.g. HANDLE, ID, OS_EVENT*,
-/  SemaphoreHandle_t and etc.. A header file for O/S definitions needs to be
-/  included somewhere in the scope of ff.c. */
+#define	_SYNC_t			int
+/* 禁用 fatfs 内部重入锁（由 VFS 层的自旋锁负责并发控制）*/
 
 
 #define _WORD_ACCESS	0
-/* The _WORD_ACCESS option is an only platform dependent option. It defines
-/  which access method is used to the word data on the FAT volume.
-/
-/   0: Byte-by-byte access. Always compatible with all platforms.
-/   1: Word access. Do not choose this unless under both the following conditions.
-/
-/  * Address misaligned memory access is always allowed to ALL instructions.
-/  * Byte order on the memory is little-endian.
-/
-/  If it is the case, _WORD_ACCESS can also be set to 1 to reduce code size.
-/  Following table shows allowable settings of some processor types.
-/
-/  ARM7TDMI   0   *2          ColdFire   0    *1         V850E      0    *2
-/  Cortex-M3  0   *3          Z80        0/1             V850ES     0/1
-/  Cortex-M0  0   *2          x86        0/1             TLCS-870   0/1
-/  AVR        0/1             RX600(LE)  0/1             TLCS-900   0/1
-/  AVR32      0   *1          RL78       0    *2         R32C       0    *2
-/  PIC18      0/1             SH-2       0    *1         M16C       0/1
-/  PIC24      0   *2          H8S        0    *1         MSP430     0    *2
-/  PIC32      0   *1          H8/300H    0    *1         8051       0/1
-/
-/  *1:Big-endian.
-/  *2:Unaligned memory access is not supported.
-/  *3:Some compilers generate LDM/STM for mem_cpy function.
-*/
-
+/* RISC-V 不保证非对齐访问，保持 0（字节对齐访问）*/
