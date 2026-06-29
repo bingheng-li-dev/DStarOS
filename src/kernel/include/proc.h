@@ -57,6 +57,7 @@ struct contextOfProcess
     uint64_t x25_s9;
     uint64_t x26_s10;
     uint64_t x27_s11;
+    uint64_t satp;
 };
 
 struct controlBlockOfProcess
@@ -65,7 +66,6 @@ struct controlBlockOfProcess
     char proc_pname[PNAME_MAX_LENGTH + 1];
     sta_t proc_state;
     ctx_t proc_context;
-    uintptr_t pageTableBase;
     uintptr_t kernel_stack;
     pcb_t *proc_parent;
     intstkf_t *proc_int_stack;

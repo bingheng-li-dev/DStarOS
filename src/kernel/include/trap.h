@@ -79,7 +79,7 @@ typedef struct int_stackframe intstkf_t;
 /* 还原上一次的中断状态；必须与"localIntrSave"成对使用。 */
 #define __localIntrRestore(x) __intrRestore(x)
 
-void trapInit(void);
+void trap_init(void);
 /* 关闭当前CPU的中断。 */
 void localIntrDisable(void);
 /* 打开当前CPU的中断。 */

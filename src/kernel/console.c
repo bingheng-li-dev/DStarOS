@@ -13,7 +13,7 @@ static void stdout_putc(void *unused, char ch)
     sbi_console_putchar((int)ch);
 }
 
-void consoleInit(void)
+void console_init(void)
 {
     spinlockInit(&ConsoleLock);
     init_printf(0, stdout_putc);

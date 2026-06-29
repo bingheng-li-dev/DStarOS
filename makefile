@@ -45,7 +45,7 @@ KERNEL_ELF := $(OUTDIR)/$(KERNEL_ELF)
 KERNEL_BIN := $(OUTDIR)/$(KERNEL_BIN)
 LDFLAGS += -T $(LDSCRIPT) -o $(KERNEL_ELF)
 
-.PHONY: all debug clean
+.PHONY: all debug debugbuild clean
 
 all: $(KERNEL_ELF)
 
@@ -53,12 +53,17 @@ all: $(KERNEL_ELF)
 debug: CFLAGS += -ggdb3
 debug: $(KERNEL_ELF)
 
+# 安全的调试构建：先clean再debug，避免混用无调试信息的.o文件
+debugbuild:
+	$(MAKE) clean
+	$(MAKE) debug
+
 # 用 order-only 依赖（|）创建输出目录：目录时间戳不触发重编
 $(OUTDIR)/%.o: %.c | $(C_OUTDIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(OUTDIR)/%.o: %.S | $(C_OUTDIR)
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) -Wa,-gdwarf-2 -c $< -o $@
 
 $(C_OUTDIR):
 	mkdir -p $@

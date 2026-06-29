@@ -13,8 +13,8 @@ static cpu_t CPUs[CORE_NUMBER];
 void core2Enable(void)
 {
     mb();
-    unsigned long mask = 1 << 1; /* 使能core2:0x10 */
-    sbi_send_ipi(&mask);
+    unsigned long mask = BIT(1); /* 使能core2 */
+    sbi_send_ipi(mask);
     core2Enabled = 0xa55a;
 }
 

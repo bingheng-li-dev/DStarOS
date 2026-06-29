@@ -4,6 +4,7 @@
 #include "sync.h"
 #include "plic.h"
 #include "sbi.h"
+#include "vmm.h"
 
 extern void trapInit_asm(void);
 
@@ -42,7 +43,7 @@ static void kernelExternIrqHandler(void)
     }
 }
 
-void trapInit(void)
+void trap_init(void)
 {
     trapInit_asm();
     /* sstatus寄存器的sie位是中断全局使能。 */
@@ -146,16 +147,14 @@ void kernelTrapHandler(intstkf_t *sp)
             goto panic1;
             break;
         case CAUSE_FAULT_LOAD:
-            printf("Load access fault");
-            // vmm_pageFaultHander((virAddr_t)sp->sbadaddr);
+            vmm_page_fault_handler((virAddr_t)sp->sbadaddr, 1);
             break;
         case CAUSE_MISALIGNED_STORE:
             printf("Store address misaligned");
             goto panic1;
             break;
         case CAUSE_FAULT_STORE:
-            printf("Store access fault");
-            // vmm_pageFaultHander((virAddr_t)sp->sbadaddr);
+            vmm_page_fault_handler((virAddr_t)sp->sbadaddr, 2);
             break;
         case CAUSE_USER_ECALL:
             printf("Environment call from U-mode");
@@ -172,14 +171,24 @@ void kernelTrapHandler(intstkf_t *sp)
             goto panic1;
             break;
         case CAUSE_FAULT_INSTRUCTION_PAGE:
-            printf("Instruction page fault");
-            goto panic1;
+#if DEBUG_VMM_page_fault_handler
+            printf("Instruction page fault\n");
+#endif
+            vmm_page_fault_handler((virAddr_t)sp->sbadaddr, 0);
             break;
         case CAUSE_FAULT_LOAD_PAGE:
-            // vmm_pageFaultHander((virAddr_t)sp->sbadaddr);
+#if DEBUG_VMM_page_fault_handler
+            printf("Load page fault\n");
+            printf("sbadaddr=0x%lx\n", sp->sbadaddr);
+#endif
+            vmm_page_fault_handler((virAddr_t)sp->sbadaddr, 1);
             break;
         case CAUSE_FAULT_STORE_PAGE:
-            // vmm_pageFaultHander((virAddr_t)sp->sbadaddr);
+#if DEBUG_VMM_page_fault_handler
+            printf("Store page fault\n");
+            printf("sbadaddr=0x%lx\n", sp->sbadaddr);
+#endif
+            vmm_page_fault_handler((virAddr_t)sp->sbadaddr, 2);
             break;
         default:
             printf("Unknown exception : %08x", cause);

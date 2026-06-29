@@ -11,9 +11,6 @@
 
 #include "memtype.h"
 
-#define SATPMODE_BARE 0x0000000000000000
-#define SATPMODE_RV39 0x8000000000000000
-
 typedef struct phyframe pframe_t;
 typedef struct freeSpaceList fslist_t;
 typedef struct bestfitFrameAllocator bffa_t;
@@ -48,16 +45,14 @@ extern pframe_t *PageListBegin;
 extern fslist_t FreeList;
 extern fslist_t FreeAList;
 
-void physicalMemoryManagementInit(void);
-void *alloc(uint16_t nsize);
-void *allocOneFrame(void);
+void pmm_init(void);
+pframe_t *alloc(uint16_t nsize);
+pframe_t *alloc_page(void);
 void dealloc(pframe_t *baseppn);
-pte_t *getPTE(pframe_t *pageTable, virAddr_t va);
-void removePTE(virAddr_t va, pte_t *pte);
-pte_t *insertPTE(pframe_t *pageTable, virAddr_t va, pteflg_t pteFlag);
 void *microAlloc(uint64_t size);
 /* Maybe memories in pool have ran out.So return true if target memory has been dealloced in pool. */
 bool microDemalloc(void *ptr);
+void pmm_init_after_mmu_enable(void);
 
 /* RoundDown(Left)*/
 static inline ppn_t convert_pa2ppn_flr(phyAddr_t pa)
@@ -79,6 +74,7 @@ static inline phyAddr_t pa_roundup(phyAddr_t pa)
 
 static inline ppn_t convert_pframe2ppn(pframe_t *currentFrame)
 {
+    /* KERNEL_START使用绝对地址，因为开启MMU后变为高位虚拟地址 */
     return (currentFrame - PageListBegin + convert_pa2ppn_flr(KERNEL_START));
 }
 
@@ -92,20 +88,15 @@ static inline phyAddr_t convert_pframe2pa(pframe_t *currentFrame)
     return (convert_pframe2ppn(currentFrame) * PGSIZE);
 }
 
-/* @param level must equal 3, 2 or 1. (left -> right) */
-static inline vpn_t convert_va2vpn(virAddr_t va, uint16_t level)
+/* 返回 pframe 对应物理页的内核虚拟地址，用于 MMU 开启后读写页面内容 */
+static inline virAddr_t convert_pframe2kva(pframe_t *currentFrame)
 {
-    return ((va >> ((level - 1) * 9 + PGSHIFT)) & 0x1FF);
+    return pa_to_kva(convert_pframe2pa(currentFrame));
 }
 
 static inline pframe_t *convert_ppn2pframe(ppn_t ppn)
 {
     return (ppn - convert_pa2ppn_flr(KERNEL_START) + PageListBegin);
-}
-
-static inline pframe_t *convert_pte2pframe(pte_t pte)
-{
-    return (convert_ppn2pframe(pteGetPpn(pte)));
 }
 
 static inline pframe_t *convert_pa2pframe_flr(phyAddr_t pa)

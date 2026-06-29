@@ -2,7 +2,7 @@
  * diskio.c - VFS/FatFS 磁盘 I/O 层
  *
  * QEMU 平台：使用内存 ramdisk（2MB，4096 个 512 字节扇区），
- *            存放在 BSS 段，内核启动时由 bssInit() 清零。
+ *            存放在 BSS 段，内核启动时由 bss_init() 清零。
  * K210 平台：使用 SD 卡驱动（通过 sdcard.h 接口）。
  */
 
@@ -18,7 +18,7 @@
 #define RAMDISK_SECTOR_SIZE    512
 #define RAMDISK_SECTOR_COUNT   4096   /* 共 2MB */
 
-/* ramdisk 数据区（位于 BSS 段，内核启动时由 bssInit() 清零）*/
+/* ramdisk 数据区（位于 BSS 段，内核启动时由 bss_init() 清零）*/
 static unsigned char ramdisk_buf[RAMDISK_SECTOR_SIZE * RAMDISK_SECTOR_COUNT];
 
 /* ramdisk 初始化状态标志 */

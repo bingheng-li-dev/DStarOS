@@ -26,8 +26,8 @@ static void tickSetNextInt(uint64_t stime)
 #endif
 }
 
-/* 必须在trapInit()之后被调用 */
-void tickInit(void)
+/* 必须在trap_init()之后被调用 */
+void tick_init(void)
 {
     spinlockInit(&ticksLock);
     tickSetNextInt(TIMEBASE);

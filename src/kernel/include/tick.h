@@ -7,7 +7,7 @@
 
 extern osslock_t ticksLock;
 
-void tickInit(void);
+void tick_init(void);
 void tickIntHandler(void);
 /* 系统TICK是唯一的，既系统暴露给延时函数等的TICK值是唯一的，即核0上的tick计数值。 */
 uint64_t getOSTick(void);

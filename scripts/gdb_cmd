@@ -1,0 +1,9 @@
+gdb-multiarch ./build/kernel.elf
+target remote:1234
+
+# 如果安装了gef插件：
+# 1. 启动 GDB
+gdb-multiarch ./build/kernel.elf
+
+# 2. GEF 内连接
+gef➤ gef-remote --qemu-user localhost 1234

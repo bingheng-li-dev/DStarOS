@@ -5,7 +5,7 @@
 
 #include "tinyprintf.h"
 
-void consoleInit(void);
+void console_init(void);
 void printf(char *fmt, ...);
 void panic(char *s, ...);
 

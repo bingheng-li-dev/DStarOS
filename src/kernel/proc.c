@@ -4,9 +4,9 @@
 #include "errorcode.h"
 #include "sched.h"
 #include "console.h"
-#include "pmm.h"
 #include "vfs.h"
 #include "cpu.h"
+#include "vmm.h"
 
 /* List of all processes. */
 struct list_head ProcList;
@@ -30,7 +30,7 @@ static int16_t allocKernelStack(pcb_t *pcb);
 /* Dealloc the kernel stack of a proc.Attention that it doesn't dealloc the memory pointed by pointers of the pcb!! */
 static int16_t deallocKernelStack(pcb_t *pcb) __attribute__((used));
 /* Copy the virtual memory management struct of a proc. */
-static int16_t copyProcMm(uint32_t clone_flags, pcb_t *pcb);
+static int16_t copy_proc_mm(uint32_t clone_flags, pcb_t *pcb);
 /* Copy the stack which is up to the param stack(if stack==0, It means to fork a kernel thread). */
 static void copyProcStk(pcb_t *pcb, uintptr_t stack, intstkf_t *regs);
 /* Create task idle. */
@@ -80,7 +80,7 @@ int16_t do_fork(uint32_t clone_flags, uintptr_t stack, intstkf_t *regs)
         goto f2;
     }
 
-    copyProcMm(clone_flags, newProc);
+    copy_proc_mm(clone_flags, newProc);
     copyProcStk(newProc, stack, regs);
 
     /* 子进程继承父进程的当前工作目录 */
@@ -112,6 +112,7 @@ f2:
 
 int16_t do_exit(int16_t error_code)
 {
+    vmm_mm_destroy(TaskCurrent->proc_mm);
     printf("exit not finished!!\n");
     while (1)
         ;
@@ -182,9 +183,9 @@ static pcb_t *allocNewProc(void)
     if (pcb != NULL)
     {
         pcb->kernel_stack = 0;
-        /* Only Kernel processes all share the same page dictionary kernel page table(KernelLevel3PageTableFrame). */
-        pcb->pageTableBase = convert_pframe2pa(KernelLevel3PageTableFrame);
         memset(&(pcb->proc_context), 0, sizeof(ctx_t));
+        /* 内核线程默认使用内核页表；用户进程 fork 时由 copy_proc_mm 覆盖 */
+        pcb->proc_context.satp = SATPMODE_RV39 | vmm_kernel_pgd_ppn;
         pcb->proc_int_stack = NULL;
         pcb->proc_mm = NULL;
         pcb->proc_parent = NULL;
@@ -225,8 +226,43 @@ static int16_t deallocKernelStack(pcb_t *pcb)
     return ENO0_NO_ERROR;
 }
 
-static int16_t copyProcMm(uint32_t clone_flags, pcb_t *pcb)
+static int16_t copy_proc_mm(uint32_t clone_flags, pcb_t *pcb)
 {
+    /* 内核线程fork，子线程共享父线程mm */
+    if (clone_flags & CLONE_VM)
+    {
+        pcb->proc_mm = TaskCurrent->proc_mm;
+        return ENO0_NO_ERROR;
+    }
+
+    /* 用户线程fork */
+    mm_t *mm = vmm_mm_create();
+    if (!mm)
+    {
+        panic("Failed to alloc new mm for child process!\n");
+    }
+
+    /* 必须先建立独立 PGD 并设好 mm->pgd_ppn，vmm_mm_copy 才能向正确的页表写 PTE */
+    pframe_t *new_pgd_frame = alloc_page();
+    if (!new_pgd_frame)
+    {
+        panic("Failed to alloc new page for child process PGD!\n");
+    }
+    memset((void *)convert_pframe2kva(new_pgd_frame), 0, PGSIZE);
+    new_pgd_frame->reference += 1;
+    mm->pgd_ppn = convert_pframe2ppn(new_pgd_frame);
+    /* 复制内核半段（PGD[256..511]），使子进程能访问内核地址空间 */
+    memcpy(
+        (void *)pa_to_kva(convert_ppn2pa(mm->pgd_ppn)) + sizeof(pte_t) * 256,
+        (void *)pa_to_kva(convert_ppn2pa(vmm_kernel_pgd_ppn)) + sizeof(pte_t) * 256,
+        sizeof(pte_t) * 256
+    );
+
+    vmm_mm_copy(mm, TaskCurrent->proc_mm);
+
+    pcb->proc_mm = mm;
+    pcb->proc_context.satp = SATPMODE_RV39 | mm->pgd_ppn;
+
     return ENO0_NO_ERROR;
 }
 
@@ -326,22 +362,37 @@ void idle(void)
 #endif
         if (TaskCurrent->need_resched)
         {
-            // sched();
-            // TaskCurrent = TaskInit;
 #if DEBUG_PROC_CTXSTK
             printCtxStk(&(TaskCurrent->proc_context));
             printCtxStk(&(TaskInit->proc_context));
 #endif
-            switch_to(&(TaskCurrent->proc_context), &(TaskInit->proc_context));
-            while (1)
-                ;
+            /* 先更新 TaskCurrent，再用 TaskIdle 作 from；若先改 TaskCurrent 再用
+             * &TaskCurrent->proc_context 作 from，save 目标会变成 TaskInit 导致上下文覆写 */
+            TaskCurrent = TaskInit;
+            switch_to(&TaskIdle->proc_context, &TaskInit->proc_context);
+            /* switch_to 返回（被调度回 idle）后继续外层循环 */
         }
     }
 }
 
 static int16_t init(void)
 {
-    printf("Hello!I'm the init process!!\n");
+    printf("Hello! I'm the init process!!\n");
+
+#if DEBUG_PROC_init
+    /* 验证内核线程 satp 正确：switch_to 切换后，通过 KVA 读写新分配的物理帧。
+     * 若 satp 被 switch_to 写成 0（BARE 模式），此处访问高位 VA 会触发 access fault。 */
+    pframe_t *t_frame = alloc_page();
+    if (!t_frame)
+        panic("init test: alloc_page returned NULL");
+    volatile uint64_t *tp = (volatile uint64_t *)convert_pframe2kva(t_frame);
+    *tp = 0xabcd1234ef567890UL;
+    if (*tp != 0xabcd1234ef567890UL)
+        panic("init test: kernel thread KVA FAILED - satp incorrect after switch_to");
+    dealloc(t_frame);
+    printf("[init] kernel thread KVA after switch_to: PASS\n");
+#endif
+
     printf("I'm going away.\n");
     return ENO0_NO_ERROR;
 }
@@ -372,6 +423,7 @@ static void printCtxStk(ctx_t *ctx)
     printf("  s9       0x%08lx\n", (ctx->x25_s9));
     printf("  s10      0x%08lx\n", (ctx->x26_s10));
     printf("  s11      0x%08lx\n", (ctx->x27_s11));
+    printf("  satp     0x%08lx\n", (ctx->satp));
     printf("=================================================================\n");
 }
 #endif

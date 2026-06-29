@@ -1,10 +1,8 @@
 #include "pmm.h"
-#include "vmm.h"
 #include "stringops.h"
 #include "console.h"
 #include "sync.h"
-
-//@TODO:recyclePageTableRecursively(,cnt,...);
+#include "memtype.h"
 
 pframe_t *PageListBegin;
 fslist_t FreeList;  /* Free memories will arrange from small size to large size,used for best fit. */
@@ -17,12 +15,6 @@ osslock_t PmmLock;
 
 static pframe_t *deleteAndReinsert(uint16_t nsize);
 static void insertAndMerge(pframe_t *baseppn, uint16_t nsize);
-/* Return null if not exists.When using:@param pageTable should be base page table,@param level should be 3. */
-static pte_t *searchAndGetPteIfExists(pframe_t *pageTable, virAddr_t va, uint16_t level);
-/* Delete the pte which refers to this virtual addr (param va) and dealloc the mapping pframe of this pte if needed. */
-static void removePteFromPageTable(virAddr_t va, pte_t *pte);
-/* Turn the given va into vpns and insert them into different level page tables. Return null if failed,else return the pte of page table level1. */
-static pte_t *insertPteIntoPageTableRecursively(pframe_t *pageTable, virAddr_t va, uint16_t level, pteflg_t pteFlag);
 /* The following funs are used for micro memory alloc. */
 static void initMicroPhysicalMemoryPool(void);
 
@@ -31,14 +23,12 @@ const bffa_t BFallocator = {
     .bffa_insertAndMerge = insertAndMerge,
 };
 
-void physicalMemoryManagementInit(void)
+void pmm_init(void)
 {
-    extern unsigned int ekernel;
-    extern unsigned int skernel;
-    extern unsigned int _start;
-    phyAddr_t kernelEndAddr = (phyAddr_t)(&ekernel);
-    phyAddr_t kernelStartAddr = (phyAddr_t)(&skernel);
-    phyAddr_t kernelEntryAddr = (phyAddr_t)(&_start);
+    extern char _start[];
+    phyAddr_t kernelEndAddr   = (phyAddr_t)ekernel;
+    phyAddr_t kernelStartAddr = (phyAddr_t)skernel;
+    phyAddr_t kernelEntryAddr = (phyAddr_t)_start;
     printf("kernel: skernel:0x%08lx, ekernel:0x%08lx, kernel_entry:0x%08lx\n", kernelStartAddr, kernelEndAddr, kernelEntryAddr);
 
     phyAddr_t kernelRoundUpEndAddr = pa_roundup(kernelEndAddr);
@@ -100,7 +90,52 @@ void physicalMemoryManagementInit(void)
     printf("physicalMemoryManagement inited!\n");
 }
 
-void *alloc(uint16_t nsize)
+/**
+ * @name pmm_init_after_mmu_enable
+ * @brief 将MMU开启前pmm初始化时相关变量存储的物理地址修复为虚拟地址
+ * @details 之前FreeList、FreeAList、PageListBegin、
+ * MicroPhysicalMemoryPoolBase和PtrTableAddr数组中的值（包括PtrTableAddr本身）指针变量
+ * 都存储了物理地址，在开启MMU后会导致MMU将这些物理地址作为虚拟地址使用触发不应该的
+ * 缺页异常，需要在MMU开启后进行修复
+ */
+void pmm_init_after_mmu_enable(void)
+{
+    /* 先前pmm_init中PageListBegin指针存储了绝对物理地址，换成虚拟地址 */
+    PageListBegin = (pframe_t *)pa_to_kva((phyAddr_t)PageListBegin);
+
+    /* FreeList和FreeAList中的指针包括dummy head本身也需要更新 */
+    FreeList.list_linker.next = (struct list_head *)pa_to_kva(
+        (phyAddr_t)FreeList.list_linker.next);
+    FreeList.list_linker.prev = (struct list_head *)pa_to_kva(
+        (phyAddr_t)FreeList.list_linker.prev);
+    struct list_head *pos;
+    list_for_each(pos, &FreeList.list_linker)
+    {
+        pos->next = (struct list_head *)pa_to_kva((phyAddr_t)pos->next);
+        pos->prev = (struct list_head *)pa_to_kva((phyAddr_t)pos->prev);
+    }
+    FreeAList.list_linker.next = (struct list_head *)pa_to_kva(
+        (phyAddr_t)FreeAList.list_linker.next);
+    FreeAList.list_linker.prev = (struct list_head *)pa_to_kva(
+        (phyAddr_t)FreeAList.list_linker.prev);
+    list_for_each(pos, &FreeAList.list_linker)
+    {
+        pos->next = (struct list_head *)pa_to_kva((phyAddr_t)pos->next);
+        pos->prev = (struct list_head *)pa_to_kva((phyAddr_t)pos->prev);
+    }
+
+    /* 微内存池相关变量更新 */
+    MicroPhysicalMemoryPoolBase = (pframe_t *)pa_to_kva(
+        (phyAddr_t)(MicroPhysicalMemoryPoolBase)); /* 注意不要用convert_pframe2pa，这里是把指针本身值转换为高位值 */
+    PtrTableAddr = (phyAddr_t *)pa_to_kva((phyAddr_t)PtrTableAddr);
+    for (uint16_t cursor = 0; cursor <= 64; cursor++) /* 含哨兵值 */
+    {
+        /* 将存储的物理地址实际存储为虚拟地址 */
+        PtrTableAddr[cursor] = (phyAddr_t)pa_to_kva(PtrTableAddr[cursor]);
+    }
+}
+
+pframe_t *alloc(uint16_t nsize)
 {
     pframe_t *ret = NULL;
     if (nsize > FreeList.fnsize)
@@ -113,7 +148,7 @@ void *alloc(uint16_t nsize)
     {
         // extern mm_t *currentProcessMm;
         ret = BFallocator.bffa_deleteAndReinsert(nsize);
-        if (ret != NULL || readyToSwap == false || nsize > 1)
+        if (ret != NULL || nsize > 1)
         {
             break;
         }
@@ -128,12 +163,12 @@ void *alloc(uint16_t nsize)
             currentFrame->canBeAlloc = 0;
         }
 
-        phyAddr_t *dst;
-        dst = (phyAddr_t *)convert_pframe2pa(ret);
-        while (dst != (phyAddr_t *)convert_pframe2pa(ret + nsize))
-        {
-            *dst++ = 0;
-        }
+        /* MMU 关闭时 PA 可直接解引用；开启后物理地址无恒等映射，需经 KVA */
+        phyAddr_t frame_pa = convert_pframe2pa(ret);
+        void *zero_dst = mmu_is_enabled()
+                         ? (void *)pa_to_kva(frame_pa)
+                         : (void *)frame_pa;
+        memset(zero_dst, 0, (size_t)nsize * PGSIZE);
 
         /* "ret->nsize" restores the size of this alloced block which is convenient to free block. */
         ret->nsize = nsize;
@@ -152,24 +187,9 @@ f1:
     return ret;
 }
 
-void *allocOneFrame(void)
+pframe_t *alloc_page(void)
 {
     return alloc((uint16_t)1);
-}
-
-pte_t *getPTE(pframe_t *pageTable, virAddr_t va)
-{
-    return searchAndGetPteIfExists(pageTable, va, 3);
-}
-
-void removePTE(virAddr_t va, pte_t *pte)
-{
-    removePteFromPageTable(va, pte);
-}
-
-pte_t *insertPTE(pframe_t *pageTable, virAddr_t va, pteflg_t pteFlag)
-{
-    return insertPteIntoPageTableRecursively(pageTable, va, 3, pteFlag);
 }
 
 void *microAlloc(uint64_t size)
@@ -442,101 +462,6 @@ static void insertAndMerge(pframe_t *baseppn, uint16_t nsize)
     }
 }
 
-static pte_t *searchAndGetPteIfExists(pframe_t *pageTable, virAddr_t va, uint16_t level)
-{
-    pte_t *pageTableAddrPointer; /* Because essentially it is a pte array. [0]~[511] */
-    vpn_t currentVpn;
-    pte_t *currentPte;
-    pageTableAddrPointer = (pte_t *)convert_pframe2pa(pageTable);
-    currentVpn = convert_va2vpn(va, level);
-    currentPte = &(pageTableAddrPointer[currentVpn]);
-    if (!pteIsValid(*currentPte))
-    {
-        return (pte_t *)0;
-    }
-    else
-    {
-        if (level > 1)
-        {
-            ppn_t ppnOfNextLevelPageTable;
-            ppnOfNextLevelPageTable = pteGetPpn(*currentPte);
-            return searchAndGetPteIfExists(convert_ppn2pframe(ppnOfNextLevelPageTable), va, level - 1);
-        }
-        else /* level == 1 */
-        {
-            return currentPte;
-        }
-    }
-}
-
-static void removePteFromPageTable(virAddr_t va, pte_t *pte)
-{
-    if (pteIsValid(*pte))
-    {
-        pframe_t *currentFrame;
-        currentFrame = convert_pte2pframe(*pte);
-        currentFrame->reference = currentFrame->reference - 1;
-        if (currentFrame->reference == 0)
-        {
-            dealloc(currentFrame);
-        }
-        *pte = (pte_t)0;
-        refreshTLB(va);
-    }
-}
-
-/* This function will auto create middle pte if needed. */
-static pte_t *insertPteIntoPageTableRecursively(pframe_t *pageTable, virAddr_t va, uint16_t level, pteflg_t pteFlag)
-{
-    pte_t *pageTableAddrPointer;
-    vpn_t currentVpn;
-    pte_t *currentPte;
-    pageTableAddrPointer = (pte_t *)convert_pframe2pa(pageTable);
-    currentVpn = convert_va2vpn(va, level);
-    currentPte = &(pageTableAddrPointer[currentVpn]);
-    if (!pteIsValid(*currentPte)) /* Current pte does not exist. */
-    {
-        pframe_t *newFrameOfNextLevelPageTable;
-        pte_t newPteOfThisLevelPageTable;
-        newFrameOfNextLevelPageTable = allocOneFrame();
-        newFrameOfNextLevelPageTable->reference = newFrameOfNextLevelPageTable->reference + 1;
-        if (newFrameOfNextLevelPageTable == NULL)
-        {
-            printf("Failed to insert pte:No more free memories!\n");
-            return (pte_t *)0;
-        }
-        /* When level is 1,it means this is level1 page table so newFrameOfNextLevelPageTable is the physical frame but not the page table. */
-        if (level == 1)
-        {
-            newPteOfThisLevelPageTable = pteCreate(convert_pframe2ppn(newFrameOfNextLevelPageTable), pteFlag);
-            newFrameOfNextLevelPageTable->va = va;
-            *currentPte = newPteOfThisLevelPageTable;
-            return currentPte;
-        }
-        /* Middle pte and page table. */
-        else
-        {
-            newPteOfThisLevelPageTable = pteCreate(convert_pframe2ppn(newFrameOfNextLevelPageTable), PTE_V);
-            *currentPte = newPteOfThisLevelPageTable;
-        }
-    }
-    /* Else the current pte (middle page table) exists. */
-    else
-    {
-        /* Target pte(currentPte) is already exists,modify it. */
-        if (level == 1)
-        {
-            pte_t tempPte;
-            tempPte = *currentPte;
-            *currentPte = pteCreate(convert_pframe2ppn(convert_pte2pframe(tempPte)), pteFlag);
-            convert_pte2pframe(tempPte)->va = va;
-            return currentPte;
-        }
-    }
-    /* The middle page table already exists. */
-    return insertPteIntoPageTableRecursively(convert_pte2pframe(*currentPte), va, level - 1, pteFlag);
-}
-
 static void initMicroPhysicalMemoryPool(void)
 {
     MicroPhysicalMemoryPoolBase = alloc(2); /* Total size 8192 byte. */
@@ -608,7 +533,7 @@ static void initMicroPhysicalMemoryPool(void)
 #endif
         }
         /* Sentinel: marks end of last slot, used by microAlloc's zero-fill loop */
-        PtrTableAddr[64] = PtrTableAddr[63] + 1024;
+        PtrTableAddr[64] = PtrTableAddr[63] + 1024; /* PtrTableAddr[64] = PtrTableAddr[0] + 8192 */
         printf("microPhysicalMemoryPool inited!\n");
     }
 }
