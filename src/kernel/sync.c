@@ -7,7 +7,7 @@
 void irqDisableNestingIncrement(void)
 {
     bool intr_flag;
-    __localIntrSave(intr_flag);
+    __local_intr_save(intr_flag);
     cpu_t *cpu = getCurrentCpu();
     if (cpu->irqDisableNesting == 0)
     {
@@ -24,7 +24,7 @@ void irqDisableNestingDecrement(void)
     /* 当"cpu->intrDisableState"且"cpu->irqDisableNesting"等于0时重新打开中断。 */
     if (cpu->irqDisableNesting == 0)
     {
-        __localIntrRestore(cpu->intrDisableState);
+        __local_intr_restore(cpu->intrDisableState);
     }
 }
 

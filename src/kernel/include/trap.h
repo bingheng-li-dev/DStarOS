@@ -70,44 +70,44 @@ struct int_stackframe
 typedef struct int_stackframe intstkf_t;
 
 /* 保存当前中断状态并关闭中断；do{}while(0)用于保证外部操作与宏之间不会相互影响。必须与"localIntrRestore"成对使用。 */
-#define __localIntrSave(x) \
+#define __local_intr_save(x) \
     do                     \
     {                      \
-        x = __intrSave();  \
+        x = __intr_save();  \
     } while (0)
 
 /* 还原上一次的中断状态；必须与"localIntrSave"成对使用。 */
-#define __localIntrRestore(x) __intrRestore(x)
+#define __local_intr_restore(x) __intr_restore(x)
 
 void trap_init(void);
 /* 关闭当前CPU的中断。 */
-void localIntrDisable(void);
+void local_intr_disable(void);
 /* 打开当前CPU的中断。 */
-void localIntrEnable(void);
-void kernelTrapHandler(intstkf_t *sp);
-void print_intstk(intstkf_t *sp);
+void local_intr_enable(void);
+void trap_handler(intstkf_t *sp);
+
 #if DEBUG_INTSTACK
 void print_intstk(intstkf_t *sp);
 #endif
 
-extern void tickIntHandler(void);
+extern void tick_int_handler(void);
 
 /* 返回中断的打开/关闭状态；并且关闭中断（如果处于打开状态）。 */
-static inline bool __intrSave(void)
+static inline bool __intr_save(void)
 {
     if (read_csr(sstatus) & SSTATUS_SIE)
     {
-        localIntrDisable();
+        local_intr_disable();
         return true;
     }
     return false;
 }
 
-static inline void __intrRestore(bool flag)
+static inline void __intr_restore(bool flag)
 {
     if (flag)
     {
-        localIntrEnable();
+        local_intr_enable();
     }
 }
 

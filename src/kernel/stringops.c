@@ -77,6 +77,20 @@ void *memmove(void *dst, const void *src, size_t n)
     return dst;
 }
 
+int memcmp(const void *s1, const void *s2, size_t n)
+{
+    const unsigned char *p = s1, *q = s2;
+    while (n-- > 0)
+    {
+        if (*p != *q)
+        {
+            return (int)*p - (int)*q;
+        }
+        p++, q++;
+    }
+    return 0;
+}
+
 int strncmp(const char *p, const char *q, uint32_t n)
 {
     while (n > 0 && *p && *p == *q)
@@ -94,32 +108,6 @@ char *strchr(const char *s, char c)
     return 0;
 }
 
-/* convert wide char string into uchar string */
-void snstr(char *dst, uint16_t const *src, int len)
-{
-    while (len-- && *src)
-    {
-        *dst++ = (uint8_t)(*src & 0xff);
-        src++;
-    }
-    while (len-- > 0)
-        *dst++ = 0;
-}
-
-int wcsncmp(uint16_t const *s1, uint16_t const *s2, int len)
-{
-    int ret = 0;
-
-    while (len-- && *s1)
-    {
-        ret = (int)(*s1++ - *s2++);
-        if (ret)
-            break;
-    }
-
-    return ret;
-}
-
 size_t strlen(const char *s)
 {
     size_t n;
@@ -127,28 +115,4 @@ size_t strlen(const char *s)
     for (n = 0; s[n]; n++)
         ;
     return n;
-}
-
-/* convert uchar string into wide char string */
-void wnstr(uint16_t *dst, char const *src, int len)
-{
-    while (len-- && *src)
-    {
-        *(uint8_t *)dst = *src++;
-        dst++;
-    }
-
-    *dst = 0;
-}
-
-char *strncpy(char *s, const char *t, int n)
-{
-    char *os;
-
-    os = s;
-    while (n-- > 0 && (*s++ = *t++) != 0)
-        ;
-    while (n-- > 0)
-        *s++ = 0;
-    return os;
 }

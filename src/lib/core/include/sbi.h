@@ -274,7 +274,11 @@ static inline void sbi_set_timer(uint64_t stime_value)
 
 static inline void sbi_shutdown(void)
 {
-    SBI_CALL_LEGACY(SBI_EXT_0_1_SHUTDOWN, 0, 0, 0);
+    /* legacy v0.1 SHUTDOWN 扩展已被 RustSBI 0.4.0 弃用（调用后直接返回，机器不会关闭），
+     * 改用标准 SRST 扩展（v0.2+）。 */
+    sbi_ecall(SBI_EXT_SRST, SBI_EXT_SRST_RESET,
+              SBI_SRST_RESET_TYPE_SHUTDOWN, SBI_SRST_RESET_REASON_NONE,
+              0, 0, 0, 0);
 }
 
 /* ------------------------------------------------------------------ */

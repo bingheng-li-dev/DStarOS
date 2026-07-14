@@ -94,5 +94,6 @@ void proc_init(void);
 void idle(void) __attribute__((noreturn));
 void sleep(void);
 void wakeup(pcb_t *proc);
+void enter_user_mode(virAddr_t entry, virAddr_t ustack) __attribute__((noreturn));
 
 #endif

@@ -7,6 +7,7 @@
 #include "vfs.h"
 #include "cpu.h"
 #include "vmm.h"
+#include "elf.h"
 
 /* List of all processes. */
 struct list_head ProcList;
@@ -26,9 +27,9 @@ static pcb_t *allocNewProc(void);
 /* Dealloc the pcb of a proc. */
 static void deallocAProcNotDeeply(pcb_t *pcb);
 /* Alloc the kernel stack of a proc. */
-static int16_t allocKernelStack(pcb_t *pcb);
+static int16_t alloc_kernel_stack(pcb_t *pcb);
 /* Dealloc the kernel stack of a proc.Attention that it doesn't dealloc the memory pointed by pointers of the pcb!! */
-static int16_t deallocKernelStack(pcb_t *pcb) __attribute__((used));
+static int16_t dealloc_kernel_stack(pcb_t *pcb) __attribute__((used));
 /* Copy the virtual memory management struct of a proc. */
 static int16_t copy_proc_mm(uint32_t clone_flags, pcb_t *pcb);
 /* Copy the stack which is up to the param stack(if stack==0, It means to fork a kernel thread). */
@@ -74,7 +75,7 @@ int16_t do_fork(uint32_t clone_flags, uintptr_t stack, intstkf_t *regs)
         goto f1;
     }
     int16_t ret = ENO0_NO_ERROR;
-    ret = allocKernelStack(newProc);
+    ret = alloc_kernel_stack(newProc);
     if (ret == ENO1_NOMORE_MEM)
     {
         goto f2;
@@ -209,18 +210,18 @@ static void deallocAProcNotDeeply(pcb_t *pcb)
     }
 }
 
-static int16_t allocKernelStack(pcb_t *pcb)
+static int16_t alloc_kernel_stack(pcb_t *pcb)
 {
-    phyAddr_t *kernelStackPageAddr = kmalloc(KERNRL_STKSIZE);
-    if (kernelStackPageAddr != NULL)
+    phyAddr_t *kernel_stack_page_addr = kmalloc(KERNRL_STKSIZE);
+    if (kernel_stack_page_addr != NULL)
     {
-        pcb->kernel_stack = (phyAddr_t)kernelStackPageAddr;
+        pcb->kernel_stack = (phyAddr_t)kernel_stack_page_addr;
         return ENO0_NO_ERROR;
     }
     return ENO1_NOMORE_MEM;
 }
 
-static int16_t deallocKernelStack(pcb_t *pcb)
+static int16_t dealloc_kernel_stack(pcb_t *pcb)
 {
     kfree((void *)(pcb->kernel_stack));
     return ENO0_NO_ERROR;
@@ -375,6 +376,46 @@ void idle(void)
     }
 }
 
+extern const unsigned char user_elf[];
+extern const unsigned long user_elf_len;
+
+#define USER_STACK_TOP  0x40000000UL
+#define USER_STACK_LEN  (16 * PGSIZE)      /* 64 KB，懒分配 */
+
+static void run_first_user_program(void)
+{
+    /* 1) 独立用户 mm（复用 copy_proc_mm 用户分支的建 PGD + 复制内核半段套路） */
+    mm_t *mm = vmm_mm_create();
+    pframe_t *pgd = alloc_page();
+    memset((void *)convert_pframe2kva(pgd), 0, PGSIZE);
+    pgd->reference += 1;
+    mm->pgd_ppn = convert_pframe2ppn(pgd);
+    memcpy((void *)pa_to_kva(convert_ppn2pa(mm->pgd_ppn)) + sizeof(pte_t) * 256,
+           (void *)pa_to_kva(convert_ppn2pa(vmm_kernel_pgd_ppn)) + sizeof(pte_t) * 256,
+           sizeof(pte_t) * 256);
+
+    /* 2) 切到用户地址空间（page fault 用 TaskCurrent->proc_mm，必须先挂上） */
+    TaskCurrent->proc_mm = mm;
+    TaskCurrent->proc_context.satp = SATPMODE_RV39 | mm->pgd_ppn;
+    write_csr(satp, TaskCurrent->proc_context.satp);
+    tlb_flush_all();
+
+    /* 3) 解析 ELF：按 PT_LOAD 段建 VMA、映射、拷贝内容，得到程序入口地址 */
+    virAddr_t entry;
+    int ret = elf_load(mm, user_elf, user_elf_len, &entry);
+    if (ret != ENO0_NO_ERROR)
+    {
+        panic("run_first_user_program: elf_load failed, ret=%d", ret);
+    }
+
+    /* 4) 用户栈 VMA（懒分配，首次访问由 page fault 落实） */
+    vma_t *stk = vmm_vma_create(USER_STACK_TOP - USER_STACK_LEN, USER_STACK_TOP, VMP_R | VMP_W);
+    vmm_vma_insert(mm, stk);
+
+    /* 5) 进入 U 态 */
+    enter_user_mode(entry, USER_STACK_TOP);
+}
+
 static int16_t init(void)
 {
     printf("Hello! I'm the init process!!\n");
@@ -384,16 +425,23 @@ static int16_t init(void)
      * 若 satp 被 switch_to 写成 0（BARE 模式），此处访问高位 VA 会触发 access fault。 */
     pframe_t *t_frame = alloc_page();
     if (!t_frame)
+    {
         panic("init test: alloc_page returned NULL");
+    }
     volatile uint64_t *tp = (volatile uint64_t *)convert_pframe2kva(t_frame);
     *tp = 0xabcd1234ef567890UL;
     if (*tp != 0xabcd1234ef567890UL)
+    {
         panic("init test: kernel thread KVA FAILED - satp incorrect after switch_to");
+    }
     dealloc(t_frame);
     printf("[init] kernel thread KVA after switch_to: PASS\n");
 #endif
 
     printf("I'm going away.\n");
+
+    run_first_user_program();
+
     return ENO0_NO_ERROR;
 }
 
@@ -427,3 +475,48 @@ static void printCtxStk(ctx_t *ctx)
     printf("=================================================================\n");
 }
 #endif
+
+/**
+ * @brief 将当前内核线程变身为用户态进程，跳转到用户入口执行
+ * @param[in] entry  用户程序入口虚拟地址（将写入 sepc，sret 后 PC 跳至此处）
+ * @param[in] ustack 用户栈顶虚拟地址（将写入帧的 x2_sp，须 16 字节对齐）
+ * @details
+ *   此函数复用 fork_out_asm → trap_return → sret 这条已有的"从 trap 帧恢复并返回"路径，
+ *   在内核栈顶伪造一个 trap 帧，使硬件以为这是一次正常的 trap 返回，从而以 U 态身份
+ *   跳入用户入口。具体步骤：
+ *
+ *   1. 在内核栈顶（kernel_stack + KERNRL_STKSIZE）向下划出 sizeof(intstkf_t) 空间，
+ *      清零后填写关键字段：
+ *        - sepc    = entry        （sret 后 PC 跳至用户入口）
+ *        - x2_sp   = ustack       （用户栈顶）
+ *        - sstatus = SPP=0        （sret 返回 U 态）
+ *                  | SPIE=1       （返回后恢复中断使能）
+ *                  | SUM=1        （内核全程可访问用户页，与 trap_init 保持一致）
+ *        - x4_tp   = 当前 tp      （维持 core id，单核足够；SMP 下需在 trap_entry 重载）
+ *   2. 写 sscratch = 内核栈顶，建立"下次从 U 态 trap 进来时切回内核栈"的不变式
+ *      （trap_entry 用 csrrw sp, sscratch, sp 实现栈切换）。
+ *   3. 调用 fork_out_asm(f)：将 sp 设为伪造帧地址，跳入 trap_return，
+ *      恢复所有寄存器后执行 sret，进入 U 态。
+ *
+ * @note 此函数不返回（标注 __attribute__((noreturn))）。
+ *   调用前须确保：
+ *     - TaskCurrent->proc_mm 已挂载用户地址空间且 satp 已切换；
+ *     - entry 所在代码页和 ustack 所在栈 VMA 已就绪（可为懒分配，首次访问触发 page fault）；
+ *     - trap_init 已置 sstatus.SUM=1，内核可直接读写用户页。
+ */
+void enter_user_mode(virAddr_t entry, virAddr_t ustack)
+{
+    extern void fork_out_asm(intstkf_t *regs) __attribute__((noreturn));
+
+    pcb_t *cur = TaskCurrent;
+    /* 由高地址向低地址开辟帧空间，不会覆盖原有数据，因为该函数noreturn，原栈空间数据已无用 */
+    intstkf_t *f = (intstkf_t *)(cur->kernel_stack + KERNRL_STKSIZE - sizeof(intstkf_t));
+
+    memset(f, 0, sizeof(intstkf_t));
+    f->sepc    = entry;
+    f->x2_sp   = ustack;
+    f->x4_tp   = getCoreId();
+    f->sstatus = (read_csr(sstatus) & ~SSTATUS_SPP) | SSTATUS_SPIE | SSTATUS_SUM;
+    write_csr(sscratch, (uintptr_t)(cur->kernel_stack + KERNRL_STKSIZE));
+    fork_out_asm(f);
+}

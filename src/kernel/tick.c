@@ -35,7 +35,7 @@ void tick_init(void)
     printf("core %d tick inited!\n", getCoreId());
 }
 
-void tickIntHandler(void)
+void tick_int_handler(void)
 {
     spinlockAcquire(&ticksLock);
     getCurrentCpu()->tick += 1;

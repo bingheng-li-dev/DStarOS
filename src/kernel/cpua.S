@@ -3,25 +3,35 @@
 
     .section      .text
     .align 2
-    .globl trapInit_asm
-trapInit_asm:
-    la t0, trapEntry
+    .globl trap_init_asm
+trap_init_asm:
+    la t0, trap_entry
     csrw stvec, t0
+    csrw sscratch, zero # sscratch初始化为0，原因见trap_entry
     ret
 
-    .globl trapEntry
+    .local trap_entry
     .align 2
-trapEntry:
-    csrw sscratch, sp
+trap_entry:
+    /** 
+     * U 态触发 trap 时 sp 是用户栈，但不应在用户栈上建立中断内核栈帧，需要去内核栈
+     * 业界标准约定，触发中断时：
+     * 运行在 U 态时， sscratch 正持有该进程的内核栈顶；
+     * 运行在 S 态时， sscratch 正持有0。
+     */
+    csrrw sp, sscratch, sp  # 交换：来自 U 则 sp←内核栈顶, sscratch←用户sp；来自 S 则 sp←0, sscratch←内核sp
+    bnez sp, 1f             # sp != 0 → 来自 U 态（sscratch 原本存内核栈顶）
+    csrr  sp, sscratch      # 来自 S 态：sscratch 现含触发时的内核 sp，装回 sp（不再交换回去）
 
+1:
     addi  sp,  sp, -35 * REGBYTES
 
-    sd x1, 1*REGBYTES(sp)
+    sd x1, 1*REGBYTES(sp)   # ra
 
     csrr  x1, scause
     sd x1, 0*REGBYTES(sp)
 
-    csrrw x1, sscratch, x0
+    csrrw x1, sscratch, zero    # x1 ← 触发时的原始 sp（用户sp 或 内核sp）；sscratch ← 0
     sd x1, 2*REGBYTES(sp)
 
     sd x3, 3*REGBYTES(sp)
@@ -65,11 +75,23 @@ trapEntry:
 
     mv a0, sp
 
-    call kernelTrapHandler
+    call trap_handler
 
-    .globl trapReturn
+    .local trap_return
     .align 2
-trapReturn:
+trap_return:
+    # 在恢复寄存器之前，依据将要恢复的 sstatus.SPP 设置 sscratch
+    ld t0, 33*REGBYTES(sp)      # 取将恢复的 sstatus，SPP 记录进入中断之前处理器为U还是S
+    andi t1, t0, SSTATUS_SPP    # t1 = t0 & SSTATUS_SPP（0x0100），按位与后t1=0x100或0x000
+    bnez t1, 1f                 # 0为U态，1为S态
+    addi t2, sp, 35*REGBYTES    # 返回 U 态：sscratch ← 内核栈顶
+    csrw sscratch, t2
+    j 2f
+    
+1:
+    csrw sscratch, zero         # 返回 S 态：sscratch ← 0
+
+2:
     ld x1, 32*REGBYTES(sp)
     csrw sepc, x1
 
@@ -161,7 +183,7 @@ switch_to:
     .align 2
 fork_out_asm:
     mv sp, a0
-    j  trapReturn
+    j  trap_return
     
     .globl kernel_thread_entry
     .align 2

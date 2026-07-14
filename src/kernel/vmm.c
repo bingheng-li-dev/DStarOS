@@ -423,7 +423,7 @@ void vmm_mm_destroy(mm_t *mm)
  *   2. 通过 vmm_vma_get() 查找包含 badva 的 VMA；未找到表示非法访问，panic（segfault）。
  *   3. 权限检查：写操作要求 VMP_W，取指要求 VMP_X；不满足则 panic（segfault）。
  *   4. 分配新物理帧，清零，建立 PTE，刷新 TLB。
- * @note 此函数由 trap.c 中的 kernelTrapHandler() 调用，运行在中断上下文中（中断已关闭）。
+ * @note 此函数由 trap.c 中的 trap_handler() 调用，运行在中断上下文中（中断已关闭）。
  *   panic 路径不会返回；正常路径返回后，异常指令将被重新执行。
  */
 void vmm_page_fault_handler(virAddr_t badva, int fault_type)

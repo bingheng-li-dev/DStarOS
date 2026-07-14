@@ -51,7 +51,7 @@ void os_init_after_mmu_enable(uint64_t hartid)
         fs_init();
         printf("core %ld init done\n", getCoreId());
 
-        #if DEBUG_INIT_main_core0
+#if DEBUG_INIT_main_core0
         main(0, (void *)0);
 #endif
 
