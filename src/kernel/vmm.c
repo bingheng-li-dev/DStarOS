@@ -4,6 +4,7 @@
 #include "console.h"
 #include "proc.h"
 #include "stringops.h"
+#include "cpu.h"
 
 /**
  * @brief 内核页表根目录的物理页号。
@@ -419,7 +420,7 @@ void vmm_mm_destroy(mm_t *mm)
  * @param[in] badva      触发页错误的虚拟地址（来自 stval/sbadaddr 寄存器）
  * @param[in] fault_type 错误类型：0 = 指令取指页错误，1 = 读页错误，2 = 写页错误
  * @details 处理流程：
- *   1. 从当前进程（TaskCurrent）获取 mm_t；内核线程的 mm 为 NULL，视为内核页错误直接 panic。
+ *   1. 从当前进程（getCurrentProc()）获取 mm_t；内核线程的 mm 为 NULL，视为内核页错误直接 panic。
  *   2. 通过 vmm_vma_get() 查找包含 badva 的 VMA；未找到表示非法访问，panic（segfault）。
  *   3. 权限检查：写操作要求 VMP_W，取指要求 VMP_X；不满足则 panic（segfault）。
  *   4. 分配新物理帧，清零，建立 PTE，刷新 TLB。
@@ -428,8 +429,7 @@ void vmm_mm_destroy(mm_t *mm)
  */
 void vmm_page_fault_handler(virAddr_t badva, int fault_type)
 {
-    extern pcb_t *TaskCurrent;
-    mm_t *mm = TaskCurrent->proc_mm;
+    mm_t *mm = getCurrentProc()->proc_mm;
     if (!mm)
     {
         printf("vmm: page fault with no mm (va=0x%lx)\n", badva);

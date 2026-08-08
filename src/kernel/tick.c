@@ -4,6 +4,7 @@
 #include "sbi.h"
 #include "debug.h"
 #include "encoding.h"
+#include "sched.h"
 
 #define osTick getSpecifiedCpu(0)->tick
 
@@ -29,7 +30,7 @@ static void tickSetNextInt(uint64_t stime)
 /* 必须在trap_init()之后被调用 */
 void tick_init(void)
 {
-    spinlockInit(&ticksLock);
+    spinlock_init(&ticksLock);
     tickSetNextInt(TIMEBASE);
     getCurrentCpu()->tick = 0;
     printf("core %d tick inited!\n", getCoreId());
@@ -37,7 +38,7 @@ void tick_init(void)
 
 void tick_int_handler(void)
 {
-    spinlockAcquire(&ticksLock);
+    spinlock_acquire(&ticksLock);
     getCurrentCpu()->tick += 1;
 #if DEBUG_TICK
     if (getCurrentCpu()->tick % 100 == 0)
@@ -45,8 +46,8 @@ void tick_int_handler(void)
         printf("core %ld : %ld ticks\n", getCurrentCpu()->tick);
     }
 #endif
-    //There seems sth to do on proc...
-    spinlockRelease(&ticksLock);
+    sched_task_tick();
+    spinlock_release(&ticksLock);
     tickSetNextInt(TIMEBASE);
 }
 

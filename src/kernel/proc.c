@@ -8,54 +8,47 @@
 #include "cpu.h"
 #include "vmm.h"
 #include "elf.h"
+#include "sbi.h"
 
 /* List of all processes. */
-struct list_head ProcList;
+struct list_head proc_list;
 /* Stack of all dealloced pids.In order to alloc these pids again. */
-struct list_head PidStack;
-/* Idle task. */
-pcb_t *TaskIdle = NULL;
-/* Init task. */
-pcb_t *TaskInit = NULL;
-/* Current task. */
-pcb_t *TaskCurrent = NULL;
+struct list_head pid_stack;
 /* Amount of processes. */
-uint16_t TaskCount = 0;
+uint16_t task_count = 0;
 
 /* Alloc a new empty pcb(proc). */
-static pcb_t *allocNewProc(void);
-/* Dealloc the pcb of a proc. */
-static void deallocAProcNotDeeply(pcb_t *pcb);
+static pcb_t *alloc_new_proc(void);
 /* Alloc the kernel stack of a proc. */
 static int16_t alloc_kernel_stack(pcb_t *pcb);
 /* Dealloc the kernel stack of a proc.Attention that it doesn't dealloc the memory pointed by pointers of the pcb!! */
-static int16_t dealloc_kernel_stack(pcb_t *pcb) __attribute__((used));
+static int16_t dealloc_kernel_stack(pcb_t *pcb);
 /* Copy the virtual memory management struct of a proc. */
 static int16_t copy_proc_mm(uint32_t clone_flags, pcb_t *pcb);
 /* Copy the stack which is up to the param stack(if stack==0, It means to fork a kernel thread). */
-static void copyProcStk(pcb_t *pcb, uintptr_t stack, intstkf_t *regs);
+static void copy_proc_stk(pcb_t *pcb, uintptr_t stack, intstkf_t *regs);
 /* Create task idle. */
-static pcb_t *createFirstProcIdle(void);
+static pcb_t *create_first_proc_idle(void);
 /* Find the pcb of a proc by its pid. */
-static pcb_t *findProcByPid(int16_t pid);
+static pcb_t *find_proc_by_pid(int16_t pid);
 /* Alloc a unique pid for process. */
-static int16_t allocPidMap(void);
-static void deallocPidMap(int16_t pid) __attribute__((used));
+static int16_t alloc_pid_map(void);
+static void dealloc_pid_map(int16_t pid);
 /* Kernel's init process which pid is 1. */
 static int16_t init(void);
 static void fork_out(void);
 #if DEBUG_PROC_CTXSTK
-static void printCtxStk(ctx_t *ctx);
+static void print_ctx_stk(ctx_t *ctx) __attribute__((used));
 #endif
 
-char *setProcName(pcb_t *proc, const char *name)
+char *set_proc_name(pcb_t *proc, const char *name)
 {
     memset(proc->proc_pname, 0, PNAME_MAX_LENGTH);
     return memcpy(proc->proc_pname, name, sizeof(name));
 }
 
 /* Remember to recycle memory of name. */
-char *getProcName(pcb_t *proc)
+char *get_proc_name(pcb_t *proc)
 {
     char *name = kmalloc(PNAME_MAX_LENGTH);
     memset(name, 0, sizeof(name));
@@ -65,62 +58,161 @@ char *getProcName(pcb_t *proc)
 /* @param stack the parent's user stack pointer. if stack==0, It means to fork a kernel thread. */
 int16_t do_fork(uint32_t clone_flags, uintptr_t stack, intstkf_t *regs)
 {
-    if (TaskCount > PROC_MAX_AMOUNT)
+    if (task_count > PROC_MAX_AMOUNT)
     {
         goto f1;
     }
-    pcb_t *newProc = allocNewProc();
-    if (newProc == NULL)
+    pcb_t *new_proc = alloc_new_proc();
+    if (new_proc == NULL)
     {
         goto f1;
     }
     int16_t ret = ENO0_NO_ERROR;
-    ret = alloc_kernel_stack(newProc);
+    ret = alloc_kernel_stack(new_proc);
     if (ret == ENO1_NOMORE_MEM)
     {
         goto f2;
     }
 
-    copy_proc_mm(clone_flags, newProc);
-    copyProcStk(newProc, stack, regs);
+    copy_proc_mm(clone_flags, new_proc);
+    copy_proc_stk(new_proc, stack, regs);
 
     /* 子进程继承父进程的当前工作目录 */
-    newProc->proc_cwd = TaskCurrent->proc_cwd;
-    if (newProc->proc_cwd)
+    new_proc->proc_cwd = getCurrentProc()->proc_cwd;
+    if (new_proc->proc_cwd)
     {
         /* 增加 cwd 目录项的引用计数，防止父进程 chdir 后 dentry 被释放 */
-        dentry_get_pub(newProc->proc_cwd);
+        dentry_get_pub(new_proc->proc_cwd);
     }
 
     int16_t pid = ENO3_NOFREE_PID;
-    pid = allocPidMap();
-    newProc->proc_pid = pid;
+    pid = alloc_pid_map();
+    new_proc->proc_pid = pid;
 
 #if DEBUG_PROC_do_fork
     printf("do_fork::pid:%d\n", pid);
 #endif
 
-    list_add(&(newProc->proc_list_linker), &(ProcList));
-    TaskCount = TaskCount + 1;
+    list_add(&(new_proc->proc_list_linker), &(proc_list));
+    task_count = task_count + 1;
+
+    new_proc->proc_parent = getCurrentProc();
+    list_add_tail(&(new_proc->proc_sibling_linker), &(getCurrentProc()->proc_children));
+
+    new_proc->proc_state = RUNNING;
+    sched_activate(new_proc);
 
     return pid;
 f1:
     return ENO2_ALLOCPROC_FAILED;
 f2:
-    deallocAProcNotDeeply(newProc);
+    kfree(new_proc);
     return ENO1_NOMORE_MEM;
 }
 
-int16_t do_exit(int16_t error_code)
+void do_exit(int16_t error_code)
 {
-    vmm_mm_destroy(TaskCurrent->proc_mm);
-    printf("exit not finished!!\n");
-    while (1)
-        ;
-    return ENO0_NO_ERROR;
+    pcb_t *curr = getCurrentProc();
+
+    /* 孤儿过继给 init（pid 恒为 1：系统里第一个 do_fork 出来的进程）；
+     * 有孤儿就唤醒 init，让它有机会发现并收割这些可能已经是 ZOMBIE 的孤儿 */
+    pcb_t *init_proc = find_proc_by_pid(1);
+    bool has_orphan = false;
+    struct list_head *pos, *tmp;
+    list_for_each_safe(pos, tmp, &curr->proc_children)
+    {
+        pcb_t *child = list_entry(pos, pcb_t, proc_sibling_linker);
+        child->proc_parent = init_proc;
+        list_del(&child->proc_sibling_linker);
+        list_add_tail(&child->proc_sibling_linker, &init_proc->proc_children);
+        has_orphan = true;
+    }
+    if (has_orphan)
+    {
+        wakeup(init_proc);
+    }
+
+    if (curr->proc_mm)
+    {
+        /* 必须先切回内核页表再销毁 mm——现在站在的正是这张页表，vmm_mm_destroy
+         * 释放的物理页一旦被 PMM 重新分配、内容被覆写，下一条指令取指/访存就会三重错误 */
+        write_csr(satp, SATPMODE_RV39 | vmm_kernel_pgd_ppn);
+        tlb_flush_all();
+        vmm_mm_destroy(curr->proc_mm);
+        curr->proc_mm = NULL;
+    }
+    curr->proc_exit_code = error_code;
+    curr->proc_state = ZOMBIE;
+    /* pid 不在这里回收——ZOMBIE 期间 pid 必须继续"占用"，
+     * 否则两次退出之间创建的新进程可能撞上同一个 pid。
+     * 真正的回收在 do_wait() 收割时才做 */
+    if (curr->proc_parent)
+    {
+        wakeup(curr->proc_parent);
+    }
+    
+    sched_schedule();
+
+    panic("Zombie task resumed, should never happen\n");
 }
 
-int16_t createKernelThreadByFork(void *func(void *), void *args, uint32_t clone_flags)
+/** 
+ * @param pid    -1 = 等任意子进程（本阶段只支持 -1）
+ * @param status 出参：POSIX 编码的退出状态（(exit_code & 0xff) << 8）；NULL 表示不关心
+ * @retval >0    被收割子进程的 pid
+ * @retval <0    ENO*（ENO17_NO_CHILD：无子进程） */
+int16_t do_wait(int16_t pid, int *status)
+{
+    pcb_t *cur = getCurrentProc();
+    (void)pid;
+
+    while (1)
+    {
+        /* 先置睡眠状态，再检查条件：若子进程恰好在这两步之间 do_exit()，
+         * 它的 wakeup(cur) 会把状态改回 RUNNING，本轮循环末尾的 sched_schedule()
+         * 会因为 curr 仍是 RUNNING 而重新入队、立刻continue，不会睡死过去 */
+        cur->proc_state = INTERRUPTIBLE;
+
+        bool has_child = false;
+        struct list_head *pos;
+        list_for_each(pos, &cur->proc_children)
+        {
+            pcb_t *child = list_entry(pos, pcb_t, proc_sibling_linker);
+            has_child = true;
+            if (child->proc_state == ZOMBIE)
+            {
+                cur->proc_state = RUNNING;
+
+                int16_t cpid = child->proc_pid;
+                if (status)
+                {
+                    *status = (child->proc_exit_code & 0xff) << 8;
+                }
+
+                /* 收割：从父的 children、全局 proc_list 摘掉，释放它自己没法释放的
+                 * 内核栈与 PCB（还站在上面跑的时候不能自己拆），回收 PID */
+                list_del(&child->proc_sibling_linker);
+                list_del(&child->proc_list_linker);
+                dealloc_kernel_stack(child);
+                dealloc_pid_map(cpid);
+                kfree(child);
+                task_count -= 1;
+
+                return cpid;
+            }
+        }
+
+        if (!has_child)
+        {
+            cur->proc_state = RUNNING;
+            return ENO17_NO_CHILD;
+        }
+
+        sched_schedule();
+    }
+}
+
+int16_t create_kernel_thread_by_fork(void *func(void *), void *args, uint32_t clone_flags)
 {
     intstkf_t regs;
     memset(&regs, 0, sizeof(intstkf_t));
@@ -138,47 +230,44 @@ int16_t createKernelThreadByFork(void *func(void *), void *args, uint32_t clone_
 
 void proc_init(void)
 {
-    INIT_LIST_HEAD(&ProcList);
-    INIT_LIST_HEAD(&PidStack);
-    TaskIdle = createFirstProcIdle();
-    if (TaskIdle == NULL)
+    /* 每个 hart 各自的 idle 任务则必须每 hart 都建 */
+    if (getCoreId() == 0)
     {
-        printf("Failed to alloc new proc!!\n");
-        while (1)
-            ;
+        INIT_LIST_HEAD(&proc_list);
+        INIT_LIST_HEAD(&pid_stack);
     }
-    TaskCurrent = TaskIdle;
+
+    pcb_t *idle = create_first_proc_idle();
+    if (idle == NULL)
+    {
+        panic("Failed to alloc idle proc!!\n");
+    }
+    getCurrentCpu()->idle_proc = idle;
+    sched_set_current(idle);
+
 #if DEBUG_PROC_proc_init
-    printf("proc_init::TaskCurrent->need_resched:%d TaskIdle->need_resched %d\n", TaskCurrent->need_resched, TaskIdle->need_resched);
-    printf("proc_init::TaskCurrent addr:%lx TaskIdle addr %lx\n", (intptr_t)TaskCurrent, (intptr_t)TaskIdle);
+    printf("%s::TaskCurrent->need_resched:%d TaskIdle->need_resched %d\n", 
+        __FUNCTION__, getCurrentProc()->need_resched, idle->need_resched);
+    printf("%s::TaskCurrent addr:%lx TaskIdle addr %lx\n", 
+        __FUNCTION__, (intptr_t)getCurrentProc(), (intptr_t)idle);
 #endif
-    int16_t id_init = createKernelThreadByFork((void *)init, NULL, 0);
-    pcb_t *pcb_init = findProcByPid(id_init);
-    const char *name = "init";
-    setProcName(pcb_init, name);
-    TaskInit = pcb_init;
+
+    if (getCoreId() == 0)
+    {
+        int16_t id_init = create_kernel_thread_by_fork((void *)init, NULL, 0);
+        pcb_t *pcb_init = find_proc_by_pid(id_init);
+        const char *name = "init";
+        set_proc_name(pcb_init, name);
+
 #if DEBUG_PROC_proc_init
-    printf("proc_init::pcb_init pid:%d\n", id_init);
-    printf("proc_init::TaskInit addr:%lx\n", (intptr_t)pcb_init);
+        printf("%s::pcb_init pid:%d\n", __FUNCTION__, id_init);
+        printf("%s::pcb_init addr:%lx\n", __FUNCTION__, (intptr_t)pcb_init);
 #endif
-    TaskCount = TaskCount + 1;
+
+    }
 }
 
-void wakeup(pcb_t *proc)
-{
-    //未完成的：这里没有重新挂到就绪队列中。
-    proc->proc_state = RUNNING;
-}
-
-void sleep(void)
-{
-    //未完成的：这里没有挂到睡眠队列中。
-    pcb_t *proc = getCurrentProc();
-    proc->proc_state = INTERRUPTIBLE;
-    sched();
-}
-
-static pcb_t *allocNewProc(void)
+static pcb_t *alloc_new_proc(void)
 {
     pcb_t *pcb = kmalloc(sizeof(pcb_t));
     if (pcb != NULL)
@@ -195,19 +284,33 @@ static pcb_t *allocNewProc(void)
         pcb->proc_state = UNINIT;
         pcb->need_resched = false;
         pcb->proc_cwd = NULL;  /* NULL 表示当前工作目录为 VFS 根目录 */
+
+        /* 进程生命周期：父子链由 do_fork 挂接，此处先建空链表头与初始退出码 */
+        pcb->proc_exit_code = 0;
+        INIT_LIST_HEAD(&(pcb->proc_children));
+        INIT_LIST_HEAD(&(pcb->proc_sibling_linker));
+
+        pcb->proc_sched_class = &fair_sched_class;
+        pcb->proc_policy = SCHED_NORMAL;
+        pcb->proc_on_rq = false;
+        pcb->proc_nice = 0;
+        pcb->proc_weight = SCHED_NICE_0_WEIGHT;
+        pcb->proc_vruntime = 0;
+        pcb->proc_exec_start = 0;
+        pcb->proc_sum_exec_runtime = 0;
+        pcb->proc_sum_exec_runtime_prev = 0;
+        pcb->proc_rt_priority = 0;
+        INIT_LIST_HEAD(&(pcb->proc_rt_linker));
+        RB_CLEAR_NODE(&(pcb->proc_rbtree_node));
+
+        INIT_LIST_HEAD(&(pcb->proc_list_linker));
+        INIT_LIST_HEAD(&(pcb->proc_wait_linker));
+        
 #if DEBUG_PROC_allocNewProc
-        printf("allocNewProc::new pcb addr:%lx,sizeof(pcb_t):%ld\n", (intptr_t)pcb, sizeof(pcb_t));
+        printf("alloc_new_proc::new pcb addr:%lx,sizeof(pcb_t):%ld\n", (intptr_t)pcb, sizeof(pcb_t));
 #endif
     }
     return pcb;
-}
-
-static void deallocAProcNotDeeply(pcb_t *pcb)
-{
-    if (pcb != NULL)
-    {
-        kfree(pcb);
-    }
 }
 
 static int16_t alloc_kernel_stack(pcb_t *pcb)
@@ -232,7 +335,7 @@ static int16_t copy_proc_mm(uint32_t clone_flags, pcb_t *pcb)
     /* 内核线程fork，子线程共享父线程mm */
     if (clone_flags & CLONE_VM)
     {
-        pcb->proc_mm = TaskCurrent->proc_mm;
+        pcb->proc_mm = getCurrentProc()->proc_mm;
         return ENO0_NO_ERROR;
     }
 
@@ -259,7 +362,7 @@ static int16_t copy_proc_mm(uint32_t clone_flags, pcb_t *pcb)
         sizeof(pte_t) * 256
     );
 
-    vmm_mm_copy(mm, TaskCurrent->proc_mm);
+    vmm_mm_copy(mm, getCurrentProc()->proc_mm);
 
     pcb->proc_mm = mm;
     pcb->proc_context.satp = SATPMODE_RV39 | mm->pgd_ppn;
@@ -267,7 +370,7 @@ static int16_t copy_proc_mm(uint32_t clone_flags, pcb_t *pcb)
     return ENO0_NO_ERROR;
 }
 
-static void copyProcStk(pcb_t *pcb, uintptr_t stack, intstkf_t *regs)
+static void copy_proc_stk(pcb_t *pcb, uintptr_t stack, intstkf_t *regs)
 {
     pcb->proc_int_stack = (intstkf_t *)(pcb->kernel_stack + KERNRL_STKSIZE - sizeof(intstkf_t));
     *(pcb->proc_int_stack) = *(regs);
@@ -278,41 +381,45 @@ static void copyProcStk(pcb_t *pcb, uintptr_t stack, intstkf_t *regs)
     pcb->proc_context.x2_sp = (uint64_t)pcb->proc_int_stack;
 }
 
-static pcb_t *createFirstProcIdle(void)
+static pcb_t *create_first_proc_idle(void)
 {
-    extern uintptr_t boot_stack_top1; //warning:stack top unsolved
+    extern uintptr_t boot_stack_top1;
+    extern uintptr_t boot_stack_top2;
 
-    pcb_t *idle = allocNewProc();
+    pcb_t *idle = alloc_new_proc();
     if (idle != NULL)
     {
         idle->proc_pid = 0;
-        idle->kernel_stack = (phyAddr_t)boot_stack_top1;
+        /* alloc_new_proc 默认把所有任务挂 &fair_sched_class，idle 单独覆盖成 &idle_sched_class */
+        idle->proc_sched_class = &idle_sched_class;
+        /* 每个 hart 用自己在 startup.S 里的启动栈作内核栈：core0→boot_stack_top1，core1→boot_stack_top2 */
+        idle->kernel_stack = (phyAddr_t)(getCoreId() == 0 ? boot_stack_top1 : boot_stack_top2);
         idle->proc_state = RUNNING;
         idle->need_resched = true;
         idle->proc_cwd = NULL;  /* idle 进程使用 VFS 根目录 */
         const char *name = "idle";
-        setProcName(idle, name);
-        TaskCount = TaskCount + 1;
+        set_proc_name(idle, name);
+        task_count = task_count + 1;
     }
 #if DEBUG_PROC_createFirstProcIdle
-    printf("createFirstProcIdle::idle->need_resched:%d\n", idle->need_resched);
+    printf("create_first_proc_idle::idle->need_resched:%d\n", idle->need_resched);
 #endif
     return idle;
 }
 
-static pcb_t *findProcByPid(int16_t pid)
+static pcb_t *find_proc_by_pid(int16_t pid)
 {
     if (0 < pid && pid <= PID_MAX_VALUE)
     {
         struct list_head *currentProc;
         pcb_t *currentPcb;
-        list_for_each(currentProc, &ProcList)
+        list_for_each(currentProc, &proc_list)
         {
             currentPcb = list_entry(currentProc, pcb_t, proc_list_linker);
             if (currentPcb->proc_pid == pid)
             {
 #if DEBUG_PROC_findProcByPid
-                printf("findProcByPid::currentPcb->proc_pid:%d,currentPcb->proc_pname:%s\n", currentPcb->proc_pid, currentPcb->proc_pname);
+                printf("find_proc_by_pid::currentPcb->proc_pid:%d,currentPcb->proc_pname:%s\n", currentPcb->proc_pid, currentPcb->proc_pname);
 #endif
                 return currentPcb;
             }
@@ -321,57 +428,72 @@ static pcb_t *findProcByPid(int16_t pid)
     return NULL;
 }
 
-static int16_t allocPidMap(void)
+/* 按 pid 查找 pcb 的公开包装，供 do_wait 之外的模块（如调度回归测试）使用。 */
+pcb_t *proc_find_by_pid(int16_t pid)
 {
-    static uint16_t lastAlloc = 0;
-    int16_t ret = ENO3_NOFREE_PID;
-    /* If the list is empty,this loop will be skipped. */
-    struct list_head *currentEntry, *tempEntry;
-    list_for_each_safe(currentEntry, tempEntry, &PidStack)
+    return find_proc_by_pid(pid);
+}
+
+static int16_t alloc_pid_map(void)
+{
+    static uint16_t last_alloc = 0;
+
+    /* 优先复用已归还的 pid：FIFO（摘链表头，dealloc_pid_map 从链表尾插入）——
+     * 最早归还的先被复用，尽量拖延"刚死的进程 pid 立刻被新进程占用"这个复用陷阱，
+     * 不然以后 wait/kill 之类按 pid 操作的功能可能误伤到复用了旧 pid 的新进程 */
+    if (!list_empty(&pid_stack))
     {
-        pids_t *cur = list_entry(currentEntry, pids_t, pid_stk_linker);
-        list_del_init(currentEntry);
-        ret = cur->pid;
+        struct list_head *head = pid_stack.next;
+        pids_t *cur = list_entry(head, pids_t, pid_stk_linker);
+        list_del_init(head);
+        int16_t ret = cur->pid;
         kfree(cur);
-        goto f1;
+        return ret;
     }
-    /* If there is no dealloced pid,alloc a new one. */
-    lastAlloc = lastAlloc + 1;
-    ret = lastAlloc;
-f1:
-    return ret;
+
+    /* 没有可复用的：发一个全新号；用满 [1, PID_MAX_VALUE] 后从头回绕，
+     * 每个候选号都用 find_proc_by_pid 确认真的空闲，避免跟存活进程撞号 */
+    for (uint16_t tried = 0; tried < PID_MAX_VALUE; tried++)
+    {
+        last_alloc = (last_alloc % PID_MAX_VALUE) + 1;
+        if (find_proc_by_pid(last_alloc) == NULL)
+        {
+            return (int16_t)last_alloc;
+        }
+    }
+
+    return ENO3_NOFREE_PID; /* 整个 pid 空间都被占满 */
 }
 
 /* A "pids_t" will be alloced when a pid were being dealloced. */
-static void deallocPidMap(int16_t pid)
+static void dealloc_pid_map(int16_t pid)
 {
     /* Alloc a new "pids_t". */
     pids_t *cur = (pids_t *)kmalloc(sizeof(pids_t));
     cur->pid = pid;
-    /* Then add it into the stack list. */
-    list_add(&(cur->pid_stk_linker), &PidStack);
+    /* 插到尾部，配合 alloc_pid_map 从头摘，构成 FIFO */
+    list_add_tail(&(cur->pid_stk_linker), &pid_stack);
 }
 
 void idle(void)
 {
     while (1)
     {
+        pcb_t *cur = getCurrentProc();
+        
 #if DEBUG_PROC_idle
-        printf("idle::TaskCurrent->need_resched:%d TaskIdle->need_resched %d\n", TaskCurrent->need_resched, TaskIdle->need_resched);
-        printf("idle::TaskCurrent->proc_pname:%s TaskIdle->proc_pname %s\n", TaskCurrent->proc_pname, TaskIdle->proc_pname);
-        printf("idle::TaskCurrent->proc_pid:%d TaskIdle->proc_pid %d\n", TaskCurrent->proc_pid, TaskIdle->proc_pid);
+        pcb_t *my_idle = getCurrentCpu()->idle_proc;
+        printf("%s::TaskCurrent->need_resched:%d TaskIdle->need_resched %d\n", 
+            __FUNCTION__, cur->need_resched, my_idle->need_resched);
+        printf("%s::TaskCurrent->proc_pname:%s TaskIdle->proc_pname %s\n", 
+            __FUNCTION__, cur->proc_pname, my_idle->proc_pname);
+        printf("%s::TaskCurrent->proc_pid:%d TaskIdle->proc_pid %d\n", 
+            __FUNCTION__, cur->proc_pid, my_idle->proc_pid);
 #endif
-        if (TaskCurrent->need_resched)
+
+        if (cur->need_resched)
         {
-#if DEBUG_PROC_CTXSTK
-            printCtxStk(&(TaskCurrent->proc_context));
-            printCtxStk(&(TaskInit->proc_context));
-#endif
-            /* 先更新 TaskCurrent，再用 TaskIdle 作 from；若先改 TaskCurrent 再用
-             * &TaskCurrent->proc_context 作 from，save 目标会变成 TaskInit 导致上下文覆写 */
-            TaskCurrent = TaskInit;
-            switch_to(&TaskIdle->proc_context, &TaskInit->proc_context);
-            /* switch_to 返回（被调度回 idle）后继续外层循环 */
+            sched_schedule();
         }
     }
 }
@@ -394,10 +516,11 @@ static void run_first_user_program(void)
            (void *)pa_to_kva(convert_ppn2pa(vmm_kernel_pgd_ppn)) + sizeof(pte_t) * 256,
            sizeof(pte_t) * 256);
 
-    /* 2) 切到用户地址空间（page fault 用 TaskCurrent->proc_mm，必须先挂上） */
-    TaskCurrent->proc_mm = mm;
-    TaskCurrent->proc_context.satp = SATPMODE_RV39 | mm->pgd_ppn;
-    write_csr(satp, TaskCurrent->proc_context.satp);
+    /* 2) 切到用户地址空间（page fault 用当前进程的 proc_mm，必须先挂上） */
+    pcb_t *cur = getCurrentProc();
+    cur->proc_mm = mm;
+    cur->proc_context.satp = SATPMODE_RV39 | mm->pgd_ppn;
+    write_csr(satp, cur->proc_context.satp);
     tlb_flush_all();
 
     /* 3) 解析 ELF：按 PT_LOAD 段建 VMA、映射、拷贝内容，得到程序入口地址 */
@@ -418,7 +541,7 @@ static void run_first_user_program(void)
 
 static int16_t init(void)
 {
-    printf("Hello! I'm the init process!!\n");
+    printf("%s::Hello! I'm the init process!!\n", __FUNCTION__);
 
 #if DEBUG_PROC_init
     /* 验证内核线程 satp 正确：switch_to 切换后，通过 KVA 读写新分配的物理帧。
@@ -438,23 +561,51 @@ static int16_t init(void)
     printf("[init] kernel thread KVA after switch_to: PASS\n");
 #endif
 
-    printf("I'm going away.\n");
+#if DEBUG_SCHED_TEST
+    /* 调度器/同步回归测试：以 init（正规调度任务）为驱动，fork 若干 worker 并收割，
+     * 端到端触发 CFS/RT/idle 三类、sched_schedule、sleep/wakeup、信号量、do_fork/exit/wait。
+     * 跑完直接关机，不再启动用户程序。测试代码在 src/debug 下的 sched_test.c 等文件。 */
+    {
+        extern void run_sched_tests(void);
+        run_sched_tests();
+        printf("[init] scheduler tests done, shutting down\n");
+        sbi_shutdown();
+    }
+#endif
 
-    run_first_user_program();
+    int16_t pid = create_kernel_thread_by_fork((void *)run_first_user_program, NULL, 0);
+    if (pid < 0)
+    {
+        panic("Failed to fork user program thread!\n");
+    }
 
-    return ENO0_NO_ERROR;
+    /* 永久收割循环：孤儿最终都会过继到这里，没有这个循环孤儿僵尸会永久堆积 */
+    while (1)
+    {
+        int status;
+        int16_t cpid = do_wait(-1, &status);
+        if (cpid > 0)
+        {
+            printf("[init] reaped pid=%d status=%d\n", cpid, (status >> 8) & 0xff);
+        }
+        else
+        {
+            // @TODO sbi_shutdown测试用
+            printf("[init] no more children, shutting down\n");
+            sbi_shutdown();
+        }
+    }
 }
 
 static void fork_out(void)
 {
     extern void fork_out_asm(intstkf_t * regs);
-    printf("fork_out!!\n");
-    TaskCurrent = TaskInit;
-    fork_out_asm(TaskCurrent->proc_int_stack);
+    /* current_proc 已由 sched_schedule() 在调 switch_to() 之前经 sched_set_current()设好 */
+    fork_out_asm(getCurrentProc()->proc_int_stack);
 }
 
 #if DEBUG_PROC_CTXSTK
-static void printCtxStk(ctx_t *ctx)
+static void print_ctx_stk(ctx_t *ctx)
 {
     printf("\n=================================================================\n");
     printf("  ra       0x%08lx\n", (ctx->x1_ra));
@@ -500,7 +651,7 @@ static void printCtxStk(ctx_t *ctx)
  *
  * @note 此函数不返回（标注 __attribute__((noreturn))）。
  *   调用前须确保：
- *     - TaskCurrent->proc_mm 已挂载用户地址空间且 satp 已切换；
+ *     - 当前进程的 proc_mm 已挂载用户地址空间且 satp 已切换；
  *     - entry 所在代码页和 ustack 所在栈 VMA 已就绪（可为懒分配，首次访问触发 page fault）；
  *     - trap_init 已置 sstatus.SUM=1，内核可直接读写用户页。
  */
@@ -508,7 +659,7 @@ void enter_user_mode(virAddr_t entry, virAddr_t ustack)
 {
     extern void fork_out_asm(intstkf_t *regs) __attribute__((noreturn));
 
-    pcb_t *cur = TaskCurrent;
+    pcb_t *cur = getCurrentProc();
     /* 由高地址向低地址开辟帧空间，不会覆盖原有数据，因为该函数noreturn，原栈空间数据已无用 */
     intstkf_t *f = (intstkf_t *)(cur->kernel_stack + KERNRL_STKSIZE - sizeof(intstkf_t));
 

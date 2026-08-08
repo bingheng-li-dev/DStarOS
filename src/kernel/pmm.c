@@ -86,7 +86,7 @@ void pmm_init(void)
 
     MicroPhysicalMemoryPoolBase = NULL;
     initMicroPhysicalMemoryPool();
-    spinlockInit(&PmmLock);
+    spinlock_init(&PmmLock);
     printf("physicalMemoryManagement inited!\n");
 }
 

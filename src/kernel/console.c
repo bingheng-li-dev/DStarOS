@@ -15,7 +15,7 @@ static void stdout_putc(void *unused, char ch)
 
 void console_init(void)
 {
-    spinlockInit(&ConsoleLock);
+    spinlock_init(&ConsoleLock);
     init_printf(0, stdout_putc);
 }
 
@@ -23,9 +23,9 @@ void printf(char *fmt, ...)
 {
     va_list args;
     va_start(args, fmt);
-    spinlockAcquire(&ConsoleLock);
+    spinlock_acquire(&ConsoleLock);
     tfp_format(NULL, stdout_putc, fmt, args);
-    spinlockRelease(&ConsoleLock);
+    spinlock_release(&ConsoleLock);
     va_end(args);
 }
 

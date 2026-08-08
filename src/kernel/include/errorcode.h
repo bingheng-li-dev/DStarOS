@@ -21,5 +21,6 @@
 #define ENO14_CROSS_DEV    -14    /* 跨挂载点重命名/移动（EXDEV）*/
 #define ENO15_READ_ONLY    -15    /* 文件系统只读（EROFS）*/
 #define ENO16_PERM         -16    /* 操作不被允许（EPERM）*/
+#define ENO17_NO_CHILD     -17    /* 没有子进程可等待（ECHILD）*/
 
 #endif

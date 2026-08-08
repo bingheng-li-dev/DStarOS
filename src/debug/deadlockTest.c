@@ -15,29 +15,29 @@ int deadlockTest(int argc, char **args)
     uint64_t coreid = getCoreId();
     if (coreid == 0)
     {
-        spinlockInit(&lock1);
-        spinlockInit(&lock2);
+        spinlock_init(&lock1);
+        spinlock_init(&lock2);
         flag = true;
-        spinlockAcquire(&lock1);
+        spinlock_acquire(&lock1);
         delay(1);
         printf("core0 delay finished!\n");
-        spinlockAcquire(&lock2);
+        spinlock_acquire(&lock2);
         printf("core0 Acquire\n");
-        spinlockRelease(&lock1);
-        spinlockRelease(&lock2);
+        spinlock_release(&lock1);
+        spinlock_release(&lock2);
         printf("core0 Release\n");
     }
     else
     {
         while (!flag)
             ;
-        spinlockAcquire(&lock2);
+        spinlock_acquire(&lock2);
         delay(1);
         printf("core1 delay finished!\n");
-        spinlockAcquire(&lock1);
+        spinlock_acquire(&lock1);
         printf("core1 Acquire\n");
-        spinlockRelease(&lock1);
-        spinlockRelease(&lock2);
+        spinlock_release(&lock1);
+        spinlock_release(&lock2);
         printf("core1 Release\n");
     }
     return 0;

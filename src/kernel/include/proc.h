@@ -12,27 +12,32 @@
 #include "trap.h"
 #include "vmm.h"
 
-/* 前向声明：避免与 vfs.h 形成循环包含 */
+/* 前向声明，避免形成循环包含 */
 struct dentry;
 typedef struct dentry dentry_t;
+struct sched_class;
+
+#define SCHED_NORMAL 0 /* CFS 类：nice 加权 vruntime */
+#define SCHED_FIFO 1   /* RT 类：固定优先级，不轮转 */
+#define SCHED_RR 2     /* RT 类：固定优先级，同优先级时间片轮转 */
 
 #define PNAME_MAX_LENGTH 64
 #define KERNEL_STACKPSIZE 1
 #define KERNRL_STKSIZE KERNEL_STACKPSIZE *PGSIZE
 #define PID_MAX_VALUE (((int16_t)1 << 15) - 2) /* 0 <= PID <= PID_MAX_VALUE*/
-#define PROC_MAX_AMOUNT (PID_MAX_VALUE / 2)    /* 1(idle) <= TaskCount <= PROC_MAX_AMOUNT */
+#define PROC_MAX_AMOUNT (PID_MAX_VALUE / 2)    /* 1(idle) <= task_count <= PROC_MAX_AMOUNT */
 
 #define CLONE_VM 0x00000100      /* Child process will share the same virtual memory space with it's parent. */
 #define CLONE_FS 0x00000200      /* Child process will share the same file system info with it's parent. */
 #define CLONE_FILES 0x00000400   /* Child process will share the same opened files with it's parent. */
 #define CLONE_SIGHAND 0x00000800 /* Child process will share the same signal handle program with it's parent. */
 
-typedef enum statusOfProcess sta_t;
-typedef struct contextOfProcess ctx_t;
-typedef struct controlBlockOfProcess pcb_t;
-typedef struct pidMap pids_t;
+typedef enum proc_status sta_t;
+typedef struct proc_context ctx_t;
+typedef struct proc_control_block pcb_t;
+typedef struct proc_pid_map pids_t;
 
-enum statusOfProcess
+enum proc_status
 {
     RUNNING = 0,     /* READY和RUNNING统称为RUNNING状态。 */
     UNINTERRUPTIBLE, /*  处于等待队伍中，等待资源有效时唤醒且不可以被中断唤醒。 */
@@ -41,7 +46,7 @@ enum statusOfProcess
     UNINIT,
 };
 
-struct contextOfProcess
+struct proc_context
 {
     uint64_t x1_ra;
     uint64_t x2_sp;
@@ -60,7 +65,7 @@ struct contextOfProcess
     uint64_t satp;
 };
 
-struct controlBlockOfProcess
+struct proc_control_block
 {
     uint16_t proc_pid;
     char proc_pname[PNAME_MAX_LENGTH + 1];
@@ -71,12 +76,38 @@ struct controlBlockOfProcess
     intstkf_t *proc_int_stack;
     mm_t *proc_mm;
     volatile bool need_resched;
-    dentry_t   *proc_cwd;           /* 当前工作目录的目录项；NULL 表示使用 VFS 根目录 */
-    struct list_head proc_list_linker;
-    struct rb_node proc_rbtree_node;
+    dentry_t   *proc_cwd;                /* 当前工作目录的目录项；NULL 表示使用 VFS 根目录 */
+    int16_t proc_exit_code;              /* 退出码；ZOMBIE 期间保存，待父进程 do_wait 收割 */
+    struct list_head proc_children;      /* 子进程链表头——子进程以 proc_sibling_linker 挂入 */
+    struct list_head proc_sibling_linker;/* 本进程挂入父进程 proc_children 节点 */
+
+    const struct sched_class *proc_sched_class; /* 本任务归属的调度类 */
+    int proc_policy;                            /* SCHED_NORMAL / SCHED_FIFO / SCHED_RR */
+    /* 是否在就绪队列中。enqueue/dequeue 据此做幂等保护：
+     * 对一个已入队（甚至正在运行）的任务再次 enqueue，会把同一个 rb_node
+     * 挂到红黑树两处而损坏树结构——do_exit 里 wakeup(父进程) 时父进程往往并未睡眠，
+     * 这条路径一定会触发。反向地，rb_erase 一个不在树中的节点是未定义行为。 */
+    bool proc_on_rq;
+
+    /* ==================== CFS调度相关 ==================== */
+    int proc_nice;               /* nice 值 [-20, 19]，默认 0 */
+    uint32_t proc_weight;        /* 由 nice 派生的权重，nice=0 时为 SCHED_NICE_0_WEIGHT */
+    uint64_t proc_vruntime;      /* 加权虚拟运行时间，单位同 sched_now() */
+    uint64_t proc_exec_start;    /* 上次结算（换入/每个 tick）的时刻，用于算本次 delta；每次结算都刷新 */
+    uint64_t proc_sum_exec_runtime_prev; /* 换入 CPU 那一刻对 proc_sum_exec_runtime 拍的快照，只在换入时写 */
+    uint64_t proc_sum_exec_runtime;      /* 累计执行时间 */
+    struct rb_node proc_rbtree_node;     /* 挂入 cfs_rq.tasks 的节点 */
+
+    /* ==================== RT调度相关 ==================== */
+    uint8_t proc_rt_priority;            /* 数值越大优先级越高（FreeRTOS 约定） */
+    struct list_head proc_rt_linker;     /* 挂入 rt_rq.ready_lists[prio] 的节点 */
+
+    /* 一个节点不能同时挂入两条链 */
+    struct list_head proc_list_linker;   /* 挂入全局 proc_list 的节点 */
+    struct list_head proc_wait_linker;   /* 挂入等待队列（信号量 / wait）的节点 */
 };
 
-struct pidMap
+struct proc_pid_map
 {
     int16_t pid;
     struct list_head pid_stk_linker;
@@ -84,16 +115,17 @@ struct pidMap
 
 extern void switch_to(ctx_t *from, ctx_t *to);
 
-char *setProcName(pcb_t *proc, const char *name);
-char *getProcName(pcb_t *proc);
+char *set_proc_name(pcb_t *proc, const char *name);
+char *get_proc_name(pcb_t *proc);
 int16_t do_fork(uint32_t clone_flags, uintptr_t stack, intstkf_t *regs);
-int16_t do_exit(int16_t error_code);
-int16_t createKernelThreadByFork(void *func(void *), void *args, uint32_t clone_flags);
+void do_exit(int16_t error_code) __attribute__((noreturn));
+int16_t do_wait(int16_t pid, int *status);
+int16_t create_kernel_thread_by_fork(void *func(void *), void *args, uint32_t clone_flags);
+/* 按 pid 查找 pcb（find_proc_by_pid 的公开包装）；未找到返回 NULL。 */
+pcb_t *proc_find_by_pid(int16_t pid);
 void proc_init(void);
 /* Kernel's idle process which pid is 0. */
 void idle(void) __attribute__((noreturn));
-void sleep(void);
-void wakeup(pcb_t *proc);
 void enter_user_mode(virAddr_t entry, virAddr_t ustack) __attribute__((noreturn));
 
 #endif

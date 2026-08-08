@@ -20,6 +20,7 @@
 #include "sync.h"
 #include "stringops.h"
 #include "proc.h"
+#include "cpu.h"
 
 /* ============================================================
  * 全局 VFS 状态
@@ -40,9 +41,6 @@ osslock_t vfs_fs_lock;
 /* VFS 全局根目录项与根挂载点（由 vfs_mount("/", ...) 设置）*/
 dentry_t   *vfs_root_dentry = NULL;
 vfsmount_t *vfs_root_mount  = NULL;
-
-/* 获取当前进程 PCB */
-extern pcb_t *TaskCurrent;
 
 /* ============================================================
  * 内部工具函数：路径字符串操作
@@ -286,7 +284,7 @@ int16_t register_filesystem(file_system_type_t *fs_type)
         return ENO4_BUSY;
     }
 
-    spinlockAcquire(&vfs_fs_lock);
+    spinlock_acquire(&vfs_fs_lock);
 
     int nlen = (int)strlen(fs_type->name);
     fs_type_ptr = find_filesystem_by_name(fs_type->name, nlen);
@@ -300,7 +298,7 @@ int16_t register_filesystem(file_system_type_t *fs_type)
         *fs_type_ptr = fs_type;
     }
 
-    spinlockRelease(&vfs_fs_lock);
+    spinlock_release(&vfs_fs_lock);
 
     return ret;
 }
@@ -320,7 +318,7 @@ int16_t unregister_filesystem(file_system_type_t *fs_type)
         return ENO8_NULL_POINTER;
     }
 
-    spinlockAcquire(&vfs_fs_lock);
+    spinlock_acquire(&vfs_fs_lock);
 
     while (*fs_type_ptr)
     {
@@ -328,13 +326,13 @@ int16_t unregister_filesystem(file_system_type_t *fs_type)
         {
             *fs_type_ptr = fs_type->next;
             fs_type->next = NULL;
-            spinlockRelease(&vfs_fs_lock);
+            spinlock_release(&vfs_fs_lock);
             return ENO0_NO_ERROR;
         }
         fs_type_ptr = &(*fs_type_ptr)->next;
     }
 
-    spinlockRelease(&vfs_fs_lock);
+    spinlock_release(&vfs_fs_lock);
 
     return ENO5_NOSUCH_ENTRY;
 }
@@ -352,9 +350,9 @@ static file_system_type_t *get_fs_type_by_name(const char *name)
     }
 
     int nlen = (int)strlen(name);
-    spinlockAcquire(&vfs_fs_lock);
+    spinlock_acquire(&vfs_fs_lock);
     file_system_type_t *fs = *find_filesystem_by_name(name, nlen);
-    spinlockRelease(&vfs_fs_lock);
+    spinlock_release(&vfs_fs_lock);
 
     return fs;
 }
@@ -565,7 +563,7 @@ void vfs_init(void)
 {
     INIT_LIST_HEAD(&super_block_list);
     INIT_LIST_HEAD(&vfs_mount_list);
-    spinlockInit(&vfs_fs_lock);
+    spinlock_init(&vfs_fs_lock);
     file_system_types = NULL;
     vfs_root_dentry   = NULL;
     vfs_root_mount    = NULL;
@@ -614,9 +612,10 @@ dentry_t *vfs_lookup(const char *path)
     else
     {
         /* 相对路径：从当前进程的工作目录出发 */
-        if (TaskCurrent && TaskCurrent->proc_cwd)
+        pcb_t *cur_proc = getCurrentProc();
+        if (cur_proc && cur_proc->proc_cwd)
         {
-            cur = TaskCurrent->proc_cwd;
+            cur = cur_proc->proc_cwd;
         }
         else
         {
@@ -682,12 +681,12 @@ dentry_t *vfs_lookup(const char *path)
             {
                 /* 在挂载点链表中找到对应的 vfsmount，取宿主目录项的父节点 */
                 vfsmount_t *mnt = NULL;
-                spinlockAcquire(&vfs_fs_lock);
+                spinlock_acquire(&vfs_fs_lock);
                 if (cur->d_inode && cur->d_inode->i_sb)
                 {
                     mnt = find_mount_by_sb(cur->d_inode->i_sb);
                 }
-                spinlockRelease(&vfs_fs_lock);
+                spinlock_release(&vfs_fs_lock);
 
                 if (mnt && mnt->mnt_host_dentry && mnt->mnt_host_dentry->d_parent)
                 {
@@ -844,9 +843,9 @@ int vfs_mount(const char *path, const char *fs_type, void *data)
         mnt->mnt_sb->s_mount = mnt;
     }
 
-    spinlockAcquire(&vfs_fs_lock);
+    spinlock_acquire(&vfs_fs_lock);
     list_add(&mnt->mnt_list_linker, &vfs_mount_list);
-    spinlockRelease(&vfs_fs_lock);
+    spinlock_release(&vfs_fs_lock);
 
     return ENO0_NO_ERROR;
 }
@@ -874,7 +873,7 @@ int vfs_unmount(const char *path)
 
     /* 在挂载点链表中查找 */
     vfsmount_t *target = NULL;
-    spinlockAcquire(&vfs_fs_lock);
+    spinlock_acquire(&vfs_fs_lock);
     struct list_head *pos;
     list_for_each(pos, &vfs_mount_list)
     {
@@ -885,7 +884,7 @@ int vfs_unmount(const char *path)
             break;
         }
     }
-    spinlockRelease(&vfs_fs_lock);
+    spinlock_release(&vfs_fs_lock);
 
     if (!target)
     {
@@ -919,9 +918,9 @@ int vfs_unmount(const char *path)
     }
 
     /* 从链表中摘除并释放 vfsmount */
-    spinlockAcquire(&vfs_fs_lock);
+    spinlock_acquire(&vfs_fs_lock);
     list_del(&target->mnt_list_linker);
-    spinlockRelease(&vfs_fs_lock);
+    spinlock_release(&vfs_fs_lock);
 
     kfree(target->mnt_path);
     kfree(target);
@@ -1683,13 +1682,14 @@ int vfs_chdir(const char *path)
     }
 
     /* 释放旧的工作目录引用，持有新的 */
-    if (TaskCurrent && TaskCurrent->proc_cwd)
+    pcb_t *cur_proc = getCurrentProc();
+    if (cur_proc && cur_proc->proc_cwd)
     {
-        dentry_put(TaskCurrent->proc_cwd);
+        dentry_put(cur_proc->proc_cwd);
     }
-    if (TaskCurrent)
+    if (cur_proc)
     {
-        TaskCurrent->proc_cwd = nd;  /* nd 的引用计数已 +1，此处转移所有权 */
+        cur_proc->proc_cwd = nd;  /* nd 的引用计数已 +1，此处转移所有权 */
     }
 
     return ENO0_NO_ERROR;
@@ -1716,8 +1716,9 @@ int vfs_getcwd(char *buf, size_t size)
     }
 
     /* 若 cwd 未设置或等于根，直接返回 "/" */
-    dentry_t *cwd = (TaskCurrent && TaskCurrent->proc_cwd)
-                    ? TaskCurrent->proc_cwd
+    pcb_t *cur_proc = getCurrentProc();
+    dentry_t *cwd = (cur_proc && cur_proc->proc_cwd)
+                    ? cur_proc->proc_cwd
                     : vfs_root_dentry;
 
     if (cwd == vfs_root_dentry)

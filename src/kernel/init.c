@@ -10,6 +10,7 @@
 #include "fs.h"
 #include "sync.h"
 #include "plic.h"
+#include "sched.h"
 
 #ifndef QEMU
 #include "sdcard.h"
@@ -67,6 +68,7 @@ void os_init_after_mmu_enable(uint64_t hartid)
         main(0, (void *)0);
 #endif
     }
+    sched_init();
     proc_init();
 
 #if DEBUG_INIT_main_bothcore

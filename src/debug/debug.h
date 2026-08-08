@@ -40,6 +40,11 @@
 
 #endif /* DEBUG_VMM */
 
+/* 调度器/同步回归测试：置 1 时 init 进程改为运行 run_sched_tests() 再关机，
+ * 不再启动用户程序；置 0 走正常的用户程序路径。测试代码在 src/debug/sched_test.c
+ * 等文件，入口 run_sched_tests()。 */
+#define DEBUG_SCHED_TEST 1
+
 #define DEBUG_TRACK_LINE() printf("DEBUG_TRACK_LINE: %s:%d\n", __FILE__, __LINE__)
 
 #endif /* DEBUG */

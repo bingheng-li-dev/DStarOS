@@ -4,7 +4,7 @@
 #include "proc.h"
 #include "containerof.h"
 
-void irqDisableNestingIncrement(void)
+void irq_disable_nesting_increment(void)
 {
     bool intr_flag;
     __local_intr_save(intr_flag);
@@ -16,7 +16,7 @@ void irqDisableNestingIncrement(void)
     cpu->irqDisableNesting += 1;
 }
 
-void irqDisableNestingDecrement(void)
+void irq_disable_nesting_decrement(void)
 {
     cpu_t *cpu = getCurrentCpu();
     dassert(cpu->irqDisableNesting >= 1);
@@ -28,77 +28,80 @@ void irqDisableNestingDecrement(void)
     }
 }
 
-void spinlockInit(osslock_t *lock)
+void spinlock_init(osslock_t *lock)
 {
     ((spinlock_t *)lock)->lock = 0;
 }
 
-/* 自旋锁即申请即用，这里不做额外的死锁预防和处理。 */
-// trylock?
-/* corelock_lock：获取核间锁，核之间互斥的锁，同核内该锁会嵌套，
-只有异核之间会阻塞。不建议在中断使用该函数，中断中可以使用corelock_trylock。*/
-/* 申请spinlock并且保存irq状况。 */
-void spinlockAcquire(osslock_t *lock)
+/* 自旋锁即申请即用，这里不做额外的死锁预防和处理
+ * 申请spinlock并且保存irq状况。 */
+void spinlock_acquire(osslock_t *lock)
 {
-    irqDisableNestingIncrement();
+    irq_disable_nesting_increment();
     spinlock_lock((spinlock_t *)lock);
 }
 
 /* 释放spinlock并且还原irq状况。 */
-void spinlockRelease(osslock_t *lock)
+void spinlock_release(osslock_t *lock)
 {
     spinlock_unlock((spinlock_t *)lock);
-    irqDisableNestingDecrement();
+    irq_disable_nesting_decrement();
 }
 
-void semInit(ossem_t *sem, int value)
+void sem_init(ossem_t *sem, int value)
 {
-    spinlockInit(&(sem->lock));
+    spinlock_init(&(sem->lock));
     sem->count = value;
     sem->waiting = 0;
     INIT_LIST_HEAD(&(sem->wait_list));
 }
 
-void semDown(ossem_t *sem)
+void sem_down(ossem_t *sem)
 {
     pcb_t *tsk = getCurrentProc();
-    /* 先全部加到等待队列中再说；此处只是单纯模仿了linux源码的做法。 */
-    tsk->proc_state = UNINTERRUPTIBLE;
-    /* 使用"list_add_tail"，因为"wait_list"是一个队列。 */
-    list_add_tail(&(tsk->proc_list_linker), &(sem->wait_list));
-    atomic_add(&(sem->waiting), 1);
-    spinlockAcquire(&(sem->lock));
-    while (1)
+    bool waited = false; /* 是否真的阻塞过；用来让 sem->waiting 的 +1/-1 严格成对 */
+
+    spinlock_acquire(&(sem->lock));
+    while (sem->count < 1)
     {
-        if (sem->count >= 1) /* 如果成功获取到信号量的情况。 */
+        if (!waited)
         {
-            sem->count -= 1; /* 注意count的最小值为0，不会出现负数的情况，与下面semUp函数仅在等待队列为空的情形相对应。 */
-            atomic_add(&(sem->waiting), -1);
-            break;
+            atomic_add(&(sem->waiting), 1);
+            waited = true;
         }
-        /* 如果没有成功获取到信号量的情况。 */
-        spinlockRelease(&(sem->lock));
-        /* 在前面已经使得proc睡眠，这里调度其他的proc。 */
-        sched();
-        /* proc在被唤醒之后继续执行while循环进行信号量获取测试。 */
-        spinlockAcquire(&(sem->lock));
-        tsk->proc_state = UNINTERRUPTIBLE;
+
+        /* 只有确实要阻塞时才挂进等待队列；每次循环重新挂一次，
+         * 因为上一轮被 sem_up 唤醒时已经把本节点摘掉了 */
+        list_add_tail(&(tsk->proc_wait_linker), &(sem->wait_list));
+
+        spinlock_release(&(sem->lock));
+        /* sleep 内部会调度其他 proc；被 sem_up 唤醒后从这里继续，回到循环开头
+         * 重新检查条件——可能被虚假唤醒或被别的任务抢先拿走了信号量，
+         * 所以不能想当然直接成功 */
+        sleep(tsk, UNINTERRUPTIBLE);
+        spinlock_acquire(&(sem->lock));
     }
-    spinlockRelease(&(sem->lock));
+
+    sem->count -= 1; /* count 最小为 0，不会变负，因为上面 while 保证进这里时 count >= 1 */
+    if (waited)
+    {
+        atomic_add(&(sem->waiting), -1);
+    }
+    spinlock_release(&(sem->lock));
     tsk->proc_state = RUNNING;
 }
 
-void semUp(ossem_t *sem)
+void sem_up(ossem_t *sem)
 {
-    spinlockAcquire(&(sem->lock));
+    spinlock_acquire(&(sem->lock));
     sem->count += 1;
     if (!list_empty(&(sem->wait_list)))
     {
         pcb_t *proc;
         struct list_head *wait_entry = (sem->wait_list).next;
-        proc = getContainer(wait_entry, pcb_t, proc_list_linker);
-        list_del(&(proc->proc_list_linker));
+        proc = getContainer(wait_entry, pcb_t, proc_wait_linker);
+        list_del(&(proc->proc_wait_linker));
         wakeup(proc);
     }
-    spinlockRelease(&(sem->lock));
+    spinlock_release(&(sem->lock));
 }

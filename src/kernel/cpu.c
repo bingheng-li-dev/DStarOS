@@ -40,9 +40,9 @@ cpu_t *getSpecifiedCpu(uint16_t index)
 
 pcb_t *getCurrentProc(void)
 {
-    irqDisableNestingIncrement();
+    irq_disable_nesting_increment();
     cpu_t *cpu = getCurrentCpu();
-    pcb_t *proc = cpu->currentProc;
-    irqDisableNestingDecrement();
+    pcb_t *proc = cpu->current_proc;
+    irq_disable_nesting_decrement();
     return proc;
 }

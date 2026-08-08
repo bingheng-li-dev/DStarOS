@@ -9,7 +9,7 @@ extern osslock_t PmmLock;
 void *kmalloc(uint64_t size)
 {
     void *ret = NULL, *tmp = NULL;
-    spinlockAcquire(&PmmLock);
+    spinlock_acquire(&PmmLock);
     if (MicroPhysicalMemoryPoolBase != NULL && size <= 1024)
     {
         tmp = microAlloc(size);
@@ -26,13 +26,13 @@ void *kmalloc(uint64_t size)
     phyAddr_t frame_pa = convert_pframe2pa(tmp);
     ret = mmu_is_enabled() ? (void *)pa_to_kva(frame_pa) : (void *)frame_pa;
 done:
-    spinlockRelease(&PmmLock);
+    spinlock_release(&PmmLock);
     return ret;
 }
 
 void kfree(void *ptr)
 {
-    spinlockAcquire(&PmmLock);
+    spinlock_acquire(&PmmLock);
     if (ptr == NULL)
         goto f1;
 
@@ -55,5 +55,5 @@ void kfree(void *ptr)
     pframe_t *base = convert_pa2pframe_flr(ptr_pa);
     dealloc(base);
 f1:
-    spinlockRelease(&PmmLock);
+    spinlock_release(&PmmLock);
 }
