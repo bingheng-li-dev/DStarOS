@@ -17,11 +17,19 @@ LDFLAGS := -T $(LDSCRIPT) -static
 
 .PHONY: all clean
 
-all: hello.elf
+all: hello.elf fork_wait.elf exectest.elf
 
 hello.elf: hello.c $(LDSCRIPT)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ hello.c
 	$(OBJCOPY) --strip-all $@ $@
 
+fork_wait.elf: fork_wait.c $(LDSCRIPT)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ fork_wait.c
+	$(OBJCOPY) --strip-all $@ $@
+
+exectest.elf: exectest.c $(LDSCRIPT)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ exectest.c
+	$(OBJCOPY) --strip-all $@ $@
+
 clean:
-	rm -f hello.elf
+	rm -f hello.elf fork_wait.elf exectest.elf

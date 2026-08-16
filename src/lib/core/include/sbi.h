@@ -256,16 +256,15 @@ static inline int sbi_console_getchar(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* Timer (v0.1 legacy)                                                  */
+/* Timer                                                                */
+/* legacy v0.1 SET_TIMER 扩展已被 RustSBI 0.4.0 弃用（调用后直接返回，
+ * mtimecmp 不会被真正写入，S 态定时器中断永远不会触发）——现象和
+ * sbi_shutdown() 曾经踩过的坑一样，改用标准 TIME 扩展（v0.2+）。 */
 /* ------------------------------------------------------------------ */
 
 static inline void sbi_set_timer(uint64_t stime_value)
 {
-#if __riscv_xlen == 32
-    SBI_CALL_LEGACY(SBI_EXT_0_1_SET_TIMER, stime_value, stime_value >> 32, 0);
-#else
-    SBI_CALL_LEGACY(SBI_EXT_0_1_SET_TIMER, stime_value, 0, 0);
-#endif
+    sbi_ecall(SBI_EXT_TIME, SBI_EXT_TIME_SET_TIMER, stime_value, 0, 0, 0, 0, 0);
 }
 
 /* ------------------------------------------------------------------ */

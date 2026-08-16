@@ -4,6 +4,11 @@
 #include "rbtree.h"
 #include "stringops.h"
 #include "dassert.h"
+#include "tick.h"
+
+/* 按 proc_wake_tick 升序排列的定时睡眠链表，sched_sleep_ticks()/sched_check_timers() 共用 */
+static struct list_head sleeping_tasks;
+static osslock_t sleeping_tasks_lock;
 
 static void   fair_enqueue(pcb_t *p);
 static void   fair_dequeue(pcb_t *p);
@@ -268,7 +273,7 @@ static pcb_t *idle_pick_next(void)
 {
     /* 类链链尾，恒有效：只要走到这一步说明 rt/fair 都没有就绪任务，
      * 由本 CPU 自己的 idle_proc 兜底，从不返回 NULL */
-    return getCurrentCpu()->idle_proc;
+    return cpu_get_current()->idle_proc;
 }
 
 static void idle_task_tick(pcb_t *curr)
@@ -343,11 +348,14 @@ void sched_init(void)
     }
     run_queue.rt.bitmap = 0;
     run_queue.rt.nr_running = 0;
+
+    INIT_LIST_HEAD(&sleeping_tasks);
+    spinlock_init(&sleeping_tasks_lock);
 }
 
 void sched_set_current(pcb_t *p)
 {
-    getCurrentCpu()->current_proc = p;
+    cpu_get_current()->current_proc = p;
     p->proc_exec_start = sched_now();
     /* 换入快照：往后 fair_task_tick 用 proc_sum_exec_runtime - 这份快照
      * 算出"这次换上 CPU 以来跑了多久"，判断是否已跑满 SCHED_MIN_GRANULARITY */
@@ -358,7 +366,7 @@ void sched_schedule(void)
 {
     spinlock_acquire(&run_queue.lock);
 
-    pcb_t *curr = getCurrentProc();
+    pcb_t *curr = proc_get_current();
     fair_update_curr(curr);
     if (curr->proc_state == RUNNING && curr->proc_sched_class != &idle_sched_class)
     {
@@ -420,7 +428,7 @@ void sched_activate(pcb_t *p)
     sched_enqueue(p);
     /* p 是刚变为就绪的外部任务，
      * 拿它和当前正在跑的任务比一次，看要不要立刻抢占 */
-    check_preempt_curr(getCurrentProc(), p);
+    check_preempt_curr(proc_get_current(), p);
 
     spinlock_release(&run_queue.lock);
 }
@@ -433,14 +441,78 @@ void wakeup(pcb_t *proc)
 
 void sleep(pcb_t *proc, sta_t state)
 {
-    dassert(proc == getCurrentProc());
+    dassert(proc == proc_get_current());
     proc->proc_state = state;
     sched_schedule();
 }
 
+/**
+ * @brief 当前任务定时睡眠，到期由 tick 中断唤醒
+ * @param[in] ticks 要睡眠的 tick 数（tick_get_os_tick() 单位）
+ * @details 在 sleeping_tasks_lock 保护下把 proc_state 置 INTERRUPTIBLE
+ *   并按 proc_wake_tick 升序插入 sleeping_tasks，随后才 sched_schedule()。
+ *   状态赋值与入链在同一把锁下完成，是为了不丢唤醒——万一 ticks 极小，
+ *   插入后、sched_schedule() 真正切换走前就被 sched_check_timers() 抢先
+ *   唤醒（proc_state 改回 RUNNING 并入就绪队列），sched_schedule() 发现
+ *   当前任务已是 RUNNING，会按"主动让出"处理而不会重复入队，不会丢事件。
+ * @note 与 tick_delay() 的忙等自旋不同，本函数会真正让出 CPU。
+ */
+void sched_sleep_ticks(uint64_t ticks)
+{
+    pcb_t *curr = proc_get_current();
+    uint64_t wake_at = tick_get_os_tick() + ticks;
+
+    spinlock_acquire(&sleeping_tasks_lock);
+
+    curr->proc_wake_tick = wake_at;
+    curr->proc_state = INTERRUPTIBLE;
+
+    struct list_head *pos;
+    list_for_each(pos, &sleeping_tasks)
+    {
+        pcb_t *p = list_entry(pos, pcb_t, proc_timer_linker);
+        if (p->proc_wake_tick > wake_at)
+        {
+            break;
+        }
+    }
+    list_add_tail(&curr->proc_timer_linker, pos);
+
+    spinlock_release(&sleeping_tasks_lock);
+
+    sched_schedule();
+}
+
+/**
+ * @brief 唤醒 sleeping_tasks 中所有已到期的任务
+ * @details 由 tick_int_handler() 每次 tick 调用。sleeping_tasks 按
+ *   proc_wake_tick 升序排列，一旦遇到未到期的节点即可停止扫描。
+ * @note wakeup() 内部会取 run_queue.lock；本函数持有的 sleeping_tasks_lock
+ *   在所有路径上都只会是外层锁（sched_sleep_ticks() 插入时早已释放它，
+ *   之后才单独去拿 run_queue.lock），不会与 run_queue.lock 形成加锁顺序反转。
+ */
+void sched_check_timers(void)
+{
+    uint64_t now = tick_get_os_tick();
+    struct list_head *pos, *tmp;
+
+    spinlock_acquire(&sleeping_tasks_lock);
+    list_for_each_safe(pos, tmp, &sleeping_tasks)
+    {
+        pcb_t *p = list_entry(pos, pcb_t, proc_timer_linker);
+        if (p->proc_wake_tick > now)
+        {
+            break;
+        }
+        list_del(&p->proc_timer_linker);
+        wakeup(p);
+    }
+    spinlock_release(&sleeping_tasks_lock);
+}
+
 void sched_task_tick(void)
 {
-    pcb_t *curr = getCurrentProc();
+    pcb_t *curr = proc_get_current();
     curr->proc_sched_class->task_tick(curr);
 }
 
@@ -471,7 +543,7 @@ void sched_set_nice(pcb_t *p, int nice)
 
 void sched_preempt_if_needed(void)
 {
-    pcb_t *curr = getCurrentProc();
+    pcb_t *curr = proc_get_current();
     if (curr->need_resched)
     {
         sched_schedule();

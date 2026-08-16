@@ -6,12 +6,12 @@
 #include "encoding.h"
 #include "sched.h"
 
-#define osTick getSpecifiedCpu(0)->tick
+#define OS_TICK cpu_get_by_index(0)->tick
 
-osslock_t ticksLock;
-static uint64_t TIMEBASE = (390000000 / 200);
+osslock_t tick_lock;
+static uint64_t timebase = (390000000 / 200);
 
-static inline uint64_t readtime(void)
+static inline uint64_t read_time(void)
 {
     uint64_t x;
     asm volatile("csrr %0, time"
@@ -19,9 +19,9 @@ static inline uint64_t readtime(void)
     return x;
 }
 
-static void tickSetNextInt(uint64_t stime)
+static void tick_set_next_int(uint64_t stime)
 {
-    sbi_set_timer(readtime() + stime);
+    sbi_set_timer(read_time() + stime);
 #if DEBUG_TICK
     printf("++ setup timer interrupts\n");
 #endif
@@ -30,51 +30,56 @@ static void tickSetNextInt(uint64_t stime)
 /* 必须在trap_init()之后被调用 */
 void tick_init(void)
 {
-    spinlock_init(&ticksLock);
-    tickSetNextInt(TIMEBASE);
-    getCurrentCpu()->tick = 0;
-    printf("core %d tick inited!\n", getCoreId());
+    /* tick_lock 是所有 hart 共享的一把锁，只能初始化一次 */
+    if (cpu_get_core_id() == 0)
+    {
+        spinlock_init(&tick_lock);
+    }
+    tick_set_next_int(timebase);
+    cpu_get_current()->tick = 0;
+    printf("%s::core %d tick inited!\n", __FUNCTION__, cpu_get_core_id());
 }
 
 void tick_int_handler(void)
 {
-    spinlock_acquire(&ticksLock);
-    getCurrentCpu()->tick += 1;
+    spinlock_acquire(&tick_lock);
+    cpu_get_current()->tick += 1;
 #if DEBUG_TICK
-    if (getCurrentCpu()->tick % 100 == 0)
+    if (cpu_get_current()->tick % 100 == 0)
     {
-        printf("core %ld : %ld ticks\n", getCurrentCpu()->tick);
+        printf("core %ld : %ld ticks\n", cpu_get_current()->tick);
     }
 #endif
     sched_task_tick();
-    spinlock_release(&ticksLock);
-    tickSetNextInt(TIMEBASE);
+    spinlock_release(&tick_lock);
+    sched_check_timers();
+    tick_set_next_int(timebase);
 }
 
-uint64_t getOSTick(void)
+uint64_t tick_get_os_tick(void)
 {
-    return osTick;
+    return OS_TICK;
 }
 
-uint64_t getCurrentTick(void)
+uint64_t tick_get_current(void)
 {
-    return getCurrentCpu()->tick;
+    return cpu_get_current()->tick;
 }
 
-void setOSTick(uint64_t tick)
+void tick_set_os_tick(uint64_t tick)
 {
     //interrupt_disable
-    osTick = tick;
+    OS_TICK = tick;
     //interrupt_enable
 }
 
-void delay(uint64_t ticks)
+void tick_delay(uint64_t ticks)
 {
-    uint64_t tick_start = getOSTick();
+    uint64_t tick_start = tick_get_os_tick();
     uint64_t tick;
     do
     {
-        tick = getOSTick();
+        tick = tick_get_os_tick();
         if (tick - tick_start == ticks)
             return;
     } while (1);

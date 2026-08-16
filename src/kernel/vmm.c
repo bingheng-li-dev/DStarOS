@@ -416,20 +416,24 @@ void vmm_mm_destroy(mm_t *mm)
 }
 
 /**
- * @brief 处理用户空间页错误（懒分配实现）
+ * @brief 处理用户空间页错误（懒分配 + 写时复制拆分）
  * @param[in] badva      触发页错误的虚拟地址（来自 stval/sbadaddr 寄存器）
  * @param[in] fault_type 错误类型：0 = 指令取指页错误，1 = 读页错误，2 = 写页错误
  * @details 处理流程：
- *   1. 从当前进程（getCurrentProc()）获取 mm_t；内核线程的 mm 为 NULL，视为内核页错误直接 panic。
+ *   1. 从当前进程（proc_get_current()）获取 mm_t；内核线程的 mm 为 NULL，视为内核页错误直接 panic。
  *   2. 通过 vmm_vma_get() 查找包含 badva 的 VMA；未找到表示非法访问，panic（segfault）。
  *   3. 权限检查：写操作要求 VMP_W，取指要求 VMP_X；不满足则 panic（segfault）。
- *   4. 分配新物理帧，清零，建立 PTE，刷新 TLB。
+ *   4. 写故障且该 va 已有有效 PTE：说明是 fork 时被 vmm_mm_copy() 降权的共享页，
+ *      走 COW 拆分——reference==1（对面已放手）原地补回可写位；否则分配新帧、
+ *      拷贝内容、旧帧 reference--，新 PTE 指向新帧。
+ *   5. 其余情况（该 va 从未被映射过）：分配新物理帧，清零，建立 PTE。
+ *   最后统一 tlb_flush_va() 刷新。
  * @note 此函数由 trap.c 中的 trap_handler() 调用，运行在中断上下文中（中断已关闭）。
  *   panic 路径不会返回；正常路径返回后，异常指令将被重新执行。
  */
 void vmm_page_fault_handler(virAddr_t badva, int fault_type)
 {
-    mm_t *mm = getCurrentProc()->proc_mm;
+    mm_t *mm = proc_get_current()->proc_mm;
     if (!mm)
     {
         printf("vmm: page fault with no mm (va=0x%lx)\n", badva);
@@ -454,6 +458,48 @@ void vmm_page_fault_handler(virAddr_t badva, int fault_type)
         panic("segfault");
     }
 
+    /* 将触发页错误的虚拟地址对齐到页面边界（低12位即页内偏移清零） */
+    virAddr_t page_va = badva & ~(PGSIZE - 1);
+    pteflg_t  flags   = vma_prot_to_pte_flags(vma->vm_flag);
+
+    if (fault_type == 2)
+    {
+        pte_t *ptep = get_pte(mm->pgd_ppn, page_va, false, true);
+        if (ptep && pte_is_valid(*ptep))
+        {
+            ppn_t old_ppn = (*ptep) >> PTE_PPN_OFFSET;
+            pframe_t *old_frame = convert_ppn2pframe(old_ppn);
+
+            /* 另一个共享该地址的进程已经复制走了，或是退出了时 */
+            if (old_frame->reference == 1)
+            {
+#if DEBUG_VMM_page_fault_handler
+                printf("vmm: cow in-place va=0x%lx\n", page_va);
+#endif
+                *ptep = pte_create(old_ppn, flags);
+            }
+            else
+            {
+#if DEBUG_VMM_page_fault_handler
+                printf("vmm: cow duplicate va=0x%lx refs=%u\n", page_va, old_frame->reference);
+#endif
+                pframe_t *new_frame = alloc_page();
+                if (!new_frame)
+                {
+                    panic("vmm: OOM in COW fault handler");
+                }
+                new_frame->reference++;
+                memcpy((void *)convert_pframe2kva(new_frame),
+                       (void *)pa_to_kva(convert_ppn2pa(old_ppn)), PGSIZE);
+                old_frame->reference--;
+                *ptep = pte_create(convert_pframe2ppn(new_frame), flags);
+            }
+            tlb_flush_va(page_va);
+            return;
+        }
+    }
+
+    /* 该 va 从未被映射过（第一次触碰）：懒分配一个全新清零页 */
     pframe_t *frame = alloc_page();
     if (!frame)
     {
@@ -462,10 +508,7 @@ void vmm_page_fault_handler(virAddr_t badva, int fault_type)
     frame->reference++;
     memset((void *)convert_pframe2kva(frame), 0, PGSIZE);
 
-    /* 将触发页错误的虚拟地址对齐到页面边界（低12位即页内偏移清零） */
-    virAddr_t page_va = badva & ~(PGSIZE - 1);
-    pteflg_t  flags   = vma_prot_to_pte_flags(vma->vm_flag);
-    pte_t    *ptep    = get_pte(mm->pgd_ppn, page_va, true, true);
+    pte_t *ptep = get_pte(mm->pgd_ppn, page_va, true, true);
     if (!ptep)
     {
         dealloc(frame);
@@ -476,19 +519,24 @@ void vmm_page_fault_handler(virAddr_t badva, int fault_type)
 }
 
 /**
- * @brief 将源进程地址空间的所有 VMA 及物理页内容深拷贝到目标地址空间（用于 fork）
+ * @brief 将源进程地址空间的所有 VMA 共享给目标地址空间（写时复制，用于 fork）
  * @param[in,out] dst 目标 mm_t（已由 vmm_mm_create() 初始化，mmap_list 为空）
  * @param[in]     src 源 mm_t
- * @retval ENO0_NO_ERROR   成功，dst 拥有与 src 相同布局的独立物理页副本
- * @retval ENO1_NOMORE_MEM 物理内存不足；已复制的部分不会自动回滚
+ * @retval ENO0_NO_ERROR   成功，dst 拥有与 src 相同布局、共享同一批物理帧的地址空间
+ * @retval ENO1_NOMORE_MEM 物理内存不足（仅可能发生在 dst 侧页表中间节点分配失败）；
+ *   已处理的部分不会自动回滚——src 侧已被降权的 PTE 会在下次该进程自己写入时于
+ *   page fault handler 里发现 reference==1，原地补回可写位，不会造成数据损坏。
  * @details 对 src 的每个 VMA：
  *   1. 创建相同范围和权限的新 vma_t 插入 dst；
- *   2. 遍历区间内每个已映射页（PTE 有效），分配新帧并 memcpy 内容；
- *   3. 在 dst 页表中建立新帧的 PTE。
+ *   2. 遍历区间内每个已映射页（PTE 有效），**不分配新帧、不 memcpy**：
+ *      递增该物理帧的 reference，src 与 dst 的 PTE 都清除 PTE_W 指向同一帧；
+ *   3. src 的 PTE 是父进程正在使用的页表条目，降权后必须 tlb_flush_va()，
+ *      否则父进程可能凭 TLB 里缓存的旧"可写"翻译绕过缺页异常，直接写坏
+ *      与子进程共享的物理页。
  *
- *   未映射的页（懒分配尚未触发的页）不复制，子进程首次访问时触发页错误再分配。
- * @note 当前为 Eager Copy（写时复制 COW 留待后续实现）。
- *   brk_start 和 brk_current 也一并复制。
+ *   未映射的页（懒分配尚未触发的页）不处理，子进程首次访问时触发页错误再分配。
+ *   写时复制的实际"拆分共享页"逻辑在 vmm_page_fault_handler() 里完成。
+ * @note brk_start 和 brk_current 也一并复制。
  */
 int vmm_mm_copy(mm_t *dst, mm_t *src)
 {
@@ -510,25 +558,22 @@ int vmm_mm_copy(mm_t *dst, mm_t *src)
                 continue;
             }
 
-            pframe_t *df = alloc_page();
-            if (!df)
-            {
-                return ENO1_NOMORE_MEM;
-            }
-            df->reference++;
-            
-            ppn_t src_ppn = (*sp) >> PTE_PPN_OFFSET;
-            /* 把源进程的一个物理页内容拷贝到子进程新分配的物理页 */
-            memcpy((void *)convert_pframe2kva(df),
-                   (void *)pa_to_kva(convert_ppn2pa(src_ppn)), PGSIZE);
-            pteflg_t  flags = vma_prot_to_pte_flags(sv->vm_flag);
-            pte_t    *dp    = get_pte(dst->pgd_ppn, va, true, true);
+            ppn_t ppn = (*sp) >> PTE_PPN_OFFSET;
+            pframe_t *frame = convert_ppn2pframe(ppn);
+            frame->reference++;
+
+            /* 双方共享同一帧，都改成只读：谁先写谁在 page fault 里触发拆分 */
+            pteflg_t ro_flags = pte_get_flag(*sp) & ~(pteflg_t)PTE_W;
+            *sp = pte_create(ppn, ro_flags);
+            tlb_flush_va(va);
+
+            pte_t *dp = get_pte(dst->pgd_ppn, va, true, true);
             if (!dp)
             {
-                dealloc(df);
+                frame->reference--;
                 return ENO1_NOMORE_MEM;
             }
-            *dp = pte_create(convert_pframe2ppn(df), flags);
+            *dp = pte_create(ppn, ro_flags); /* 使用sp的ppn，实现共享 */
         }
     }
     dst->brk_start   = src->brk_start;

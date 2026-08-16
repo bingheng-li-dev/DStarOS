@@ -2,6 +2,9 @@
 #include "sync.h"
 #include "tinyprintf.h"
 #include "sbi.h"
+#include "vfs.h"
+#include "kmalloc.h"
+#include "stringops.h"
 
 #define UNUSED(x) (void)(x)
 
@@ -78,4 +81,48 @@ void panic_impl(const char *func, int line, char *s, ...)
     panicked = true;
     while (true)
         ;
+}
+
+/* ============================================================
+ * console 设备 file（stdin/stdout/stderr 的后端）
+ * ============================================================ */
+
+static ssize_t console_write(file_t *f, const void *buf, size_t len)
+{
+    UNUSED(f);
+    for (size_t i = 0; i < len; i++)
+    {
+        sbi_console_putchar(((char *)buf)[i]);
+    }
+
+    return len;
+}
+
+/* 阶段 5 的 TTY 输入落地前，读端先返回 EOF */
+static ssize_t console_read(file_t *f, void *buf, size_t len)
+{
+    UNUSED(f);
+    UNUSED(buf);
+    UNUSED(len);
+    return 0;
+}
+
+static file_operations_t console_fops = {
+    .read = console_read,
+    .write = console_write,
+};
+
+file_t *console_open_file(void)
+{
+    file_t *f = kmalloc(sizeof(file_t));
+    if (f == NULL)
+    {
+        return NULL;
+    }
+    memset(f, 0, sizeof(file_t));
+    f->f_count = 1;
+    f->f_op = &console_fops;
+    f->f_mode = O_RDWR;
+
+    return f;
 }

@@ -55,7 +55,7 @@ void trap_init(void)
     // @todo 暂时的，内核可全程访问U态页。正常应仅在copy_to/from_user函数前后使用
     set_csr(sstatus, SSTATUS_SUM);
 
-    printf("core %ld trap inited!\n", getCoreId());
+    printf("core %ld trap inited!\n", cpu_get_core_id());
 }
 
 void local_intr_disable(void)

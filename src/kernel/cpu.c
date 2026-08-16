@@ -3,46 +3,44 @@
 #include "sbi.h"
 #include "sync.h"
 
-extern volatile uint64_t core2Enabled;
+extern uint64_t cpu_get_core_id_asm(void);
+extern void cpu_set_core_id_asm(uint64_t core_id);
 
-extern uint64_t getCoreId_asm(void);
-extern void setCoreId_asm(uint64_t coreMask);
+static cpu_t cpus[CORE_NUMBER];
 
-static cpu_t CPUs[CORE_NUMBER];
-
-void core2Enable(void)
+/**
+ * @brief 启动 hart 1
+ * @return SBI 返回码（SBI_SUCCESS 表示已请求启动）
+ * @details RustSBI 0.4.0 用 HSM 扩展把从核停在 STOPPED 态，只把 hart 0 重定向到内核入口；
+ *   老的 `sbi_send_ipi` + `core2Enabled` 轮询根本唤不醒 STOPPED 的从核。必须用
+ *   HSM `sbi_hart_start` 让 hart 1 从**物理入口** `_start` 起跑（HSM 约定进入时 satp=0、
+ *   a0=hartid、a1=priv）。`_start` 链接在高 VA，用 `kva_to_pa` 换算成 PA(0x80200000) 传入。
+ * @note 须在内核页表（含 vmm_kernel_pgd_ppn 与 trampoline 恒等映射）就绪后调用；
+ *   移除 trampoline 恒等映射必须等到 hart 1 过了 trampoline 之后（见 init.c 的 hart1_up 屏障）。
+ */
+int cpu_start_secondary_hart(void)
 {
+    extern char _start[];
     mb();
-    unsigned long mask = BIT(1); /* 使能core2 */
-    sbi_send_ipi(mask);
-    core2Enabled = 0xa55a;
+    return sbi_hsm_hart_start(1, kva_to_pa((virAddr_t)_start), 0);
 }
 
-uint64_t getCoreId(void)
+uint64_t cpu_get_core_id(void)
 {
-    return getCoreId_asm();
+    return cpu_get_core_id_asm();
 }
 
-void setCoreId(uint64_t coreMask)
+void cpu_set_core_id(uint64_t core_id)
 {
-    return setCoreId_asm(coreMask & 0x1);
+    return cpu_set_core_id_asm(core_id & 0x1);
 }
 
-cpu_t *getCurrentCpu(void)
+cpu_t *cpu_get_current(void)
 {
-    return &CPUs[getCoreId()];
+    return &cpus[cpu_get_core_id()];
 }
 
-cpu_t *getSpecifiedCpu(uint16_t index)
+cpu_t *cpu_get_by_index(uint16_t index)
 {
-    return &CPUs[index];
-}
-
-pcb_t *getCurrentProc(void)
-{
-    irq_disable_nesting_increment();
-    cpu_t *cpu = getCurrentCpu();
-    pcb_t *proc = cpu->current_proc;
-    irq_disable_nesting_decrement();
-    return proc;
+    return &cpus[index];
 }

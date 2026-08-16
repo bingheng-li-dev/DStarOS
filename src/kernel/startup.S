@@ -3,7 +3,8 @@
     
     .section .text.entry
     .globl _start
-    .align 2
+    # .align N 表示对齐到 2^N 字节，N 由"后面的数据/代码将以多大的位宽被访问"决定
+    .align 2 
 _start:
     bnez  a0, secondary_cpu_entry        # a0 restores core id because of sbi,bnez:不等于零时分支
     # s0是保存寄存器，调用函数（参考函数调用规范）os_init_before_mmu_enable后值不变，后续os_init_after_mmu_enable需要core id作为参数
@@ -32,13 +33,8 @@ bss_clear_done:
 loop1:   j     loop1                    # enter the infinite loop
 
 secondary_cpu_entry:
-    la    t2, core2Enabled
-    ld    t2, 0(t2)
-    li    t3, 0xa55a
-    beq   t2, t3, 1f
-    j     secondary_cpu_entry
-
-1:                                      # 1f
+    # 经 HSM sbi_hart_start 启动，进入时 a0=hartid(=1)，且 hart0 已备好内核页表
+    # 建栈 + 走 trampoline 使能 MMU 跳高地址。
     mv    s0, a0
     la    sp, boot_stack_top2           # setup core2 stack
     li    t0, SATPMODE_RV39
@@ -50,23 +46,16 @@ secondary_cpu_entry:
 
 loop2:   j     loop2                    # enter the infinite loop
 
-    .data                               # 注意不是.section .data，后者会将此关键词以下的代码放到.data段中！
-    .globl core2Enabled
-    # .align N 表示对齐到 2^N 字节，N 由"后面的数据/代码将以多大的位宽被访问"决定
-    .align 3 # 2^3=8字节对齐，.dword占8字节，所以对齐到8字节边界
-core2Enabled:
-    .dword 0
-
     .section .text.entry
-    .globl getCoreId_asm
+    .globl cpu_get_core_id_asm
     .align 2 # 跳转/函数入口 这种取址访问要求对齐到4字节
-getCoreId_asm:
+cpu_get_core_id_asm:
     mv    a0, tp
     ret
 
-    .globl setCoreId_asm
+    .globl cpu_set_core_id_asm
     .align 2
-setCoreId_asm:
+cpu_set_core_id_asm:
     mv    tp, a0
     ret
 

@@ -12,8 +12,8 @@
  * @brief 读取调度用的当前时刻
  * @return `time` CSR 的当前值（QEMU virt 为 10 MHz，K210 约 7.8 MHz）
  * @details @TODO
- *   有意**不用** tick 计数（`getCurrentTick()`）作为时基：
- *   `TIMEBASE = 390000000 / 200` 意味着约 0.2 秒才有一个 tick，而协作式调度下
+ *   有意**不用** tick 计数（`tick_get_current()`）作为时基：
+ *   `timebase = 390000000 / 200` 意味着约 0.2 秒才有一个 tick，而协作式调度下
  *   内核线程往往打印完就让出，运行时长远小于一个 tick ——
  *   那样所有任务的 delta 恒为 0、vruntime 全为 0，红黑树排序完全退化。
  *   直接读 `time` CSR 可获得约 0.1 微秒的分辨率，vruntime 记账才有意义。
@@ -116,11 +116,17 @@ void wakeup(pcb_t *proc);
  * wakeup() 这个任务是调用者的责任。调用者必须在自己的锁保护下完成
  * "检查条件 → 挂入等待结构 → sleep()"整套操作，否则会有检查完条件、
  * 真正睡下去之前被人抢先 wakeup 导致丢失唤醒的风险。
- * @param proc  只能是 getCurrentProc()——sched_schedule() 换下的永远是当前
+ * @param proc  只能是 proc_get_current()——sched_schedule() 换下的永远是当前
  *              正在这个 CPU 上跑的任务，传别的 pcb 只会误改一个不相关任务
  *              的状态，当前任务该做的让出 CPU 却不会发生。
  * @param state 睡眠时置的状态，INTERRUPTIBLE 或 UNINTERRUPTIBLE，由调用者
  *              按自己的语义决定（比如信号量等待用 UNINTERRUPTIBLE）。 */
 void sleep(pcb_t *proc, sta_t state);
+
+/* 当前任务定时睡眠 ticks 个 tick_get_os_tick() 单位后被 tick 中断唤醒；
+ * 期间从就绪队列摘下，不占用 CPU（区别于 tick_delay() 的忙等自旋）。 */
+void sched_sleep_ticks(uint64_t ticks);
+/* 由 tick_int_handler() 每次 tick 调用：唤醒 sleeping_tasks 中已到期的任务。 */
+void sched_check_timers(void);
 
 #endif /* _SCHED_H_ */

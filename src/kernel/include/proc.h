@@ -15,6 +15,8 @@
 /* 前向声明，避免形成循环包含 */
 struct dentry;
 typedef struct dentry dentry_t;
+struct file;
+typedef struct file file_t;
 struct sched_class;
 
 #define SCHED_NORMAL 0 /* CFS 类：nice 加权 vruntime */
@@ -26,6 +28,7 @@ struct sched_class;
 #define KERNRL_STKSIZE KERNEL_STACKPSIZE *PGSIZE
 #define PID_MAX_VALUE (((int16_t)1 << 15) - 2) /* 0 <= PID <= PID_MAX_VALUE*/
 #define PROC_MAX_AMOUNT (PID_MAX_VALUE / 2)    /* 1(idle) <= task_count <= PROC_MAX_AMOUNT */
+#define NOFILE 16
 
 #define CLONE_VM 0x00000100      /* Child process will share the same virtual memory space with it's parent. */
 #define CLONE_FS 0x00000200      /* Child process will share the same file system info with it's parent. */
@@ -80,6 +83,7 @@ struct proc_control_block
     int16_t proc_exit_code;              /* 退出码；ZOMBIE 期间保存，待父进程 do_wait 收割 */
     struct list_head proc_children;      /* 子进程链表头——子进程以 proc_sibling_linker 挂入 */
     struct list_head proc_sibling_linker;/* 本进程挂入父进程 proc_children 节点 */
+    file_t *proc_fds[NOFILE];            /* 文件描述符fd表 */
 
     const struct sched_class *proc_sched_class; /* 本任务归属的调度类 */
     int proc_policy;                            /* SCHED_NORMAL / SCHED_FIFO / SCHED_RR */
@@ -105,6 +109,10 @@ struct proc_control_block
     /* 一个节点不能同时挂入两条链 */
     struct list_head proc_list_linker;   /* 挂入全局 proc_list 的节点 */
     struct list_head proc_wait_linker;   /* 挂入等待队列（信号量 / wait）的节点 */
+
+    /* ==================== 定时唤醒相关 ==================== */
+    uint64_t proc_wake_tick;             /* 到期时刻（tick_get_os_tick() 单位），仅挂在 sleeping_tasks 期间有效 */
+    struct list_head proc_timer_linker;  /* 挂入 sleeping_tasks 排序链表的节点 */
 };
 
 struct proc_pid_map
@@ -120,10 +128,21 @@ char *get_proc_name(pcb_t *proc);
 int16_t do_fork(uint32_t clone_flags, uintptr_t stack, intstkf_t *regs);
 void do_exit(int16_t error_code) __attribute__((noreturn));
 int16_t do_wait(int16_t pid, int *status);
+int do_exec(intstkf_t *sp, const char *path);
 int16_t create_kernel_thread_by_fork(void *func(void *), void *args, uint32_t clone_flags);
 /* 按 pid 查找 pcb（find_proc_by_pid 的公开包装）；未找到返回 NULL。 */
 pcb_t *proc_find_by_pid(int16_t pid);
 void proc_init(void);
+pcb_t *proc_get_current(void);
+
+int proc_fd_alloc(void);
+file_t *proc_fd_get(int fd);
+int proc_fd_install(int fd, file_t *f);
+int proc_fd_close(int fd);
+int proc_fd_copy(pcb_t *dst, pcb_t *src);
+void proc_fd_close_all(pcb_t *p);
+int proc_install_stdio(void);
+
 /* Kernel's idle process which pid is 0. */
 void idle(void) __attribute__((noreturn));
 void enter_user_mode(virAddr_t entry, virAddr_t ustack) __attribute__((noreturn));

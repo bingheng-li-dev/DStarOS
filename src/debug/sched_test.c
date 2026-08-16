@@ -15,6 +15,7 @@
 #include "proc.h"
 #include "sched.h"
 #include "cpu.h"
+#include "tick.h"
 
 /* ============================================================
  * 共享断言计数器（sync_test.c / rt_sched_test.c 也用，故非 static）
@@ -64,7 +65,7 @@ static void sched_unit_tests(void)
 
     /* 用 idle_proc 做被测对象：它从不在就绪队列里，sched_set_nice 只改字段、
      * 不走 dequeue/enqueue 分支，测完恢复，绝对安全。 */
-    pcb_t *idle = getCurrentCpu()->idle_proc;
+    pcb_t *idle = cpu_get_current()->idle_proc;
     int saved_nice = idle->proc_nice;
 
     sched_set_nice(idle, 0);
@@ -96,7 +97,7 @@ static void *life_worker(void *arg)
 {
     int idx = (int)(intptr_t)arg;
     life_ran[idx] = 1;
-    printf("  [worker %d] ran (pid=%d)\n", idx, getCurrentProc()->proc_pid);
+    printf("  [worker %d] ran (pid=%d)\n", idx, proc_get_current()->proc_pid);
     return NULL; /* 退出码 0 */
 }
 
@@ -152,7 +153,7 @@ static void *cfs_fair_worker(void *arg)
 {
     int idx = (int)(intptr_t)arg;
     /* 对自己设 nice：running 任务不在队列里，on_rq=false，只改字段，安全 */
-    sched_set_nice(getCurrentProc(), cfs_nice[idx]);
+    sched_set_nice(proc_get_current(), cfs_nice[idx]);
 
     while (1)
     {
@@ -186,6 +187,57 @@ static void sched_cfs_fairness_test(void)
 }
 
 /* ============================================================
+ * 定时唤醒测试：sched_sleep_ticks 到点被 tick 中断唤醒，
+ * 且睡眠期间不占 CPU——同时跑的 bg worker 应该能继续被调度到
+ * ============================================================ */
+#define TIMER_SLEEP_TICKS 3
+
+static volatile int timer_bg_ran;
+static volatile int timer_sleep_done;
+static volatile uint64_t timer_slept_ticks;
+
+static void *timer_bg_worker(void *arg)
+{
+    (void)arg;
+    while (!timer_sleep_done)
+    {
+        timer_bg_ran += 1;
+        sched_schedule(); /* 主动让出，仍 RUNNING → 被重新入队 */
+    }
+    return NULL;
+}
+
+static void *timer_sleep_worker(void *arg)
+{
+    (void)arg;
+    uint64_t before = tick_get_os_tick();
+    sched_sleep_ticks(TIMER_SLEEP_TICKS);
+    timer_slept_ticks = tick_get_os_tick() - before;
+    timer_sleep_done = 1;
+    return NULL;
+}
+
+static void sched_timed_sleep_test(void)
+{
+    printf("\n-- timed wakeup: sched_sleep_ticks --\n");
+
+    timer_bg_ran = 0;
+    timer_sleep_done = 0;
+    timer_slept_ticks = 0;
+
+    create_kernel_thread_by_fork(timer_bg_worker, NULL, 0);
+    create_kernel_thread_by_fork(timer_sleep_worker, NULL, 0);
+    sched_test_reap_all();
+
+    printf("  slept %ld ticks (requested %d), bg worker ran %d times meanwhile\n",
+           timer_slept_ticks, TIMER_SLEEP_TICKS, timer_bg_ran);
+    sched_test_check("sleeper woke up after requested ticks",
+                      timer_slept_ticks >= TIMER_SLEEP_TICKS);
+    sched_test_check("bg worker kept running during sleep (not a busy-wait)",
+                      timer_bg_ran > 0);
+}
+
+/* ============================================================
  * 聚合入口：由 init（DEBUG_SCHED_TEST）调用
  * ============================================================ */
 void run_sched_tests(void)
@@ -203,6 +255,7 @@ void run_sched_tests(void)
     sched_unit_tests();
     sched_lifecycle_test();
     sched_cfs_fairness_test();
+    sched_timed_sleep_test();
     sync_sem_wakeup_test();
     sync_mutex_test();
     rt_preempt_cfs_test();

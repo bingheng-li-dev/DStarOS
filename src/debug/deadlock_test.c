@@ -12,14 +12,14 @@ bool flag = false;
 int deadlockTest(int argc, char **args)
 {
     printf("Deadlock test!!\n");
-    uint64_t coreid = getCoreId();
+    uint64_t coreid = cpu_get_core_id();
     if (coreid == 0)
     {
         spinlock_init(&lock1);
         spinlock_init(&lock2);
         flag = true;
         spinlock_acquire(&lock1);
-        delay(1);
+        tick_delay(1);
         printf("core0 delay finished!\n");
         spinlock_acquire(&lock2);
         printf("core0 Acquire\n");
@@ -32,7 +32,7 @@ int deadlockTest(int argc, char **args)
         while (!flag)
             ;
         spinlock_acquire(&lock2);
-        delay(1);
+        tick_delay(1);
         printf("core1 delay finished!\n");
         spinlock_acquire(&lock1);
         printf("core1 Acquire\n");

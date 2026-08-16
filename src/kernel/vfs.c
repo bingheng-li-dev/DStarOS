@@ -612,7 +612,7 @@ dentry_t *vfs_lookup(const char *path)
     else
     {
         /* 相对路径：从当前进程的工作目录出发 */
-        pcb_t *cur_proc = getCurrentProc();
+        pcb_t *cur_proc = proc_get_current();
         if (cur_proc && cur_proc->proc_cwd)
         {
             cur = cur_proc->proc_cwd;
@@ -1682,7 +1682,7 @@ int vfs_chdir(const char *path)
     }
 
     /* 释放旧的工作目录引用，持有新的 */
-    pcb_t *cur_proc = getCurrentProc();
+    pcb_t *cur_proc = proc_get_current();
     if (cur_proc && cur_proc->proc_cwd)
     {
         dentry_put(cur_proc->proc_cwd);
@@ -1716,7 +1716,7 @@ int vfs_getcwd(char *buf, size_t size)
     }
 
     /* 若 cwd 未设置或等于根，直接返回 "/" */
-    pcb_t *cur_proc = getCurrentProc();
+    pcb_t *cur_proc = proc_get_current();
     dentry_t *cwd = (cur_proc && cur_proc->proc_cwd)
                     ? cur_proc->proc_cwd
                     : vfs_root_dentry;

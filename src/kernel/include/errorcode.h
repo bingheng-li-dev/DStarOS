@@ -23,4 +23,6 @@
 #define ENO16_PERM         -16    /* 操作不被允许（EPERM）*/
 #define ENO17_NO_CHILD     -17    /* 没有子进程可等待（ECHILD）*/
 
+#define ENO18_TOO_MANY_FILES -18  /* fd表满了 */
+
 #endif

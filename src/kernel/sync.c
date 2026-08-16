@@ -8,23 +8,23 @@ void irq_disable_nesting_increment(void)
 {
     bool intr_flag;
     __local_intr_save(intr_flag);
-    cpu_t *cpu = getCurrentCpu();
-    if (cpu->irqDisableNesting == 0)
+    cpu_t *cpu = cpu_get_current();
+    if (cpu->irq_disable_nesting == 0)
     {
-        cpu->intrDisableState = intr_flag;
+        cpu->intr_disable_state = intr_flag;
     }
-    cpu->irqDisableNesting += 1;
+    cpu->irq_disable_nesting += 1;
 }
 
 void irq_disable_nesting_decrement(void)
 {
-    cpu_t *cpu = getCurrentCpu();
-    dassert(cpu->irqDisableNesting >= 1);
-    cpu->irqDisableNesting -= 1;
-    /* 当"cpu->intrDisableState"且"cpu->irqDisableNesting"等于0时重新打开中断。 */
-    if (cpu->irqDisableNesting == 0)
+    cpu_t *cpu = cpu_get_current();
+    dassert(cpu->irq_disable_nesting >= 1);
+    cpu->irq_disable_nesting -= 1;
+    /* 当"cpu->intr_disable_state"且"cpu->irq_disable_nesting"等于0时重新打开中断。 */
+    if (cpu->irq_disable_nesting == 0)
     {
-        __local_intr_restore(cpu->intrDisableState);
+        __local_intr_restore(cpu->intr_disable_state);
     }
 }
 
@@ -58,7 +58,7 @@ void sem_init(ossem_t *sem, int value)
 
 void sem_down(ossem_t *sem)
 {
-    pcb_t *tsk = getCurrentProc();
+    pcb_t *tsk = proc_get_current();
     bool waited = false; /* 是否真的阻塞过；用来让 sem->waiting 的 +1/-1 严格成对 */
 
     spinlock_acquire(&(sem->lock));

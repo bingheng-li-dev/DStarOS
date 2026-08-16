@@ -31,11 +31,12 @@ void os_init_before_mmu_enable(void)
     vmm_init();
 }
 
+static volatile int hart1_up = 0;
+
 /* 此时MMU已打开，并且PC已通过trampoline跳高地址 */
 void os_init_after_mmu_enable(uint64_t hartid)
 {
-    vmm_remove_identity_mapping();
-    setCoreId(hartid);
+    cpu_set_core_id(hartid);
     if (hartid == 0)
     {
         /* init_printf先前存放了stdout_putc函数的物理绝对地址，更新为高虚拟地址 */
@@ -50,33 +51,45 @@ void os_init_after_mmu_enable(uint64_t hartid)
 #endif
         // plicInit();
         fs_init();
-        printf("core %ld init done\n", getCoreId());
+        sched_init();   /* 全局就绪队列只能由 hart 0 初始化一次，否则 hart 1 会把 init 冲掉 */
+        proc_init();     /* hart 0 的 idle + init */
+
+        /* 启动 hart 1（HSM）。成功则等它过了 trampoline 再移除 trampoline 恒等映射——
+         * hart 1 的 trampoline 依赖内核页表里这段恒等映射，提前移除会让它一 csrw satp 就崩。
+         * 若 HSM 不支持/失败则退回单核，直接移除。 */
+        if (cpu_start_secondary_hart() == SBI_SUCCESS)
+        {
+            while (!hart1_up)
+            {
+                mb();
+            }
+        }
+        vmm_remove_identity_mapping();
+
+        printf("core %ld init done\n", cpu_get_core_id());
 
 #if DEBUG_INIT_main_core0
         main(0, (void *)0);
 #endif
-
-        core2Enable();
     }
     else
     {
+        hart1_up = 1;   /* 已在高 VA，不再需要恒等映射，放行 hart 0 去移除 */
         mb();
         trap_init();
         tick_init();
-        printf("core %ld init done\n", getCoreId());
+        proc_init();
+        printf("core %ld init done\n", cpu_get_core_id());
 #if DEBUG_INIT_main_core1
         main(0, (void *)0);
 #endif
     }
-    sched_init();
-    proc_init();
 
 #if DEBUG_INIT_main_bothcore
     main(0, (void *)0);
 #endif
 
 #if DEBUG_INIT_os_init
-    /* 调试断点：停在此处可用 GDB 检查 proc_init 结果；改为 0 以继续运行 idle */
     while (1)
         ;
 #endif
