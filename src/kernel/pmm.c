@@ -62,13 +62,19 @@ void pmm_init(void)
 
     /* Initial the memory map and free lists. */
     pframe_t *freeFrameBegin = &(PageListBegin[cursor]);
-    for (; cursor <= ppnTotalAmount; cursor++)
+    for (; cursor < ppnTotalAmount; cursor++)
     {
         PageListBegin[cursor].canBeAlloc = 1;
         PageListBegin[cursor].reference = 0;
     }
 
-    uint16_t ppnFreeAmount = ppnFreeEnd - ppnFreeBegin + 1;
+    /* ppnFreeEnd（=ppnEnd）和 ppnTotalAmount 一样是开区间上界（不含），这里不能 +1——
+     * 加了会让空闲块的登记大小比 PageListBegin 数组和 init_kernel_offset_mapping()
+     * 实际映射的范围都多出一页，那一页的 PA 恰好等于 MEMORY_END，对应的 KVA
+     * 从未被建立映射；alloc() 迟早会把这个幻影页当正常页分配出去，谁写它谁触发
+     * "va=KVA(MEMORY_END) 找不到 VMA" 的 segfault——纯物理内存分配量小、命中概率低时
+     * 不容易撞见，分配压力上来后（比如两个 hart 真并发分配）就容易复现。 */
+    uint16_t ppnFreeAmount = ppnFreeEnd - ppnFreeBegin;
     freeFrameBegin->nsize = ppnFreeAmount;
 
     INIT_LIST_HEAD((&FreeList.list_linker));
@@ -138,9 +144,11 @@ void pmm_init_after_mmu_enable(void)
 pframe_t *alloc(uint16_t nsize)
 {
     pframe_t *ret = NULL;
+    spinlock_acquire(&PmmLock);
     if (nsize > FreeList.fnsize)
     {
-        printf("Frame has not been allocated!\n");
+        printf("Frame has not been allocated! nsize=%d FreeList.fnsize=%d FreeAList.fnsize=%d\n",
+               nsize, FreeList.fnsize, FreeAList.fnsize);
         printf("Begin page replacement algorithm...\n");
         goto f1;
     }
@@ -184,6 +192,7 @@ pframe_t *alloc(uint16_t nsize)
 #endif
 
 f1:
+    spinlock_release(&PmmLock);
     return ret;
 }
 
@@ -194,6 +203,7 @@ pframe_t *alloc_page(void)
 
 void *microAlloc(uint64_t size)
 {
+    spinlock_acquire(&PmmLock);
     if (size > 1024)
     {
         goto f2;
@@ -243,27 +253,34 @@ void *microAlloc(uint64_t size)
     }
     goto f2;
 f1:
+    spinlock_release(&PmmLock);
     return (void *)PtrTableAddr[position];
 f2:
+    spinlock_release(&PmmLock);
     return NULL;
 }
 
 bool microDemalloc(void *ptr)
 {
+    spinlock_acquire(&PmmLock);
     uint16_t position;
     for (position = 0; position <= 63; position++)
     {
         if (PtrTableAddr[position] == (phyAddr_t)ptr && MicroMemUsage[position] == true)
         {
             MicroMemUsage[position] = false;
+            spinlock_release(&PmmLock);
             return true;
         }
     }
+    spinlock_release(&PmmLock);
     return false;
 }
 
 void dealloc(pframe_t *baseppn)
 {
+    spinlock_acquire(&PmmLock);
+
     pframe_t *currentFrame;
     uint16_t nsize;
     nsize = baseppn->nsize;
@@ -283,6 +300,8 @@ void dealloc(pframe_t *baseppn)
 #if DEBUG_MMU_mm_dealloc
     printf("dealloc::Frame has been deallocated!ppn:%ld,pa:%08lx,nsize:%d\n", ppnDealloc, convert_ppn2pa(ppnDealloc), nsize);
 #endif
+
+    spinlock_release(&PmmLock);
 }
 
 static pframe_t *deleteAndReinsert(uint16_t nsize)

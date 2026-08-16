@@ -44,3 +44,15 @@ cpu_t *cpu_get_by_index(uint16_t index)
 {
     return &cpus[index];
 }
+
+/**
+ * @brief 给指定 hart 发一次核间中断（S 态软件中断）
+ * @param[in] hart_id 目标 hart id
+ * @details 用于把正在 wfi 休眠的 hart 踢醒，让它回到 idle() 循环重新看一眼就绪队列。
+ *   目标 hart 收到 IRQ_S_SOFT 后只需清本地 sip.SSIP（见 trap.c），中断本身不用做
+ *   任何调度决策——真正的调度检查在 idle() 循环里做，中断只是"唤醒"这一下。
+ */
+void cpu_send_ipi(uint64_t hart_id)
+{
+    sbi_send_ipi(BIT(hart_id), 0);
+}

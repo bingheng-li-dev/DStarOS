@@ -603,21 +603,31 @@ void idle(void)
 {
     while (1)
     {
-        pcb_t *cur = proc_get_current();
-        
 #if DEBUG_PROC_idle
+        pcb_t *cur = proc_get_current();
         pcb_t *my_idle = cpu_get_current()->idle_proc;
-        printf("%s::TaskCurrent->need_resched:%d TaskIdle->need_resched %d\n", 
+        printf("%s::TaskCurrent->need_resched:%d TaskIdle->need_resched %d\n",
             __FUNCTION__, cur->need_resched, my_idle->need_resched);
-        printf("%s::TaskCurrent->proc_pname:%s TaskIdle->proc_pname %s\n", 
+        printf("%s::TaskCurrent->proc_pname:%s TaskIdle->proc_pname %s\n",
             __FUNCTION__, cur->proc_pname, my_idle->proc_pname);
-        printf("%s::TaskCurrent->proc_pid:%d TaskIdle->proc_pid %d\n", 
+        printf("%s::TaskCurrent->proc_pid:%d TaskIdle->proc_pid %d\n",
             __FUNCTION__, cur->proc_pid, my_idle->proc_pid);
 #endif
 
-        if (cur->need_resched)
+        /* 每轮都尝试调度，不再靠 need_resched 门槛——本 hart 的 need_resched 只有
+         * "别的任务在本 hart 上跑时被抢占"才会置位，本 hart 自己空转时永远不会有人
+         * 帮它置这个标志，靠它当门槛会导致这个 hart 永久看不到共享就绪队列里别的
+         * hart 刚放进去的任务。sched_schedule() 在确实没活干时会退化成挑回自己的
+         * idle_proc，开销很小。 */
+        sched_schedule();
+
+        /* 挑完还是自己的 idle_proc，说明真的没活干，wfi 休眠到下一次 tick 中断
+         * 再回来重试，不用忙等空转。（原计划还有 cpu_send_ipi 主动踢醒，已知
+         * 有一个偶发的时序 bug 暂时关闭，见 .claude/bugfixes.md，这里的 wfi
+         * 目前只靠 tick 兜底唤醒，最坏延迟一个 tick。） */
+        if (proc_get_current() == cpu_get_current()->idle_proc)
         {
-            sched_schedule();
+            asm volatile("wfi");
         }
     }
 }

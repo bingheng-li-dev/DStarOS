@@ -11,17 +11,9 @@
 osslock_t tick_lock;
 static uint64_t timebase = (390000000 / 200);
 
-static inline uint64_t read_time(void)
-{
-    uint64_t x;
-    asm volatile("csrr %0, time"
-                 : "=r"(x));
-    return x;
-}
-
 static void tick_set_next_int(uint64_t stime)
 {
-    sbi_set_timer(read_time() + stime);
+    sbi_set_timer(tick_read_time() + stime);
 #if DEBUG_TICK
     printf("++ setup timer interrupts\n");
 #endif

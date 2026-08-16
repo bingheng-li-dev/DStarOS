@@ -7,6 +7,7 @@
 #include "list.h"
 #include "sync.h"
 #include "proc.h"
+#include "tick.h"
 
 /**
  * @brief 读取调度用的当前时刻
@@ -17,12 +18,12 @@
  *   内核线程往往打印完就让出，运行时长远小于一个 tick ——
  *   那样所有任务的 delta 恒为 0、vruntime 全为 0，红黑树排序完全退化。
  *   直接读 `time` CSR 可获得约 0.1 微秒的分辨率，vruntime 记账才有意义。
+ *   实际读取委托给 `tick_read_time()`（`tick.h`），避免和 tick 模块重复实现
+ *   同一段内联汇编；这里单独留一个语义化的名字 + 这段调度侧的设计说明。
  */
 static inline uint64_t sched_now(void)
 {
-    uint64_t t;
-    asm volatile("csrr %0, time" : "=r"(t));
-    return t;
+    return tick_read_time();
 }
 
 #define SCHED_NICE_MIN (-20)

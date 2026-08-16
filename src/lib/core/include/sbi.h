@@ -281,24 +281,18 @@ static inline void sbi_shutdown(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* IPI / remote fence                                                   */
-/* hart_mask: bitmask of target harts (bit 0=hart 0, bit 1=hart 1).   */
-/*                                                                      */
-/* Callers must pass the VALUE, not a pointer:                          */
-/*   unsigned long mask = BIT(1);  sbi_send_ipi(mask);                 */
-/*                                                                      */
-/* Note: v0.1 takes a pointer in a0; wrap the local here so callers    */
-/* stay pointer-free.  When IPI extension is probed use sbi_ecall.     */
+/* IPI                                                                   */
+/* legacy v0.1 SEND_IPI/CLEAR_IPI 和 SET_TIMER/SHUTDOWN/HSM 是同一类坑，
+ * 在 RustSBI 0.4.0 下同样不可信，改用标准 IPI 扩展（v0.2+）。v0.2+ 模型下
+ * 也不再需要 sbi_clear_ipi()——"确认收到"是接收端自己清本地 sip.SSIP，
+ * 不是另一次 SBI 调用，所以这里不再提供这个函数。                        */
 /* ------------------------------------------------------------------ */
 
-static inline void sbi_clear_ipi(void)
+static inline int sbi_send_ipi(unsigned long hart_mask, unsigned long hart_mask_base)
 {
-    SBI_CALL_LEGACY(SBI_EXT_0_1_CLEAR_IPI, 0, 0, 0);
-}
-
-static inline void sbi_send_ipi(unsigned long hart_mask)
-{
-    SBI_CALL_LEGACY(SBI_EXT_0_1_SEND_IPI, &hart_mask, 0, 0);
+    struct sbiret ret = sbi_ecall(SBI_EXT_IPI, SBI_EXT_IPI_SEND_IPI,
+                                  hart_mask, hart_mask_base, 0, 0, 0, 0);
+    return (int)ret.error;
 }
 
 static inline int sbi_remote_fence_i(unsigned long hart_mask)

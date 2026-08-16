@@ -5,6 +5,7 @@
 #include "proc.h"
 #include "stringops.h"
 #include "cpu.h"
+#include "sync.h"
 
 /**
  * @brief 内核页表根目录的物理页号。
@@ -13,6 +14,19 @@
  * [256, 511]，对应虚拟地址[0xFFFFFFC000000000 ~ 0xFFFFFFFFFFFFFFFF]，被内核高位映射使用。
  */
 ppn_t vmm_kernel_pgd_ppn;
+
+/**
+ * @brief 保护跨进程共享物理帧（COW）状态的全局锁
+ * @details 覆盖 pframe_t.reference 的读-判断-改这一整套操作，以及伴随的 PTE 改写——
+ *   fork（vmm_mm_copy 建立共享）、page fault（vmm_page_fault_handler 拆分共享）、
+ *   进程退出（vmm_unmap_vma 释放共享）三处都会摸同一批共享帧的 reference 计数，
+ *   在只有一个 hart 真正跑用户任务时天然串行、从不需要锁；hart1 也能调度真实任务后，
+ *   父子进程可能在两个 hart 上同时各自触发对同一批共享帧的 COW 操作，不加锁会导致
+ *   reference 计数丢更新，页框被提前释放却还有 PTE 指向它。
+ * @note 锁的顺序约定：本锁总是外层，内部调用 alloc_page()/dealloc() 时它们各自
+ *   持有的 PmmLock 是内层——只在这个方向嵌套，不会有加锁顺序反转的死锁风险。
+ */
+osslock_t vmm_lock;
 
 /**
  * @brief 获取给定虚拟地址在 SV39 三级页表中对应的三级页表项指针（vmm 模块内部使用）
@@ -201,6 +215,7 @@ void vmm_remove_identity_mapping(void)
  */
 void vmm_init(void)
 {
+    spinlock_init(&vmm_lock);
     init_kernel_offset_mapping();
 }
 
@@ -384,11 +399,17 @@ void vmm_unmap_vma(mm_t *mm, vma_t *vma)
         }
         ppn_t ppn = (*ptep) >> PTE_PPN_OFFSET;
         pframe_t *frame = convert_ppn2pframe(ppn);
+
+        /* 同一帧可能还被别的进程共享，其它 hart 上的 fork/page fault 可能正
+         * 同时改它的 reference，减计数+判断归零必须整体互斥。 */
+        spinlock_acquire(&vmm_lock);
         frame->reference--;
         if (frame->reference == 0)
         {
             dealloc(frame);
         }
+        spinlock_release(&vmm_lock);
+
         *ptep = 0;
         tlb_flush_va(va);
     }
@@ -467,6 +488,10 @@ void vmm_page_fault_handler(virAddr_t badva, int fault_type)
         pte_t *ptep = get_pte(mm->pgd_ppn, page_va, false, true);
         if (ptep && pte_is_valid(*ptep))
         {
+            /* reference 的读-判断-改必须整体互斥：另一个共享此帧的进程可能正在
+             * 别的 hart 上对同一个 pframe_t 做同样的事。 */
+            spinlock_acquire(&vmm_lock);
+
             ppn_t old_ppn = (*ptep) >> PTE_PPN_OFFSET;
             pframe_t *old_frame = convert_ppn2pframe(old_ppn);
 
@@ -494,6 +519,8 @@ void vmm_page_fault_handler(virAddr_t badva, int fault_type)
                 old_frame->reference--;
                 *ptep = pte_create(convert_pframe2ppn(new_frame), flags);
             }
+
+            spinlock_release(&vmm_lock);
             tlb_flush_va(page_va);
             return;
         }
@@ -560,6 +587,10 @@ int vmm_mm_copy(mm_t *dst, mm_t *src)
 
             ppn_t ppn = (*sp) >> PTE_PPN_OFFSET;
             pframe_t *frame = convert_ppn2pframe(ppn);
+
+            /* frame->reference 可能同时被这个帧的另一个共享者在别的 hart 上
+             * 改（page fault 拆分 / 进程退出释放），整段增计数+改 PTE 得互斥。 */
+            spinlock_acquire(&vmm_lock);
             frame->reference++;
 
             /* 双方共享同一帧，都改成只读：谁先写谁在 page fault 里触发拆分 */
@@ -571,9 +602,11 @@ int vmm_mm_copy(mm_t *dst, mm_t *src)
             if (!dp)
             {
                 frame->reference--;
+                spinlock_release(&vmm_lock);
                 return ENO1_NOMORE_MEM;
             }
             *dp = pte_create(ppn, ro_flags); /* 使用sp的ppn，实现共享 */
+            spinlock_release(&vmm_lock);
         }
     }
     dst->brk_start   = src->brk_start;

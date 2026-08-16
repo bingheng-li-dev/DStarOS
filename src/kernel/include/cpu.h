@@ -27,5 +27,6 @@ uint64_t cpu_get_core_id(void);
 void cpu_set_core_id(uint64_t core_id);
 cpu_t *cpu_get_current(void);
 cpu_t *cpu_get_by_index(uint16_t index);
+void cpu_send_ipi(uint64_t hart_id);
 
 #endif

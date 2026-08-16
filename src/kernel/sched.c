@@ -5,6 +5,7 @@
 #include "stringops.h"
 #include "dassert.h"
 #include "tick.h"
+#include "cpu.h"
 
 /* 按 proc_wake_tick 升序排列的定时睡眠链表，sched_sleep_ticks()/sched_check_timers() 共用 */
 static struct list_head sleeping_tasks;
@@ -117,6 +118,17 @@ static void fair_update_curr(pcb_t *curr)
 
 static void fair_enqueue(pcb_t *p)
 {
+    /* 入队钳制：新建任务 proc_vruntime 恒为 0，长期睡眠任务的 proc_vruntime 停在
+     * 睡前那一刻，而 min_vruntime 这段时间一直在单调前推——不钳制的话这类任务
+     * 会以一个远低于当前最低的 vruntime 插入红黑树最左侧，换入后长时间垄断 CPU
+     * （报复性调度）。钳到 min_vruntime 只会把"过低"的抬平，不影响本来就
+     * >= min_vruntime 的任务（比如 sched_schedule() 里仍 RUNNING 被重新入队的
+     * curr，它的 vruntime 刚被 fair_update_curr 结算过，本就不低）。 */
+    if (p->proc_vruntime < run_queue.cfs.min_vruntime)
+    {
+        p->proc_vruntime = run_queue.cfs.min_vruntime;
+    }
+
     /* 父节点里指向子的指针的地址&rb_right/&rb_left，如果 parent 是 NULL，则是&root->rb_node */
     struct rb_node **link = &run_queue.cfs.tasks.rb_node;
     /* 新节点的父节点，可以为 NULL（根节点） */
@@ -431,6 +443,14 @@ void sched_activate(pcb_t *p)
     check_preempt_curr(proc_get_current(), p);
 
     spinlock_release(&run_queue.lock);
+
+    /* 本来这里应该在这个 hart 正好是别的 wfi 空转的 hart 该去跑的任务时，
+     * 用 cpu_send_ipi() 主动踢醒它，不用等下一次 tick 中断才发现就绪队列
+     * 里多了东西。已实现（发送端 cpu_send_ipi() / sbi.h 的标准 IPI 扩展，
+     * 接收端 trap.c 的 IRQ_S_SOFT 清 sip.SSIP）但触发概率很高地引出一个
+     * 尚未定位的时序 bug（现象记录在 .claude/bugfixes.md），暂时不在这里
+     * 调用 cpu_send_ipi()——hart1 目前只靠 tick 中断周期性醒来轮询就绪
+     * 队列，最坏发现延迟一个 tick，功能上仍然正确。 */
 }
 
 void wakeup(pcb_t *proc)

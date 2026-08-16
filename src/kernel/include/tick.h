@@ -7,6 +7,16 @@
 
 extern osslock_t tick_lock;
 
+/* 直接读硬件 time CSR（约 0.1 微秒分辨率），区别于下面 tick_get_os_tick()/
+ * tick_get_current() 返回的软件 tick 计数（~0.2 秒一格，粒度粗得多）。 */
+static inline uint64_t tick_read_time(void)
+{
+    uint64_t x;
+    asm volatile("csrr %0, time"
+                 : "=r"(x));
+    return x;
+}
+
 void tick_init(void);
 void tick_int_handler(void);
 /* 系统TICK是唯一的，既系统暴露给延时函数等的TICK值是唯一的，即核0上的tick计数值。 */
