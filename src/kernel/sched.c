@@ -26,6 +26,7 @@ static void   idle_dequeue(pcb_t *p);
 static pcb_t *idle_pick_next(void);
 static void   idle_task_tick(pcb_t *curr);
 static void   idle_check_preempt(pcb_t *curr, pcb_t *p);
+static void   kick_idle_harts(void);
 
 /* 类链：rt -> fair(cfs) -> idle */
 const sched_class_t fair_sched_class = {
@@ -368,6 +369,7 @@ void sched_init(void)
 void sched_set_current(pcb_t *p)
 {
     cpu_get_current()->current_proc = p;
+    p->proc_on_cpu = true;
     p->proc_exec_start = sched_now();
     /* 换入快照：往后 fair_task_tick 用 proc_sum_exec_runtime - 这份快照
      * 算出"这次换上 CPU 以来跑了多久"，判断是否已跑满 SCHED_MIN_GRANULARITY */
@@ -393,22 +395,43 @@ void sched_schedule(void)
     next->need_resched = false;
     sched_set_current(next);
 
-    /* 在调用switch_to之前锁必须释放：
-     * switch_to之前的代码是上一个执行流，后面要等到某次调度把它换回来才会继续
-     * 下一个调度决策需要先acquire锁，却永远等不到，除非又调度那个执行流 */
+    /* 锁必须一直持有到 switch_to 真正把 curr 的上下文保存完，不能提前释放：
+     * curr 在上面已被 sched_enqueue() 放回共享就绪队列，但此刻它的 proc_context
+     * 里还是上一次换出时的旧值。若在 switch_to 之前放锁，另一个 hart 可以立即从
+     * 队列里挑走 curr，并按这份尚未写入的旧上下文把它"换上"——同一个任务会在两个
+     * hart 上用同一个内核栈并发执行，后果是随机的内存/状态损坏。
+     *
+     * 因此改由"被换上的执行流"在 switch_to 之后释放这把锁（与 irq_disable_nesting
+     * 的"接力"约定完全一致：谁被换上，谁负责补上前一条执行流欠下的那次释放）。
+     * switch_to 是纯汇编、内部不获取任何锁，临界区长度有界，不会死锁。 */
     if (next != curr)
     {
-        spinlock_unlock((spinlock_t *)&run_queue.lock);  /* 只放锁，中断仍关着 */
+        /* 记下"待放手"的任务：它的 proc_on_cpu 只能等 switch_to 把上下文真正写完
+         * 之后才允许清零，而那已经是被换上来的执行流在跑了，所以经 per-hart 的
+         * prev_proc 传递给它（见 sched_finish_switch） */
+        cpu_get_current()->prev_proc = curr;
         switch_to(&curr->proc_context, &next->proc_context);
-        /* curr 这条执行流将来被换回来时，从这里继续往下跑 */
-    }
-    else
-    {
-        spinlock_release(&run_queue.lock);  /* 没真正切换，正常放锁+恢复中断 */
-        return;
+        /* curr 这条执行流将来被换回来时从这里继续；此刻持有的是"把它换回来的那条
+         * 执行流"acquire 的锁，由下面这次 release 接力放掉 */
     }
 
-    irq_disable_nesting_decrement(); /* 这个语句是切换后的执行流执行的 */
+    sched_finish_switch();
+}
+
+void sched_finish_switch(void)
+{
+    /* 仍持有 run_queue.lock，且已经跑在换入后的 hart 上：此刻上一个任务的 switch_to
+     * 已经把它的 proc_context 完整写盘，可以安全地宣告"它不再占用任何 hart"，
+     * 别的 hart 从这一刻起才被允许把它挑走换上。清零必须在放锁之前完成，
+     * 才能和 sched_activate() 里的 proc_on_cpu 判断被同一把锁串行化。 */
+    cpu_t *cpu = cpu_get_current();
+    if (cpu->prev_proc != NULL)
+    {
+        cpu->prev_proc->proc_on_cpu = false;
+        cpu->prev_proc = NULL;
+    }
+
+    spinlock_release(&run_queue.lock);
 }
 
 void sched_enqueue(pcb_t *p)
@@ -437,20 +460,63 @@ void sched_activate(pcb_t *p)
 {
     spinlock_acquire(&run_queue.lock);
 
-    sched_enqueue(p);
-    /* p 是刚变为就绪的外部任务，
-     * 拿它和当前正在跑的任务比一次，看要不要立刻抢占 */
-    check_preempt_curr(proc_get_current(), p);
+    /* p 可能正在另一个 hart 上执行（典型场景：它刚把自己标成待睡眠、放掉了外层的
+     * 条件锁，但还没走到 sched_schedule 的 switch_to）。这种情况下绝不能入队——
+     * 它的 proc_context 还没保存，被别的 hart 挑走就会用陈旧上下文重复执行同一个
+     * 任务。唤醒也不会因此丢失：wakeup() 已经把它的状态改回 RUNNING，它自己走到
+     * sched_schedule 时会看到 RUNNING 而把自己重新入队。两条路径都在 run_queue.lock
+     * 下，被这把锁严格串行化，不存在中间态。 */
+    bool enqueued = false;
+    if (!p->proc_on_cpu)
+    {
+        sched_enqueue(p);
+        /* p 是刚变为就绪的外部任务，
+         * 拿它和当前正在跑的任务比一次，看要不要立刻抢占 */
+        check_preempt_curr(proc_get_current(), p);
+        enqueued = true;
+    }
 
     spinlock_release(&run_queue.lock);
 
-    /* 本来这里应该在这个 hart 正好是别的 wfi 空转的 hart 该去跑的任务时，
-     * 用 cpu_send_ipi() 主动踢醒它，不用等下一次 tick 中断才发现就绪队列
-     * 里多了东西。已实现（发送端 cpu_send_ipi() / sbi.h 的标准 IPI 扩展，
-     * 接收端 trap.c 的 IRQ_S_SOFT 清 sip.SSIP）但触发概率很高地引出一个
-     * 尚未定位的时序 bug（现象记录在 .claude/bugfixes.md），暂时不在这里
-     * 调用 cpu_send_ipi()——hart1 目前只靠 tick 中断周期性醒来轮询就绪
-     * 队列，最坏发现延迟一个 tick，功能上仍然正确。 */
+    if (enqueued)
+    {
+        kick_idle_harts();
+    }
+}
+
+/**
+ * @brief 就绪队列新增任务后，主动 IPI 踢醒正在 wfi 空转的其它 hart
+ * @details
+ *   不踢的话，空转的 hart 要等下一次 tick 中断（约 0.2 秒）才会回到 idle() 循环里
+ *   重新查看共享就绪队列，新任务的最坏发现延迟就是一个 tick。
+ *
+ *   刻意放在 run_queue.lock 之外调用：发 IPI 是一次 SBI ecall，不该把锁持有时间
+ *   拉长到一次 firmware 调用上。因此这里读 current_proc/idle_proc 是不加锁的，
+ *   但这纯属"建议性"通知，读到过期值不影响正确性——多发一次，对方醒来发现没活干
+ *   会重新 wfi 睡回去；漏发一次，对方最迟下一个 tick 也会自己发现。rv64 上对齐的
+ *   8 字节指针读写是原子的，不会读到撕裂值。
+ *
+ * @note 不存在"刚判断完 idle、IPI 却在对方执行 wfi 之前送达"的丢失窗口：RISC-V 的
+ *   wfi 只要有中断处于 pending 状态就会立刻返回（不要求 sstatus.SIE 打开），
+ *   先到的 IPI 会把 sip.SSIP 置上，对方的 wfi 因此不会睡下去。
+ */
+static void kick_idle_harts(void)
+{
+    uint64_t self = cpu_get_core_id();
+
+    for (uint64_t i = 0; i < CORE_NUMBER; i++)
+    {
+        if (i == self)
+        {
+            continue;
+        }
+
+        cpu_t *cpu = cpu_get_by_index((uint16_t)i);
+        if (cpu->current_proc != NULL && cpu->current_proc == cpu->idle_proc)
+        {
+            cpu_send_ipi(i);
+        }
+    }
 }
 
 void wakeup(pcb_t *proc)

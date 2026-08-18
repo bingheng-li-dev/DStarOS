@@ -96,6 +96,9 @@ void sched_init(void);
 void sched_set_current(pcb_t *p);
 /* 核心调度：结算当前任务 vruntime、选出最左任务并 switch_to 过去 */
 void sched_schedule(void);
+/* 被 switch_to 换上之后必须调用一次：释放前一条执行流持有的 run_queue.lock
+ * （"接力"约定，见 sched_schedule 内注释）。新建执行流的入口 fork_out() 同样要调。 */
+void sched_finish_switch(void);
 /* 入就绪队列（fork / wakeup 路径） */
 void sched_enqueue(pcb_t *p);
 /* 出就绪队列 */

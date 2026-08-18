@@ -16,6 +16,7 @@ struct os_cpu
 {
     pcb_t *current_proc;
     pcb_t *idle_proc;        /* 本 hart 自己的 idle 任务 */
+    pcb_t *prev_proc;        /* 刚被 switch_to 换下的任务，由换上来的执行流负责清它的 proc_on_cpu */
     ctx_t *ctx;
     int irq_disable_nesting; /* 中断请求屏蔽嵌套数量。 */
     bool intr_disable_state; /* 当前中断屏蔽开启/关闭状态(true/false)。eg:如果中断处于关闭状态时"intr_disable_state"为true。 */

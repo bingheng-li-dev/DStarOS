@@ -103,9 +103,9 @@ void trap_handler(intstkf_t *sp)
         switch (cause)
         {
         case IRQ_S_SOFT:
-            /* 核间中断（cpu_send_ipi）目前没人调用（见 sched_activate()），
-             * 但接收侧照样保留：中断本身只用来把 wfi 中的 hart 踢醒，回到
-             * idle() 循环重新检查就绪队列，不需要在这里做任何调度决策；
+            /* 核间中断：由 sched_activate() 在新任务入队后经 cpu_send_ipi() 发出，
+             * 只用来把 wfi 中的 hart 踢醒，让它回到 idle() 循环重新检查就绪队列，
+             * 不需要在这里做任何调度决策；
              * 必须清本地 sip.SSIP，否则中断条件一直成立会立刻重新触发。 */
             clear_csr(sip, MIP_SSIP);
             break;

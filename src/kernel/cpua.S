@@ -103,7 +103,15 @@ trap_return:
     ld ra, 1*REGBYTES(sp)
 
     ld gp, 3*REGBYTES(sp)
-    ld tp, 4*REGBYTES(sp)
+    # 故意不恢复 tp：tp 存的是"当前在哪个 hart 上跑"（cpu_get_core_id_asm 直接读 tp，
+    # cpu_get_current() = &cpus[tp]），它描述的是物理执行位置，不是任务的私有状态。
+    # 帧里那份 tp 可能是陈旧的：① do_fork 把父进程的帧整体复制给子进程，帧里带的是
+    # 父进程当时所在的 hart 号，子进程很可能被另一个 hart 取走执行；② 任务在系统调用
+    # 中途被换出、由另一个 hart 换回来时，帧里仍是换出前那个 hart 号。恢复它会让代码
+    # 在 hart A 上运行却去读写 hart B 的 per-CPU 状态（irq_disable_nesting 计数错乱、
+    # proc_get_current() 拿到另一个 hart 的当前任务）。
+    # tp 仅在启动时被set一次，其描述的是"这是哪个物理核"，因此 switch_to 不保存/恢复 tp
+    # ld tp, 4*REGBYTES(sp)
     ld t0, 5*REGBYTES(sp)
     ld t1, 6*REGBYTES(sp)
     ld t2, 7*REGBYTES(sp)

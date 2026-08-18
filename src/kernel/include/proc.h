@@ -92,6 +92,11 @@ struct proc_control_block
      * 挂到红黑树两处而损坏树结构——do_exit 里 wakeup(父进程) 时父进程往往并未睡眠，
      * 这条路径一定会触发。反向地，rb_erase 一个不在树中的节点是未定义行为。 */
     bool proc_on_rq;
+    /* true 表示本任务正占用某个 hart 执行（或正在 switch_to 保存上下文的途中），
+     * 此时它的 proc_context 尚未写完，绝不能被另一个 hart 挑走换上。
+     * 由 sched_set_current() 置位、sched_finish_switch() 在 switch_to 完成后清零，
+     * 全程在 run_queue.lock 保护下读写。 */
+    volatile bool proc_on_cpu;
 
     /* ==================== CFS调度相关 ==================== */
     int proc_nice;               /* nice 值 [-20, 19]，默认 0 */

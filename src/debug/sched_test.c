@@ -16,6 +16,7 @@
 #include "sched.h"
 #include "cpu.h"
 #include "tick.h"
+#include "atomic.h"
 
 /* ============================================================
  * 共享断言计数器（sync_test.c / rt_sched_test.c 也用，故非 static）
@@ -143,27 +144,51 @@ static void sched_lifecycle_test(void)
 }
 
 /* ============================================================
- * CFS 公平性测试：两个 worker 抢一个共享预算，低 nice（高权重）应拿到更多
+ * CFS 公平性测试：一组 worker 抢一个共享预算，低 nice（高权重）应拿到更多
+ *
+ * SMP 说明：worker 数必须**多于 hart 数**，否则每个 worker 各占一个 hart、
+ * 根本不存在 CPU 竞争，nice 权重也就无从体现（2 个 worker + 2 个 hart 时
+ * 双方都能跑满，测不出任何公平性）。另外所有 worker 必须**全部创建完毕后
+ * 才允许开跑**：hart1 会在 sched_activate 的 IPI 之后立刻把先建好的 worker
+ * 调度起来，不设门槛的话它会在后面的 worker 还没被 fork 出来之前就把预算吃光。
  * ============================================================ */
+#define CFS_WORKERS (2 * CORE_NUMBER) /* 保证可运行任务数 > hart 数，制造真实竞争 */
+
 static volatile int cfs_budget;
-static volatile int cfs_count[2];
-static const int cfs_nice[2] = {-10, +10}; /* 权重 9548 vs 110，约 87 倍 */
+static volatile int cfs_count[CFS_WORKERS];
+static volatile int cfs_start; /* 0 = 所有 worker 就位前不许动预算 */
+
+/* 前一半 nice-10（权重 9548），后一半 nice+10（权重 110），相差约 87 倍 */
+static int cfs_nice_of(int idx)
+{
+    return (idx < CFS_WORKERS / 2) ? -10 : +10;
+}
 
 static void *cfs_fair_worker(void *arg)
 {
     int idx = (int)(intptr_t)arg;
+
+    /* 等所有 worker 都被 fork 出来再开跑，避免先建好的把预算独吞。
+     * 在设 nice 之前等，让各 worker 空转阶段的权重一致，不污染公平性测量 */
+    while (!cfs_start)
+    {
+        sched_schedule();
+    }
+
     /* 对自己设 nice：running 任务不在队列里，on_rq=false，只改字段，安全 */
-    sched_set_nice(proc_get_current(), cfs_nice[idx]);
+    sched_set_nice(proc_get_current(), cfs_nice_of(idx));
 
     while (1)
     {
-        if (cfs_budget <= 0)
+        /* 预算是跨 hart 共享的，必须原子领取：两个 hart 真并行时，
+         * 非原子的"读—减—写"会丢更新，预算总数对不上 */
+        if (atomic_add(&cfs_budget, -1) <= 0)
         {
+            atomic_add(&cfs_budget, 1); /* 领超了，还回去 */
             break;
         }
-        cfs_budget -= 1;
-        cfs_count[idx] += 1;
-        sched_schedule(); /* 主动让出，仍 RUNNING → 被重新入队 */
+        cfs_count[idx] += 1; /* 每个 worker 只写自己那格，无竞争 */
+        sched_schedule();    /* 主动让出，仍 RUNNING → 被重新入队 */
     }
     return NULL;
 }
@@ -173,17 +198,43 @@ static void sched_cfs_fairness_test(void)
     printf("\n-- CFS fairness: nice weighting --\n");
 
     cfs_budget = 400;
-    cfs_count[0] = 0;
-    cfs_count[1] = 0;
+    cfs_start = 0;
+    for (int i = 0; i < CFS_WORKERS; i++)
+    {
+        cfs_count[i] = 0;
+    }
 
-    create_kernel_thread_by_fork(cfs_fair_worker, (void *)(intptr_t)0, 0);
-    create_kernel_thread_by_fork(cfs_fair_worker, (void *)(intptr_t)1, 0);
+    for (int i = 0; i < CFS_WORKERS; i++)
+    {
+        create_kernel_thread_by_fork(cfs_fair_worker, (void *)(intptr_t)i, 0);
+    }
+    cfs_start = 1; /* 全部就位，放行 */
     sched_test_reap_all();
 
-    printf("  nice-10 count=%d   nice+10 count=%d\n", cfs_count[0], cfs_count[1]);
-    sched_test_check("both CFS workers ran", cfs_count[0] > 0 && cfs_count[1] > 0);
-    sched_test_check("budget fully consumed", cfs_count[0] + cfs_count[1] == 400);
-    sched_test_check("lower nice got more CPU", cfs_count[0] > cfs_count[1]);
+    int low_nice = 0;  /* nice-10 一组（高权重）合计 */
+    int high_nice = 0; /* nice+10 一组（低权重）合计 */
+    int all_ran = 1;
+    for (int i = 0; i < CFS_WORKERS; i++)
+    {
+        if (cfs_count[i] <= 0)
+        {
+            all_ran = 0;
+        }
+        if (cfs_nice_of(i) < 0)
+        {
+            low_nice += cfs_count[i];
+        }
+        else
+        {
+            high_nice += cfs_count[i];
+        }
+    }
+
+    printf("  workers=%d  nice-10 total=%d   nice+10 total=%d\n",
+           CFS_WORKERS, low_nice, high_nice);
+    sched_test_check("all CFS workers ran", all_ran);
+    sched_test_check("budget fully consumed", low_nice + high_nice == 400);
+    sched_test_check("lower nice got more CPU", low_nice > high_nice);
 }
 
 /* ============================================================

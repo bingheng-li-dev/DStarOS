@@ -13,6 +13,10 @@
 #include "sync.h"
 #include "cpu.h"
 
+/* SMP 下等待另一个 hart 上的 worker 到达某个阶段时，主动让出的最大次数上限；
+ * 取够大以免误判，又不至于在真出问题时把测试挂死 */
+#define SYNC_YIELD_SPINS 10000
+
 extern void sched_test_check(const char *name, int cond);
 extern int sched_test_reap_all(void);
 
@@ -40,9 +44,16 @@ void sync_sem_wakeup_test(void)
     consumer_stage = 0;
     create_kernel_thread_by_fork(sem_consumer, NULL, 0);
 
-    /* 让出一次：consumer 被调度上台，置 stage=1，随后 sem_down 阻塞睡眠，
-     * 调度回到 init（init 让出时仍 RUNNING 被重新入队，故会被选回）。 */
-    sched_schedule();
+    /* 让出 CPU 等 consumer 上台置 stage=1、随后在 sem_down 上阻塞睡眠。
+     * SMP 下"让出一次"并不保证对方已经跑过：两个 hart 各自取任务，init 让出后
+     * 完全可能立刻又被本 hart 选回来，而 consumer 还在另一个 hart 上排队。
+     * 因此改成有次数上限地反复让出，直到看见 stage=1；consumer 在 init sem_up 之前
+     * 绝无可能越过 sem_down，所以 stage 只会是 0 或 1，等到 1 即达成前置条件。
+     * 若它始终没跑到，循环耗尽后断言照样失败，不会掩盖真 bug。 */
+    for (int spin = 0; spin < SYNC_YIELD_SPINS && consumer_stage == 0; spin++)
+    {
+        sched_schedule();
+    }
     sched_test_check("consumer reached sem_down and blocked", consumer_stage == 1);
 
     /* 唤醒 consumer：count→1 且等待队列非空 → wakeup(consumer) */

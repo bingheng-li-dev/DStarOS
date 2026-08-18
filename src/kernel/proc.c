@@ -194,6 +194,19 @@ int16_t do_wait(int16_t pid, int *status)
             {
                 cur->proc_state = RUNNING;
 
+                /* 子进程在 do_exit 里的顺序是"先置 ZOMBIE + wakeup(父进程)，再
+                 * sched_schedule()"，所以父进程被唤醒时，子进程很可能还站在自己的
+                 * 内核栈上往 switch_to 走（接上 IPI 之后父进程会被立刻唤醒到另一个
+                 * hart 上）。必须等它真正把上下文保存完、
+                 * 彻底离开 CPU，才能回收它的内核栈和 PCB——否则就是在它脚下把正在
+                 * 使用的栈释放掉，典型表现是内核线程（proc_mm 为 NULL）在随机地址
+                 * 上页错误。proc_on_cpu 由 sched_finish_switch() 在 switch_to 完成后
+                 * 清零，单核下父进程能跑起来就说明子进程早已让出，循环不会真的转。 */
+                while (child->proc_on_cpu)
+                {
+                    sched_schedule();
+                }
+
                 int16_t cpid = child->proc_pid;
                 if (status)
                 {
@@ -414,6 +427,7 @@ static pcb_t *alloc_new_proc(void)
         pcb->proc_sched_class = &fair_sched_class;
         pcb->proc_policy = SCHED_NORMAL;
         pcb->proc_on_rq = false;
+        pcb->proc_on_cpu = false;
         pcb->proc_nice = 0;
         pcb->proc_weight = SCHED_NICE_0_WEIGHT;
         pcb->proc_vruntime = 0;
@@ -621,10 +635,9 @@ void idle(void)
          * idle_proc，开销很小。 */
         sched_schedule();
 
-        /* 挑完还是自己的 idle_proc，说明真的没活干，wfi 休眠到下一次 tick 中断
-         * 再回来重试，不用忙等空转。（原计划还有 cpu_send_ipi 主动踢醒，已知
-         * 有一个偶发的时序 bug 暂时关闭，见 .claude/bugfixes.md，这里的 wfi
-         * 目前只靠 tick 兜底唤醒，最坏延迟一个 tick。） */
+        /* 挑完还是自己的 idle_proc，说明真的没活干，wfi 休眠。唤醒有两条路径：
+         * 别的 hart 往就绪队列放任务时经 sched_activate() 主动发来的 IPI（即时），
+         * 以及 tick 中断（最坏一个 tick）兜底。 */
         if (proc_get_current() == cpu_get_current()->idle_proc)
         {
             asm volatile("wfi");
@@ -828,14 +841,12 @@ static void fork_out(void)
     /* current_proc 已由 sched_schedule() 在调 switch_to() 之前经 sched_set_current()设好 */
 
     /* 本执行流第一次被 switch_to() 换上：调用方 sched_schedule() 在 switch_to()
-     * 之前 spinlock_acquire(&run_queue.lock) 时把 irq_disable_nesting 加了 1，
-     * 按"接力"约定应由被换上的执行流自己补上这次 decrement（sched_schedule()
-     * 里 next==curr 之外的路径靠"resume 后紧跟 decrement"配对，这里是同一约定
-     * 在"从未被调度过的新执行流"这一分支上的对应写法）。漏掉这一句不会让当次
-     * 调度立刻出错——sret 恢复 sstatus.SPIE 仍会正确重新打开硬件中断——但会
-     * 让 irq_disable_nesting 永久多计 1，后续任何一次 spinlock_acquire/release
-     * 都无法再让计数归零，等效于此后中断永久关闭。 */
-    irq_disable_nesting_decrement();
+     * 之前 spinlock_acquire(&run_queue.lock) 拿了锁、并把 irq_disable_nesting 加了 1，
+     * 按"接力"约定应由被换上的执行流自己补上这次"放锁 + decrement"（sched_schedule()
+     * 里 switch_to 之后的 sched_finish_switch() 配对，这里是同一约定在"从未被调度过的
+     * 新执行流"这一分支上的对应写法）。漏掉会让 run_queue.lock 永远不被释放（整个调度
+     * 器死锁），也会让 irq_disable_nesting 永久多计 1，等效于此后中断永久关闭。 */
+    sched_finish_switch();
 
     fork_out_asm(proc_get_current()->proc_int_stack);
 }

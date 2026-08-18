@@ -74,11 +74,18 @@ void sem_down(ossem_t *sem)
          * 因为上一轮被 sem_up 唤醒时已经把本节点摘掉了 */
         list_add_tail(&(tsk->proc_wait_linker), &(sem->wait_list));
 
+        /* 必须在放掉 sem->lock 之前就把状态置成不可运行（"prepare to wait"，与
+         * do_wait() 用的是同一套路，也是 sched.h 里 sleep() 注释要求调用者遵守的约定）：
+         * 否则"放锁"到"sleep() 内部赋值状态"之间有一个窗口，另一个 hart 的 sem_up 可以
+         * 在这里把本任务 wakeup() 成 RUNNING 并入队，紧接着 sleep() 又把状态覆写回
+         * UNINTERRUPTIBLE——这次唤醒就彻底丢了，任务再也不会有人唤醒它（死等）。
+         * 先置状态则相反：wakeup 会把它改回 RUNNING，下面 sched_schedule() 看到
+         * curr 仍是 RUNNING 就会把它重新入队并继续跑，不会睡死。 */
+        tsk->proc_state = UNINTERRUPTIBLE;
         spinlock_release(&(sem->lock));
-        /* sleep 内部会调度其他 proc；被 sem_up 唤醒后从这里继续，回到循环开头
-         * 重新检查条件——可能被虚假唤醒或被别的任务抢先拿走了信号量，
-         * 所以不能想当然直接成功 */
-        sleep(tsk, UNINTERRUPTIBLE);
+        /* 被 sem_up 唤醒后从这里继续，回到循环开头重新检查条件——可能被虚假唤醒
+         * 或被别的任务抢先拿走了信号量，所以不能想当然直接成功 */
+        sched_schedule();
         spinlock_acquire(&(sem->lock));
     }
 
