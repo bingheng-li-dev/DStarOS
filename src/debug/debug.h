@@ -45,6 +45,13 @@
  * 等文件，入口 run_sched_tests()。 */
 #define DEBUG_SCHED_TEST 0
 
+/* VFS/FatFS 回归测试：置 1 时在 main() 里跑 vfs_test()（src/debug/vfs_fatfs_test.c），
+ * 覆盖 open/read/write/stat/mkdir/truncate/rename/unlink/rmdir 以及目录读取通路
+ * （getdents64 后端：'.'/'..' 合成、d_reclen 对齐、pending 暂存、LFN 长文件名）。
+ * 只在 hart0 上跑一次——两个 hart 同时跑会并发操作同一批测试文件互相干扰。
+ * 必须在 proc_init() 之后调用：vfs_lock() 内部的 sem_down() 需要一个有效的当前 pcb。 */
+#define DEBUG_VFS_TEST 0
+
 /* U 态 fork/wait4 syscall 验证：置 1 时 init 额外 fork 一个 user/fork_wait.c 编译出的
  * 用户程序（clone 出子进程、子进程 exit(42)、父进程 wait4 收状态），验证 Phase 2B Step 6
  * 的 sys_clone/sys_wait4 syscall 接线。串口应看到 "child: hi" 和
@@ -56,6 +63,14 @@
  * execve("/hello")、父进程 wait4 收割。串口应看到 "exectest: hello via dup fd"（dup 生效）、
  * "hi"（子进程 exec 成 hello）、"exectest: child reaped, done"。置 1 时不跑默认用户程序。 */
 #define DEBUG_EXEC_TEST 1
+
+/* Phase 3 POSIX 文件 syscall 验证：置 1 时 init 先把嵌入的 hello ELF 写进 ramdisk 的
+ * "/hello"（getdents64 的目录列表里要能看到它），再 fork 一个 user/filetest.c 编译出的
+ * 用户程序，端到端触发 openat/lseek/readv/writev/fstat/newfstatat/getdents64/mkdirat/
+ * unlinkat/renameat/chdir/getcwd/ftruncate/fcntl，并在两个子进程里并发跑文件操作压 VFS 大锁。
+ * 这批 syscall 只能由真正的 U 态程序验证——它们都要求真实用户地址空间指针。
+ * 串口应看到 "=== filetest done: N pass  0 fail ==="。置 1 时不跑 exectest/默认用户程序。 */
+#define DEBUG_FILE_TEST 0
 
 #define DEBUG_TRACK_LINE() printf("DEBUG_TRACK_LINE: %s:%d\n", __FILE__, __LINE__)
 

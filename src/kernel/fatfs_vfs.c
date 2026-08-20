@@ -22,6 +22,7 @@
 #include "errorcode.h"
 #include "stringops.h"
 #include "console.h"
+#include "linux_abi.h"
 
 /* ============================================================
  * 私有数据结构
@@ -37,6 +38,36 @@ typedef struct
     char path[VFS_PATH_MAX];  /* VFS 绝对路径，如 "/dir/file.txt" */
 } fatfs_inode_priv_t;
 
+/* 合成阶段机的取值：FatFS 的 f_readdir 会跳过 FAT 目录里真实存在的 "." / ".." 项
+ * （ff.c 的 dir_read 在 _FS_RPATH=0 时过滤掉所有以 '.' 开头的条目），而
+ * BusyBox 的 ls -a / rm -r / find 都期待它们出现，只能由适配层自己补上。 */
+#define FATFS_DIR_SYNTH_DOT    0  /* 待吐 "." */
+#define FATFS_DIR_SYNTH_DOTDOT 1  /* 待吐 ".." */
+#define FATFS_DIR_SYNTH_DONE   2  /* 两条都吐完了，进入 f_readdir 循环 */
+
+/**
+ * fatfs_dir_priv_t - 打开的**目录** file 的私有数据（挂在 file->f_private）
+ *
+ * 注意与普通文件的区别：普通文件的 f_private 是 `FIL*`，目录是这个结构体。
+ * 两者靠 `S_ISDIR(file->f_inode->i_mode)` 区分——vfs_open 在调用 f_op->open 之前
+ * 就已经填好了 file->f_inode，所以各回调里都能安全地据此判断，不会类型混淆。
+ */
+typedef struct
+{
+    DIR      dir;                        /* FatFS 目录对象 */
+    int      synth;                      /* 合成阶段，见 FATFS_DIR_SYNTH_* */
+    uint64_t next_off;                   /* 已返回条目数，用作 d_off 游标与 d_ino 的来源 */
+    /* 从 f_readdir 读出来、却发现调用方缓冲区放不下的那一条：它已经被 FatFS 的
+     * 游标消费掉了，不暂存下来就会永久丢失，所以必须缓存到下次调用先吐出去。
+     * 这里存"解析后的名字"而不是整个 FILINFO——FILINFO.lfname 是指向 lfn_buf 的
+     * 指针，整体拷贝只会拷到指针本身，而 lfn_buf 下一次 f_readdir 就被覆写了。 */
+    bool     has_pending;
+    bool     pending_is_dir;
+    char     pending_name[_MAX_LFN + 1];
+    /* 每次 f_readdir 取长文件名用的工作缓冲（FILINFO.lfname 指向这里）*/
+    char     lfn_buf[_MAX_LFN + 1];
+} fatfs_dir_priv_t;
+
 /* 全局 FATFS 对象（f_mount 要求持久存在直至卸载）*/
 static FATFS fatfs_obj;  // @todo 全局变量命名风格统一
 
@@ -47,6 +78,55 @@ static file_operations_t        fatfs_file_ops;
 
 /* diskio.c 中导出的扇区总数查询函数 */
 extern unsigned int ramdisk_get_sector_count(void);
+
+/* ============================================================
+ * FatFS 内存分配钩子（_USE_LFN=3 需要，见 ffconf.h）
+ * ============================================================ */
+
+void *ff_memalloc(UINT msize)
+{
+    return kmalloc(msize);
+}
+
+void ff_memfree(void *mblock)
+{
+    kfree(mblock);
+}
+
+/**
+ * @brief Unicode 转大写（_USE_LFN 需要，比较/生成短文件名时用）
+ * @note 只处理 ASCII a-z——项目不含完整 Unicode 大小写表，且本内核的目标文件名
+ *   （BusyBox 等）全部是 ASCII，其余字符原样返回足够正确。
+ */
+WCHAR ff_wtoupper(WCHAR chr)
+{
+    if (chr >= 'a' && chr <= 'z')
+    {
+        return (WCHAR)(chr - 0x20);
+    }
+    return chr;
+}
+
+/**
+ * @brief OEM 码页 ↔ Unicode 双向转换（_USE_LFN 需要）
+ * @param[in] chr 待转换字符
+ * @param[in] dir 0 = Unicode→OEM，1 = OEM→Unicode
+ * @return 转换结果；0 表示无法转换（FatFS 约定，调用方会拒绝该名字或退化显示为 '?'）
+ * @note 项目未附带 `_CODE_PAGE 437` 的官方转换表（ChaN 发行版的 option/cc437.c 不在本仓库），
+ *   且本内核的目标文件名全部是 ASCII——单字节码页里 ASCII 范围（<0x80）在 OEM 与 Unicode
+ *   下逐字节相同，直接原样返回即可正确处理所有实际会用到的文件名；0x80 以上的扩展字符
+ *   （如 437 的制表符、重音字母）没有表可查，一律按"无法转换"处理。**已知限制**：
+ *   非 ASCII 文件名会被拒绝创建/显示为 '?'，本项目场景下可接受。
+ */
+WCHAR ff_convert(WCHAR chr, UINT dir)
+{
+    (void)dir;
+    if (chr < 0x80)
+    {
+        return chr;
+    }
+    return 0;
+}
 
 /* ============================================================
  * 路径转换辅助函数
@@ -341,8 +421,12 @@ static dentry_t *fatfs_lookup_cb(inode_t *dir, const char *name)
     fatfs_make_child_path(dir_priv->path, name, child_vfs, VFS_PATH_MAX);
     vfs_to_fatfs_path(child_vfs, child_fatfs, sizeof(child_fatfs));
 
-    /* 查询文件/目录是否存在 */
+    /* 查询文件/目录是否存在。_USE_LFN 开启后 FILINFO 多出 lfname/lfsize 两个字段，
+     * f_stat 内部按 "if (fno->lfname)" 判断是否要取长文件名——这里用不到长名
+     * （name 已经是调用方给定的分量），显式清零使 lfname=NULL 关闭该分支，
+     * 避免栈上未初始化的 lfname 被当成有效指针写入越界。 */
     FILINFO finfo;
+    memset(&finfo, 0, sizeof(finfo));
     FRESULT fr = f_stat(child_fatfs, &finfo);
     if (fr != FR_OK)
     {
@@ -364,9 +448,12 @@ static dentry_t *fatfs_lookup_cb(inode_t *dir, const char *name)
     }
 
     inode->i_size = (uint64_t)finfo.fsize;
-    /* AM_DIR判断是文件还是目录，S_IFDIR表示目录，设置755，S_IFREG表示文件，设置644 */
+    /* FAT 没有权限概念，统一给可执行位——ash 执行程序前拿 st_mode & 0111 判断能不能
+     * 执行，普通文件不给可执行位的话 /bin/busybox 这类可执行文件会被拒绝运行。
+     * AM_RDO（FAT 只读属性）映射成去掉写位的 0555，其余情况统一 0755。 */
+    mode_t perm = (finfo.fattrib & AM_RDO) ? 0555 : 0755;
     inode->i_mode = (finfo.fattrib & AM_DIR)
-                    ? (S_IFDIR | 0755) : (S_IFREG | 0644);
+                    ? (S_IFDIR | perm) : (S_IFREG | perm);
 
     /* 创建 dentry，挂入父目录（dir->i_dentry 是父 dentry）*/
     dentry_t *d = dentry_create(name, inode, dir->i_dentry, NULL);
@@ -384,7 +471,7 @@ static dentry_t *fatfs_lookup_cb(inode_t *dir, const char *name)
  * @brief 创建普通文件
  * @param[in] dir    父目录 inode
  * @param[in] dentry 预分配的负目录项（d_inode 为 NULL）
- * @param[in] mode   文件权限位（未使用，固定为 S_IFREG|0644）
+ * @param[in] mode   文件权限位（未使用，固定为 S_IFREG|0755，见函数体注释）
  * @retval ENO0_NO_ERROR 成功，dentry->d_inode 已填写
  * @note 调用 f_open(FA_CREATE_NEW) 在磁盘上建立文件。
  */
@@ -421,7 +508,10 @@ static int fatfs_create_cb(inode_t *dir, dentry_t *dentry, mode_t mode)
         memcpy(priv->path, child_vfs, clen + 1);
     }
 
-    inode->i_mode   = S_IFREG | 0644;
+    /* 统一给可执行位——见 fatfs_lookup_cb 里同样改动的注释（ash 靠 st_mode & 0111
+     * 判断能否执行，普通文件不给可执行位会导致 /bin/busybox 这类程序被拒绝运行）。
+     * 刚创建的文件不可能带 FAT 只读属性，不用像 lookup_cb 那样查 AM_RDO。 */
+    inode->i_mode   = S_IFREG | 0755;
     inode->i_size   = 0;
     inode->i_dentry = dentry;
     dentry->d_inode = inode;  /* 填写之前为 NULL 的负目录项 */
@@ -606,12 +696,15 @@ static inode_operations_t fatfs_inode_ops = {
  * ============================================================ */
 
 /**
- * @brief 打开文件
- * @param[in]     inode 文件 inode
- * @param[in,out] file  文件对象（f_private 将存入 FIL*）
+ * @brief 打开文件或目录
+ * @param[in]     inode 文件/目录 inode
+ * @param[in,out] file  文件对象（f_private 将存入 FIL* 或 fatfs_dir_priv_t*）
  * @param[in]     mode  打开模式（O_RDONLY/O_WRONLY/O_RDWR/O_CREAT 等）
  * @retval ENO0_NO_ERROR 成功
- * @note 将 VFS O_* 标志映射为 FatFS FA_* 标志，分配并存储 FIL*。
+ * @note 普通文件走 f_open，把 VFS O_* 映射成 FatFS FA_*，f_private 存 FIL*；
+ *   目录走 f_opendir，f_private 存 fatfs_dir_priv_t*（供 getdents64 遍历）。
+ *   两条分支的 f_private 类型不同，后续所有回调都靠 S_ISDIR(f_inode->i_mode) 分流。
+ *   目录的写打开已由 vfs_open 提前挡掉，这里到达时必然是只读的。
  */
 static int fatfs_open_cb(inode_t *inode, file_t *file, int mode)
 {
@@ -619,6 +712,29 @@ static int fatfs_open_cb(inode_t *inode, file_t *file, int mode)
 
     char fatfs_path[VFS_PATH_MAX + 4];
     vfs_to_fatfs_path(priv->path, fatfs_path, sizeof(fatfs_path));
+
+    if (S_ISDIR(inode->i_mode))
+    {
+        fatfs_dir_priv_t *dpriv = (fatfs_dir_priv_t *)kmalloc(sizeof(fatfs_dir_priv_t));
+        if (!dpriv)
+        {
+            return ENO1_NOMORE_MEM;
+        }
+        memset(dpriv, 0, sizeof(*dpriv));
+
+        FRESULT fr = f_opendir(&dpriv->dir, fatfs_path);
+        if (fr != FR_OK)
+        {
+            kfree(dpriv);
+            return fresult_to_vfs(fr);
+        }
+
+        dpriv->synth    = FATFS_DIR_SYNTH_DOT;
+        dpriv->next_off = 0;
+        file->f_private = dpriv;
+        file->f_op      = &fatfs_file_ops;
+        return ENO0_NO_ERROR;
+    }
 
     /* 将 VFS O_* 访问模式映射为 FatFS FA_* 标志 */
     BYTE fa = 0;
@@ -672,14 +788,23 @@ static int fatfs_open_cb(inode_t *inode, file_t *file, int mode)
 }
 
 /**
- * @brief 关闭文件
- * @param[in] file 文件对象（f_private 中的 FIL* 将被关闭并释放）
+ * @brief 关闭文件或目录
+ * @param[in] file 文件对象（f_private 中的 FIL* / fatfs_dir_priv_t* 将被关闭并释放）
  * @retval ENO0_NO_ERROR 成功
  */
 static int fatfs_close_cb(file_t *file)
 {
     if (!file->f_private)
     {
+        return ENO0_NO_ERROR;
+    }
+
+    if (file->f_inode && S_ISDIR(file->f_inode->i_mode))
+    {
+        fatfs_dir_priv_t *dpriv = (fatfs_dir_priv_t *)file->f_private;
+        f_closedir(&dpriv->dir);
+        kfree(dpriv);
+        file->f_private = NULL;
         return ENO0_NO_ERROR;
     }
 
@@ -699,6 +824,13 @@ static int fatfs_close_cb(file_t *file)
  */
 static ssize_t fatfs_read_cb(file_t *file, void *buf, size_t len)
 {
+    /* 目录的 f_private 是 fatfs_dir_priv_t* 而不是 FIL*，误当 FIL* 用会写坏内存。
+     * 目录必须走 getdents64（readdir 回调），read() 一律拒绝，与 Linux 语义一致。 */
+    if (file->f_inode && S_ISDIR(file->f_inode->i_mode))
+    {
+        return (ssize_t)ENO10_IS_DIR;
+    }
+
     FIL *fil = (FIL *)file->f_private;
     if (!fil)
     {
@@ -728,6 +860,12 @@ static ssize_t fatfs_read_cb(file_t *file, void *buf, size_t len)
  */
 static ssize_t fatfs_write_cb(file_t *file, const void *buf, size_t len)
 {
+    /* 同 fatfs_read_cb：目录的 f_private 类型不同，且写目录本就非法 */
+    if (file->f_inode && S_ISDIR(file->f_inode->i_mode))
+    {
+        return (ssize_t)ENO10_IS_DIR;
+    }
+
     FIL *fil = (FIL *)file->f_private;
     if (!fil)
     {
@@ -762,6 +900,33 @@ static ssize_t fatfs_write_cb(file_t *file, const void *buf, size_t len)
  */
 static off_t fatfs_lseek_cb(file_t *file, off_t offset, int whence)
 {
+    /* 目录：只支持 lseek(fd, 0, SEEK_SET) —— 等价于 rewinddir，把 FatFS 游标、
+     * "."/".." 合成阶段机、pending 暂存三者一起复位。其余组合在目录上没有
+     * 有意义的语义（记录是变长的，任意 offset 无法定位到记录边界），返回 EINVAL。 */
+    if (file->f_inode && S_ISDIR(file->f_inode->i_mode))
+    {
+        fatfs_dir_priv_t *dpriv = (fatfs_dir_priv_t *)file->f_private;
+        if (!dpriv)
+        {
+            return (off_t)ENO8_NULL_POINTER;
+        }
+        if (whence != SEEK_SET || offset != 0)
+        {
+            return (off_t)ENO6_INVAL_PARAM;
+        }
+
+        FRESULT fr = f_rewinddir(&dpriv->dir);
+        if (fr != FR_OK)
+        {
+            return (off_t)fresult_to_vfs(fr);
+        }
+        dpriv->synth       = FATFS_DIR_SYNTH_DOT;
+        dpriv->has_pending = false;
+        dpriv->next_off    = 0;
+        file->f_pos        = 0;
+        return 0;
+    }
+
     FIL *fil = (FIL *)file->f_private;
     if (!fil)
     {
@@ -796,13 +961,163 @@ static off_t fatfs_lseek_cb(file_t *file, off_t offset, int whence)
     return file->f_pos;
 }
 
+/**
+ * @brief 把一条目录项按 struct linux_dirent64 布局写进缓冲区
+ * @param[out] buf     目标位置（调用方已确保剩余空间 >= reclen）
+ * @param[in]  name    条目名（'\0' 结尾）
+ * @param[in]  is_dir  true = 目录（DT_DIR），false = 普通文件（DT_REG）
+ * @param[in]  off     写入 d_off 的游标值（"下一条记录的位置"，我们用已返回条目序号充当）
+ * @param[in]  reclen  本条记录总长度（已 8 字节对齐）
+ * @note `d_ino` 必须非 0——FAT 没有 inode 号，而某些程序会把 d_ino==0 当作
+ *   "已删除条目"跳过，所以用 off+1 充当一个目录内唯一且非零的值。
+ */
+static void fatfs_fill_dirent(void *buf, const char *name, bool is_dir,
+                              uint64_t off, uint16_t reclen)
+{
+    struct linux_dirent64 *de = (struct linux_dirent64 *)buf;
+    size_t namelen = strlen(name);
+
+    /* 记录尾部的对齐填充字节要清零：这块内存直接 copy_to_user 给用户态，
+     * 不清零等于把内核堆里的残留数据泄漏出去 */
+    memset(buf, 0, reclen);
+
+    de->d_ino    = off + 1;
+    de->d_off    = (int64_t)(off + 1);
+    de->d_reclen = reclen;
+    de->d_type   = is_dir ? DT_DIR : DT_REG;
+    memcpy(de->d_name, name, namelen + 1);
+}
+
+/* 一条目录项记录所需的总字节数：头部 + 名字 + '\0'，向上取整到 8 字节。
+ * d_off 是 8 字节字段，下一条记录必须对齐到 8 才能被安全访问。 */
+static uint16_t fatfs_dirent_reclen(const char *name)
+{
+    size_t need = offsetof(struct linux_dirent64, d_name) + strlen(name) + 1;
+    return (uint16_t)((need + 7) & ~(size_t)7);
+}
+
+/**
+ * @brief 读取目录项，填充紧凑排列的 struct linux_dirent64 记录（getdents64 后端）
+ * @param[in]  file 已打开的目录 file
+ * @param[out] buf  目标缓冲区
+ * @param[in]  len  缓冲区容量
+ * @retval >0 已填字节数
+ * @retval 0  目录读完
+ * @retval ENO6_INVAL_PARAM 缓冲区连一条记录都放不下
+ * @details 每轮先确定"下一条要吐的条目"，来源有三种，优先级从高到低：
+ *   1. `pending`——上次因缓冲区满而暂存的那条（它已被 FatFS 游标消费，不吐就永久丢失）；
+ *   2. 合成的 `.` / `..`——FatFS 的 f_readdir 不会返回它们（见 FATFS_DIR_SYNTH_* 注释）；
+ *   3. `f_readdir` 真实读出的条目。
+ *   拿到条目后先算 reclen，放不下就停手——**一条记录绝不能被截断**。此时若该条来自
+ *   f_readdir 则必须存进 pending；若来自合成阶段或本就是 pending，则保持状态不变，
+ *   下次调用会重新生成同一条。
+ */
+static int fatfs_readdir_cb(file_t *file, void *buf, size_t len)
+{
+    fatfs_dir_priv_t *dpriv = (fatfs_dir_priv_t *)file->f_private;
+    if (!dpriv)
+    {
+        return ENO8_NULL_POINTER;
+    }
+
+    size_t written = 0;
+
+    while (1)
+    {
+        const char *name;
+        bool        is_dir;
+        bool        from_readdir = false;
+        FILINFO     fno;
+
+        if (dpriv->has_pending)
+        {
+            name   = dpriv->pending_name;
+            is_dir = dpriv->pending_is_dir;
+        }
+        else if (dpriv->synth == FATFS_DIR_SYNTH_DOT)
+        {
+            name   = ".";
+            is_dir = true;
+        }
+        else if (dpriv->synth == FATFS_DIR_SYNTH_DOTDOT)
+        {
+            name   = "..";
+            is_dir = true;
+        }
+        else
+        {
+            /* _USE_LFN 开启后必须由调用方在每次 f_readdir 之前把 lfname 指向缓冲、
+             * lfsize 填容量，否则拿不到长文件名（get_fileinfo 按 lfname 是否非 NULL
+             * 决定要不要填）。无长名时 get_fileinfo 会把 lfname 置成空串。 */
+            memset(&fno, 0, sizeof(fno));
+            fno.lfname = dpriv->lfn_buf;
+            fno.lfsize = sizeof(dpriv->lfn_buf);
+
+            FRESULT fr = f_readdir(&dpriv->dir, &fno);
+            if (fr != FR_OK)
+            {
+                return written ? (int)written : fresult_to_vfs(fr);
+            }
+            if (fno.fname[0] == '\0') /* FatFS 约定：空 fname 表示目录已读完 */
+            {
+                break;
+            }
+
+            name         = (fno.lfname[0] != '\0') ? fno.lfname : fno.fname;
+            is_dir       = (fno.fattrib & AM_DIR) != 0;
+            from_readdir = true;
+        }
+
+        uint16_t reclen = fatfs_dirent_reclen(name);
+        if (written + reclen > len)
+        {
+            if (written == 0)
+            {
+                /* 连一条都放不下：调用方给的缓冲区太小，按 getdents64 约定报 EINVAL */
+                return ENO6_INVAL_PARAM;
+            }
+            if (from_readdir)
+            {
+                /* 这条已经从 FatFS 游标里消费掉了，必须暂存，否则永久丢失 */
+                size_t nlen = strlen(name);
+                if (nlen > _MAX_LFN)
+                {
+                    nlen = _MAX_LFN;
+                }
+                memcpy(dpriv->pending_name, name, nlen);
+                dpriv->pending_name[nlen] = '\0';
+                dpriv->pending_is_dir     = is_dir;
+                dpriv->has_pending        = true;
+            }
+            break;
+        }
+
+        fatfs_fill_dirent((char *)buf + written, name, is_dir, dpriv->next_off, reclen);
+        written += reclen;
+        dpriv->next_off += 1;
+
+        if (dpriv->has_pending)
+        {
+            dpriv->has_pending = false;
+        }
+        else if (dpriv->synth < FATFS_DIR_SYNTH_DONE)
+        {
+            dpriv->synth += 1;
+        }
+    }
+
+    file->f_pos = (off_t)dpriv->next_off;
+    return (int)written;
+}
+
 static file_operations_t fatfs_file_ops = {
-    .open  = fatfs_open_cb,
-    .close = fatfs_close_cb,
-    .read  = fatfs_read_cb,
-    .write = fatfs_write_cb,
-    .lseek = fatfs_lseek_cb,
-    .ioctl = NULL,
+    .open    = fatfs_open_cb,
+    .close   = fatfs_close_cb,
+    .read    = fatfs_read_cb,
+    .write   = fatfs_write_cb,
+    .lseek   = fatfs_lseek_cb,
+    .ioctl   = NULL,
+    .readdir = fatfs_readdir_cb,
 };
 
 /* ============================================================

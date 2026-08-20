@@ -68,8 +68,12 @@ int elf_load(mm_t *mm, const unsigned char *image, uint64_t size, virAddr_t *ent
             continue; /* 只处理加载段 */
         }
 
-        /* 段内容必须落在 [0, size) 内，否则下面的 memcpy 会读到 image 缓冲区之外 */
-        if (ph->p_offset > size || ph->p_filesz > size - ph->p_offset)
+        /* 段内容必须落在 [0, size) 内，否则下面的 memcpy 会读到 image 缓冲区之外。
+         * 仅在 p_filesz > 0 时才检查：p_filesz == 0 的纯 .bss 段不从文件读任何字节，
+         * 链接器完全可以把它的 p_offset 放在文件末尾之后（filetest.elf 的 .bss 段就是
+         * p_offset=0x4000 而文件总长只有 15040），对这种段做文件范围检查会误杀。
+         * 凡是有全局/静态变量的程序都会有这样一个段——BusyBox 必然中招。 */
+        if (ph->p_filesz > 0 && (ph->p_offset > size || ph->p_filesz > size - ph->p_offset))
         {
             printf("%s: segment %d file range out of bounds\n", __FUNCTION__, i);
             return ENO6_INVAL_PARAM;
@@ -115,8 +119,13 @@ int elf_load(mm_t *mm, const unsigned char *image, uint64_t size, virAddr_t *ent
             return ENO1_NOMORE_MEM;
         }
 
-        /* 拷贝文件中存在的数据；SUM 已开，且 satp 已切到该 mm，可直接写用户 VA */
-        memcpy((void *)ph->p_vaddr, image + ph->p_offset, ph->p_filesz);
+        /* 拷贝文件中存在的数据；SUM 已开，且 satp 已切到该 mm，可直接写用户 VA。
+         * p_filesz == 0 时直接跳过——此时 image + p_offset 可能已经越过缓冲区末尾，
+         * 虽然长度为 0 的 memcpy 不会解引用，但连这个越界指针都不去构造更干净。 */
+        if (ph->p_filesz > 0)
+        {
+            memcpy((void *)ph->p_vaddr, image + ph->p_offset, ph->p_filesz);
+        }
         /* 零填充bss区：内存大小 > 文件大小的部分清零 */
         memset((void *)ph->p_vaddr + ph->p_filesz, 0, ph->p_memsz - ph->p_filesz);
     }

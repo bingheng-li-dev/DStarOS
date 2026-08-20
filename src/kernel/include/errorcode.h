@@ -1,28 +1,58 @@
 #ifndef _ERRORCODE_H_
 #define _ERRORCODE_H_
 
-#define ENO0_NO_ERROR 0
-#define ENO1_NOMORE_MEM -1
-#define ENO2_ALLOCPROC_FAILED -2
-#define ENO3_NOFREE_PID -3
-#define ENO4_BUSY -4         /* Device/File is Busy. */
-#define ENO5_NOSUCH_ENTRY -5 /* No Such File or Directory. */
-#define ENO6_INVAL_PARAM -6  /* Invalid parameter. */
-#define ENO7_EXISTS -7       /* File/Directory Already Exists. */
+/* Linux riscv64 标准 errno 数值（asm-generic errno-base.h / errno.h），
+ * syscall 边界要求失败时返回值落在 [-4095,-1]，其绝对值就是这里的数值——
+ * musl/BusyBox 靠这个判断具体错误原因，数值不可自定义。 */
+#define EPERM         1
+#define ENOENT        2
+#define EBADF         9
+#define ECHILD        10
+#define EAGAIN        11
+#define ENOMEM        12
+#define EFAULT        14
+#define EBUSY         16
+#define EEXIST        17
+#define EXDEV         18
+#define ENODEV        19
+#define ENOTDIR       20
+#define EISDIR        21
+#define EINVAL        22
+#define EMFILE        24
+#define EROFS         30
+#define ENAMETOOLONG  36
+#define ENOSYS        38
+#define ENOTEMPTY     39
 
-#define ENO8_NULL_POINTER -8 /* Null Pointer Exception. */
+/** 内核内部错误码——名字保留历史命名（含数字后缀 ENOx，由于历史原因，现已不代表实际数值）
+ * 值统一改写为对应的 * Linux errno 负值，
+ * 使 syscall_dispatch 的返回值无需二次翻译即可直接作为 ABI 返回值。
+ * 多个 ENO* 映射到同一个 Linux errno 是允许的（Linux 内部同样如此）。 */
+#define ENO0_NO_ERROR 0
+#define ENO1_NOMORE_MEM (-ENOMEM)
+#define ENO2_ALLOCPROC_FAILED (-ENOMEM) /* PCB 分配失败，无专用 Linux 码，按语义就近 */
+#define ENO3_NOFREE_PID (-EAGAIN)       /* pid 空间耗尽，对应 Linux fork() 的 EAGAIN */
+#define ENO4_BUSY (-EBUSY)              /* 设备/文件正忙 */
+#define ENO5_NOSUCH_ENTRY (-ENOENT)     /* 没有那个文件或目录 */
+#define ENO6_INVAL_PARAM (-EINVAL)      /* 参数非法 */
+#define ENO7_EXISTS (-EEXIST)           /* 文件/目录已存在 */
+
+#define ENO8_NULL_POINTER (-EFAULT)     /* 空指针 */
 
 /* 文件系统 VFS 专用错误码 */
-#define ENO9_NOT_DIR        -9    /* 路径中某分量不是目录（ENOTDIR）*/
-#define ENO10_IS_DIR       -10    /* 目标是目录，但该操作不适用于目录（EISDIR）*/
-#define ENO11_NAME_TOO_LONG -11   /* 文件名或路径名过长（ENAMETOOLONG）*/
-#define ENO12_NOT_EMPTY    -12    /* 目录非空，无法删除（ENOTEMPTY）*/
-#define ENO13_NO_FS        -13    /* 没有已挂载的根文件系统（ENODEV）*/
-#define ENO14_CROSS_DEV    -14    /* 跨挂载点重命名/移动（EXDEV）*/
-#define ENO15_READ_ONLY    -15    /* 文件系统只读（EROFS）*/
-#define ENO16_PERM         -16    /* 操作不被允许（EPERM）*/
-#define ENO17_NO_CHILD     -17    /* 没有子进程可等待（ECHILD）*/
+#define ENO9_NOT_DIR        (-ENOTDIR)      /* 路径中某分量不是目录 */
+#define ENO10_IS_DIR        (-EISDIR)       /* 目标是目录，但该操作不适用于目录 */
+#define ENO11_NAME_TOO_LONG (-ENAMETOOLONG) /* 文件名或路径名过长 */
+#define ENO12_NOT_EMPTY     (-ENOTEMPTY)    /* 目录非空，无法删除 */
+#define ENO13_NO_FS         (-ENODEV)       /* 没有已挂载的根文件系统 */
+#define ENO14_CROSS_DEV     (-EXDEV)        /* 跨挂载点重命名/移动 */
+#define ENO15_READ_ONLY     (-EROFS)        /* 文件系统只读 */
+#define ENO16_PERM          (-EPERM)        /* 操作不被允许 */
+#define ENO17_NO_CHILD      (-ECHILD)       /* 没有子进程可等待 */
 
-#define ENO18_TOO_MANY_FILES -18  /* fd表满了 */
+#define ENO18_TOO_MANY_FILES (-EMFILE) /* fd表满了 */
+
+#define ENO19_BAD_FD (-EBADF) /* fd 无效/未打开 */
+#define ENO20_NOSYS  (-ENOSYS) /* 未知 syscall 号 */
 
 #endif

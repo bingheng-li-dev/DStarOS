@@ -84,6 +84,7 @@ struct proc_control_block
     struct list_head proc_children;      /* 子进程链表头——子进程以 proc_sibling_linker 挂入 */
     struct list_head proc_sibling_linker;/* 本进程挂入父进程 proc_children 节点 */
     file_t *proc_fds[NOFILE];            /* 文件描述符fd表 */
+    uint8_t proc_fd_flags[NOFILE];       /* 每个 fd 的标志位 */
 
     const struct sched_class *proc_sched_class; /* 本任务归属的调度类 */
     int proc_policy;                            /* SCHED_NORMAL / SCHED_FIFO / SCHED_RR */
@@ -141,12 +142,20 @@ void proc_init(void);
 pcb_t *proc_get_current(void);
 
 int proc_fd_alloc(void);
+/* 从 from 起找最小空闲 fd（fcntl F_DUPFD 用）；proc_fd_alloc() 等价于 from=0 */
+int proc_fd_alloc_from(int from);
 file_t *proc_fd_get(int fd);
 int proc_fd_install(int fd, file_t *f);
 int proc_fd_close(int fd);
 int proc_fd_copy(pcb_t *dst, pcb_t *src);
 void proc_fd_close_all(pcb_t *p);
 int proc_install_stdio(void);
+/* 设置某个 fd 的标志位；fd 越界或槽位未打开时静默忽略 */
+void proc_fd_set_flags(int fd, uint8_t flags);
+/* 读取某个 fd 的标志位；fd 越界或槽位未打开时返回 0 */
+uint8_t proc_fd_get_flags(int fd);
+/* execve 成功、旧地址空间已销毁、不再可能回滚之后调用：关闭所有带 FD_CLOEXEC 的 fd */
+void proc_fd_close_on_exec(pcb_t *p);
 
 /* Kernel's idle process which pid is 0. */
 void idle(void) __attribute__((noreturn));

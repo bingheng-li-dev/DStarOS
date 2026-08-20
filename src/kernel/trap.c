@@ -133,7 +133,13 @@ void trap_handler(intstkf_t *sp)
     }
     else
     {
+        /* 只在追踪 trap 时才打这条 banner：正常处理掉的异常（用户 ecall、懒分配/COW
+         * 缺页）会走到下面的 return，每个 syscall 都打一条会把日志淹掉，还在 syscall
+         * 热路径上白白吃一次 ConsoleLock + SBI 调用；而真正意外的异常在各自的 case 里
+         * 都会先打印具体原因再 panic（panic 自带位置信息），并不依赖这条 banner。 */
+#if DEBUG_INTSTACK
         printf("\nException:\n");
+#endif
         switch (cause)
         {
         case CAUSE_FAULT_LOAD:

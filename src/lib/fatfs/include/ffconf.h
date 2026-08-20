@@ -80,8 +80,12 @@
 */
 
 
-#define	_USE_LFN	0
+#define	_USE_LFN	3
 #define	_MAX_LFN	255
+/* 已改为 3（堆分配缓冲区）：1 是静态缓冲不可重入，双 hart/多进程并发访问会互相踩踏；
+/  2 是栈上缓冲，_MAX_LFN=255 时约需 512+ 字节栈，而本内核栈只有 1 页 4KB
+/  （KERNEL_STACKPSIZE 1），FatFS 调用链本来就深，风险太高。3 需要实现
+/  ff_memalloc/ff_memfree（fatfs_vfs.c 转发到 kmalloc/kfree）。*/
 /* The _USE_LFN option switches the LFN feature.
 /
 /   0: Disable LFN feature. _MAX_LFN has no effect.

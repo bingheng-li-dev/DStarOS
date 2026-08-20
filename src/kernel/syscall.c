@@ -5,32 +5,40 @@
 #include "cpu.h"
 #include "proc.h"
 #include "vfs.h"
+#include "errorcode.h"
+#include "linux_abi.h"
+#include "kmalloc.h"
+#include "stringops.h"
 
-static long sys_write(int fd, const char *ubuf, uint64_t len)
+/* read/write 的中转缓冲大小：一页，kmalloc 分配——内核栈只有 1 页 4KB
+ * （KERNEL_STACKPSIZE 1），FatFS 调用链本来就深，不能在栈上开这么大的缓冲。 */
+#define SYS_RW_BUF_SIZE PGSIZE
+/* readv/writev 一次调用最多接受的 iovec 段数，防止不可信的 iovcnt 触发过大的 kmalloc */
+#define SYS_IOV_MAX 64
+
+/* 把 ubuf 的 len 字节写入 f，按 SYS_RW_BUF_SIZE 分块拷贝+落盘。
+ * 调用方必须已经 vfs_lock()，kbuf 是调用方提供的 SYS_RW_BUF_SIZE 大小的中转缓冲
+ * （writev 要对多个 iovec 段复用同一块，不在这里反复 kmalloc/kfree）。
+ * @return 成功写出的字节数；仅当一个字节都没写出去时才返回负 ENO*（部分写出后出错，
+ *   按 POSIX 语义返回已写字节数，不吞掉部分成功）。 */
+static long do_write_locked(file_t *f, const char *ubuf, uint64_t len, char *kbuf)
 {
-    file_t *f = proc_fd_get(fd);
-    if (!f || !f->f_op || !f->f_op->write)
-    {
-        return -1;
-    }
-
-    char kbuf[256];
     uint64_t done = 0;
     while (done < len)
     {
         uint64_t n = len - done;
-        if (n > sizeof(kbuf))
+        if (n > SYS_RW_BUF_SIZE)
         {
-            n = sizeof(kbuf);
+            n = SYS_RW_BUF_SIZE;
         }
         if (copy_from_user(kbuf, ubuf + done, n) != 0)
         {
-            return done ? (long)done : -1;
+            return done ? (long)done : ENO8_NULL_POINTER;
         }
         ssize_t w = f->f_op->write(f, kbuf, n);
         if (w < 0)
         {
-            return done ? (long)done : -1;
+            return done ? (long)done : (long)w; /* 透传底层错误码，而非折叠成固定值 */
         }
         done += (uint64_t)w;
         if ((uint64_t)w < n) /* 短写：底层没接收完，停 */
@@ -41,29 +49,561 @@ static long sys_write(int fd, const char *ubuf, uint64_t len)
     return (long)done;
 }
 
+/* 从 f 读最多 len 字节到 ubuf，单次 f_op->read 调用（不循环补满——
+ * POSIX read() 允许短读，循环补满不是语义要求）。约束同 do_write_locked。 */
+static long do_read_locked(file_t *f, char *ubuf, uint64_t len, char *kbuf)
+{
+    uint64_t n = len;
+    if (n > SYS_RW_BUF_SIZE)
+    {
+        n = SYS_RW_BUF_SIZE;
+    }
+    ssize_t r = f->f_op->read(f, kbuf, n);
+    if (r < 0)
+    {
+        return (long)r; /* 透传底层错误码，而非折叠成固定值 */
+    }
+    if (r > 0 && copy_to_user(ubuf, kbuf, (uint64_t)r) != 0)
+    {
+        return ENO8_NULL_POINTER;
+    }
+    return (long)r;
+}
+
+static long sys_write(int fd, const char *ubuf, uint64_t len)
+{
+    file_t *f = proc_fd_get(fd);
+    if (!f || !f->f_op || !f->f_op->write)
+    {
+        return ENO19_BAD_FD;
+    }
+
+    char *kbuf = kmalloc(SYS_RW_BUF_SIZE);
+    if (!kbuf)
+    {
+        return ENO1_NOMORE_MEM;
+    }
+
+    vfs_lock();
+    long ret = do_write_locked(f, ubuf, len, kbuf);
+    vfs_unlock();
+
+    kfree(kbuf);
+    return ret;
+}
+
 static long sys_read(int fd, char *ubuf, uint64_t len)
 {
     file_t *f = proc_fd_get(fd);
     if (!f || !f->f_op || !f->f_op->read)
     {
-        return -1;
+        return ENO19_BAD_FD;
     }
 
-    char kbuf[256];
-    if (len > sizeof(kbuf))
+    char *kbuf = kmalloc(SYS_RW_BUF_SIZE);
+    if (!kbuf)
     {
-        len = sizeof(kbuf);
+        return ENO1_NOMORE_MEM;
     }
-    ssize_t r = f->f_op->read(f, kbuf, len);
-    if (r < 0)
+
+    vfs_lock();
+    long ret = do_read_locked(f, ubuf, len, kbuf);
+    vfs_unlock();
+
+    kfree(kbuf);
+    return ret;
+}
+
+/* writev(fd, iov, iovcnt)：逐段调用 do_write_locked，遇到出错/短写就停，
+ * 返回已写出的总字节数（一个字节都没写出去时返回负 ENO*）。 */
+static long sys_writev(int fd, const struct iovec *uiov, int iovcnt)
+{
+    file_t *f = proc_fd_get(fd);
+    if (!f || !f->f_op || !f->f_op->write)
     {
-        return -1;
+        return ENO19_BAD_FD;
     }
-    if (r > 0 && copy_to_user(ubuf, kbuf, (uint64_t)r) != 0)
+    if (iovcnt < 0 || iovcnt > SYS_IOV_MAX)
     {
-        return -1;
+        return ENO6_INVAL_PARAM;
     }
-    return (long)r;
+    if (iovcnt == 0)
+    {
+        return 0;
+    }
+
+    struct iovec *kiov = kmalloc(sizeof(struct iovec) * (size_t)iovcnt);
+    if (!kiov)
+    {
+        return ENO1_NOMORE_MEM;
+    }
+    if (copy_from_user(kiov, uiov, sizeof(struct iovec) * (size_t)iovcnt) != 0)
+    {
+        kfree(kiov);
+        return ENO8_NULL_POINTER;
+    }
+
+    char *kbuf = kmalloc(SYS_RW_BUF_SIZE);
+    if (!kbuf)
+    {
+        kfree(kiov);
+        return ENO1_NOMORE_MEM;
+    }
+
+    long total = 0;
+    vfs_lock();
+    for (int i = 0; i < iovcnt; i++)
+    {
+        if (kiov[i].iov_len == 0)
+        {
+            continue;
+        }
+        long r = do_write_locked(f, (const char *)kiov[i].iov_base, kiov[i].iov_len, kbuf);
+        if (r < 0)
+        {
+            if (total == 0)
+            {
+                total = r; /* 还没写出任何字节，透传这一段的错误码 */
+            }
+            break;
+        }
+        total += r;
+        if ((uint64_t)r < kiov[i].iov_len) /* 这一段短写，后面的段不再继续 */
+        {
+            break;
+        }
+    }
+    vfs_unlock();
+
+    kfree(kbuf);
+    kfree(kiov);
+    return total;
+}
+
+/* readv(fd, iov, iovcnt)：逐段调用 do_read_locked，按段顺序填充，
+ * 遇到短读（含 EOF）就停——不跨段"凑够"，这是 POSIX readv 的常见实现方式。 */
+static long sys_readv(int fd, const struct iovec *uiov, int iovcnt)
+{
+    file_t *f = proc_fd_get(fd);
+    if (!f || !f->f_op || !f->f_op->read)
+    {
+        return ENO19_BAD_FD;
+    }
+    if (iovcnt < 0 || iovcnt > SYS_IOV_MAX)
+    {
+        return ENO6_INVAL_PARAM;
+    }
+    if (iovcnt == 0)
+    {
+        return 0;
+    }
+
+    struct iovec *kiov = kmalloc(sizeof(struct iovec) * (size_t)iovcnt);
+    if (!kiov)
+    {
+        return ENO1_NOMORE_MEM;
+    }
+    if (copy_from_user(kiov, uiov, sizeof(struct iovec) * (size_t)iovcnt) != 0)
+    {
+        kfree(kiov);
+        return ENO8_NULL_POINTER;
+    }
+
+    char *kbuf = kmalloc(SYS_RW_BUF_SIZE);
+    if (!kbuf)
+    {
+        kfree(kiov);
+        return ENO1_NOMORE_MEM;
+    }
+
+    long total = 0;
+    vfs_lock();
+    for (int i = 0; i < iovcnt; i++)
+    {
+        if (kiov[i].iov_len == 0)
+        {
+            continue;
+        }
+        long r = do_read_locked(f, (char *)kiov[i].iov_base, kiov[i].iov_len, kbuf);
+        if (r < 0)
+        {
+            if (total == 0)
+            {
+                total = r;
+            }
+            break;
+        }
+        total += r;
+        if ((uint64_t)r < kiov[i].iov_len) /* 短读（含 EOF）：不再继续后面的段 */
+        {
+            break;
+        }
+    }
+    vfs_unlock();
+
+    kfree(kbuf);
+    kfree(kiov);
+    return total;
+}
+
+/**
+ * @brief openat(dirfd, path, flags, mode)
+ * @note `mode`（权限位）当前被忽略——FAT 没有权限概念，vfs_open 内部固定按 0644/0755
+ *   建 inode（见 fatfs_vfs.c 建 inode 的四处回调），与 O_CREAT 的调用方无关。
+ * @note `dirfd` 只支持 `AT_FDCWD` 或路径本身是绝对路径这两种情况（此时 dirfd 被忽略）；
+ *   传入其它 dirfd 值一律返回 `-EBADF`——真正的"相对某个已打开目录 fd 解析路径"需要
+ *   `vfs_lookup` 支持从任意 dentry 起点解析，本阶段 VFS 没有这个能力，留给以后
+ *   实测撞上再补（见 doc/Phase3-POSIX文件syscall开发计划.md "一、2"节的决策记录）。
+ * @note `vfs_open` 目前失败时统一返回 NULL，无法区分"文件不存在"/"是目录却按文件打开"/
+ *   "权限不足"等具体原因，这里统一按最常见的 ENOENT 处理——已知不精确，是 vfs_open
+ *   自身尚未做错误码细分导致的限制，不是本函数引入的新问题。
+ */
+static long sys_openat(int dirfd, const char *upath, int flags, int mode)
+{
+    (void)mode;
+
+    char kpath[VFS_PATH_MAX];
+    long path_len = strncpy_from_user(kpath, upath, sizeof(kpath));
+    if (path_len < 0)
+    {
+        return path_len;
+    }
+
+    if (dirfd != AT_FDCWD && kpath[0] != '/')
+    {
+        return ENO19_BAD_FD;
+    }
+
+    vfs_lock();
+    file_t *f = vfs_open(kpath, flags);
+    vfs_unlock();
+    if (!f)
+    {
+        return ENO5_NOSUCH_ENTRY;
+    }
+
+    int fd = proc_fd_alloc();
+    if (fd < 0)
+    {
+        vfs_lock();
+        vfs_close(f);
+        vfs_unlock();
+        return ENO18_TOO_MANY_FILES; /* fd 表满时 file 已经打开了，必须回滚关掉 */
+    }
+
+    proc_fd_install(fd, f);
+    if (flags & O_CLOEXEC)
+    {
+        proc_fd_set_flags(fd, FD_CLOEXEC);
+    }
+    return fd;
+}
+
+/* lseek(fd, offset, whence)：vfs_lseek 已经处理了 SEEK_SET/CUR/END 与越界校验，
+ * 这里只是薄壳。目录 fd 的特殊语义（仅允许 SEEK_SET 到 0 = rewinddir）留给 Step 3C
+ * 目录读取通路落地之后——当前 vfs_open 还不支持打开目录，这个分支永远走不到，
+ * 现在加上只是死代码。 */
+static long sys_lseek(int fd, long offset, int whence)
+{
+    file_t *f = proc_fd_get(fd);
+    if (!f)
+    {
+        return ENO19_BAD_FD;
+    }
+
+    vfs_lock();
+    off_t ret = vfs_lseek(f, (off_t)offset, whence);
+    vfs_unlock();
+    return (long)ret;
+}
+
+/**
+ * @brief 内核内部 stat_t（4 字段）→ Linux riscv64 ABI 的 struct linux_stat（128 字节）
+ * @details 布局填充：
+ *   `st_mode`/`st_size`/`st_nlink` 直接搬；`st_blksize` 固定 512（FatFS 扇区大小）；
+ *   `st_blocks` 按 512 字节块数向上取整；`st_dev`/`st_rdev`/uid/gid/三个时间戳
+ *   FAT 没有对应概念或本阶段没有时钟源，统一填 0（时间戳待 Phase 8 `clock_gettime`
+ *   做完再回填）。**`st_mode` 不能是 0**——BusyBox `ls` 靠 `S_ISDIR(st_mode)` 判类型，
+ *   `ash` 执行程序前靠 `st_mode & 0111` 判可执行位，这也是 fatfs_vfs.c 建 inode 时
+ *   必须真的填权限位的原因（见该文件的改动）。
+ */
+static void stat_to_linux(const stat_t *ks, struct linux_stat *ls)
+{
+    memset(ls, 0, sizeof(*ls));
+    ls->st_ino     = ks->st_ino;
+    ls->st_mode    = ks->st_mode;
+    ls->st_nlink   = ks->st_nlink;
+    ls->st_size    = (int64_t)ks->st_size;
+    ls->st_blksize = 512;
+    ls->st_blocks  = ((int64_t)ks->st_size + 511) / 512;
+}
+
+static long sys_fstat(int fd, struct linux_stat *ustatbuf)
+{
+    file_t *f = proc_fd_get(fd);
+    if (!f)
+    {
+        return ENO19_BAD_FD;
+    }
+
+    stat_t kst;
+    vfs_lock();
+    int ret = vfs_fstat(f, &kst);
+    vfs_unlock();
+    if (ret != ENO0_NO_ERROR)
+    {
+        return ret;
+    }
+
+    struct linux_stat lst;
+    stat_to_linux(&kst, &lst);
+    if (copy_to_user(ustatbuf, &lst, sizeof(lst)) != 0)
+    {
+        return ENO8_NULL_POINTER;
+    }
+    return 0;
+}
+
+/**
+ * @brief newfstatat(dirfd, path, statbuf, flags)
+ * @note `dirfd` 的支持范围与 `sys_openat` 一致：只认 `AT_FDCWD` 或绝对路径。
+ * @note 支持 `AT_EMPTY_PATH`——path 为空串时退化成对 `dirfd` 本身做 fstat，
+ *   代价只是多一个分支，musl 的 `fstat()` 在某些实现路径上就是这么包装 `newfstatat` 的。
+ */
+static long sys_newfstatat(int dirfd, const char *upath, struct linux_stat *ustatbuf, int flags)
+{
+    char kpath[VFS_PATH_MAX];
+    long path_len = strncpy_from_user(kpath, upath, sizeof(kpath));
+    if (path_len < 0)
+    {
+        return path_len;
+    }
+
+    stat_t kst;
+    int ret;
+
+    if ((flags & AT_EMPTY_PATH) && path_len == 0)
+    {
+        file_t *f = proc_fd_get(dirfd);
+        if (!f)
+        {
+            return ENO19_BAD_FD;
+        }
+        vfs_lock();
+        ret = vfs_fstat(f, &kst);
+        vfs_unlock();
+    }
+    else
+    {
+        if (dirfd != AT_FDCWD && kpath[0] != '/')
+        {
+            return ENO19_BAD_FD;
+        }
+        vfs_lock();
+        ret = vfs_stat(kpath, &kst);
+        vfs_unlock();
+    }
+
+    if (ret != ENO0_NO_ERROR)
+    {
+        return ret;
+    }
+
+    struct linux_stat lst;
+    stat_to_linux(&kst, &lst);
+    if (copy_to_user(ustatbuf, &lst, sizeof(lst)) != 0)
+    {
+        return ENO8_NULL_POINTER;
+    }
+    return 0;
+}
+
+/**
+ * @brief getdents64(fd, buf, len)：读取目录项
+ * @details 中转缓冲同样必须 kmalloc——内核栈只有 1 页，扛不住调用方给的 len。
+ *   一次最多搬 SYS_RW_BUF_SIZE 字节；调用方给的 len 更大时只填这么多，
+ *   getdents64 本来就允许"返回的字节数少于缓冲区容量"，调用方会继续循环调用。
+ */
+static long sys_getdents64(int fd, void *ubuf, uint64_t len)
+{
+    file_t *f = proc_fd_get(fd);
+    if (!f)
+    {
+        return ENO19_BAD_FD;
+    }
+
+    uint64_t n = len;
+    if (n > SYS_RW_BUF_SIZE)
+    {
+        n = SYS_RW_BUF_SIZE;
+    }
+
+    char *kbuf = kmalloc(SYS_RW_BUF_SIZE);
+    if (!kbuf)
+    {
+        return ENO1_NOMORE_MEM;
+    }
+
+    vfs_lock();
+    int ret = vfs_getdents(f, kbuf, (size_t)n);
+    vfs_unlock();
+
+    if (ret > 0 && copy_to_user(ubuf, kbuf, (uint64_t)ret) != 0)
+    {
+        ret = ENO8_NULL_POINTER;
+    }
+
+    kfree(kbuf);
+    return ret;
+}
+
+/* ============================================================
+ * 路径操作 syscall（Step 6 / 3D）
+ *
+ * 都是同构薄壳：strncpy_from_user → 校验 dirfd → vfs_lock → 已有 vfs_* → vfs_unlock。
+ * dirfd 的支持范围与 sys_openat 完全一致（只认 AT_FDCWD 或绝对路径），理由见
+ * sys_openat 的函数级注释，不再重复。
+ * ============================================================ */
+
+/* 把用户路径拷进内核并校验 dirfd；成功返回 0，失败返回负 ENO*（调用方直接透传）。 */
+static long fetch_path_at(int dirfd, const char *upath, char *kpath, size_t cap)
+{
+    long path_len = strncpy_from_user(kpath, upath, cap);
+    if (path_len < 0)
+    {
+        return path_len;
+    }
+    if (dirfd != AT_FDCWD && kpath[0] != '/')
+    {
+        return ENO19_BAD_FD;
+    }
+    return 0;
+}
+
+static long sys_mkdirat(int dirfd, const char *upath, int mode)
+{
+    char kpath[VFS_PATH_MAX];
+    long ret = fetch_path_at(dirfd, upath, kpath, sizeof(kpath));
+    if (ret < 0)
+    {
+        return ret;
+    }
+
+    vfs_lock();
+    ret = vfs_mkdir(kpath, (mode_t)mode);
+    vfs_unlock();
+    return ret;
+}
+
+/* unlinkat(dirfd, path, flags)：AT_REMOVEDIR 时等价于 rmdir，否则等价于 unlink。
+ * BusyBox 的 rmdir / rm -r 靠这个标志，必须实现。 */
+static long sys_unlinkat(int dirfd, const char *upath, int flags)
+{
+    char kpath[VFS_PATH_MAX];
+    long ret = fetch_path_at(dirfd, upath, kpath, sizeof(kpath));
+    if (ret < 0)
+    {
+        return ret;
+    }
+
+    vfs_lock();
+    ret = (flags & AT_REMOVEDIR) ? vfs_rmdir(kpath) : vfs_unlink(kpath);
+    vfs_unlock();
+    return ret;
+}
+
+static long sys_renameat(int olddirfd, const char *uoldpath,
+                         int newdirfd, const char *unewpath)
+{
+    /* 两个 VFS_PATH_MAX 缓冲共 512 字节，在 1 页内核栈里可以接受 */
+    char koldpath[VFS_PATH_MAX];
+    char knewpath[VFS_PATH_MAX];
+
+    long ret = fetch_path_at(olddirfd, uoldpath, koldpath, sizeof(koldpath));
+    if (ret < 0)
+    {
+        return ret;
+    }
+    ret = fetch_path_at(newdirfd, unewpath, knewpath, sizeof(knewpath));
+    if (ret < 0)
+    {
+        return ret;
+    }
+
+    vfs_lock();
+    ret = vfs_rename(koldpath, knewpath);
+    vfs_unlock();
+    return ret;
+}
+
+static long sys_chdir(const char *upath)
+{
+    char kpath[VFS_PATH_MAX];
+    long path_len = strncpy_from_user(kpath, upath, sizeof(kpath));
+    if (path_len < 0)
+    {
+        return path_len;
+    }
+
+    vfs_lock();
+    long ret = vfs_chdir(kpath);
+    vfs_unlock();
+    return ret;
+}
+
+/**
+ * @brief getcwd(buf, size)
+ * @note **返回值不是 0**：Linux 的 getcwd 成功时返回写入缓冲区的字节数（含结尾 '\0'），
+ *   musl 靠这个判断是否成功。而内核内部的 vfs_getcwd 返回的是 ENO0_NO_ERROR，
+ *   所以这里要自己 strlen 后换算——直接透传 vfs_getcwd 的返回值是错的。
+ */
+static long sys_getcwd(char *ubuf, uint64_t size)
+{
+    if (size == 0)
+    {
+        return ENO6_INVAL_PARAM;
+    }
+
+    uint64_t n = size;
+    if (n > VFS_PATH_MAX)
+    {
+        n = VFS_PATH_MAX;
+    }
+
+    char kpath[VFS_PATH_MAX];
+    vfs_lock();
+    int ret = vfs_getcwd(kpath, (size_t)n);
+    vfs_unlock();
+    if (ret != ENO0_NO_ERROR)
+    {
+        return ret;
+    }
+
+    uint64_t len = (uint64_t)strlen(kpath) + 1; /* 含结尾 '\0' */
+    if (copy_to_user(ubuf, kpath, len) != 0)
+    {
+        return ENO8_NULL_POINTER;
+    }
+    return (long)len;
+}
+
+static long sys_ftruncate(int fd, long length)
+{
+    if (length < 0)
+    {
+        return ENO6_INVAL_PARAM;
+    }
+
+    file_t *f = proc_fd_get(fd);
+    if (!f)
+    {
+        return ENO19_BAD_FD;
+    }
+
+    vfs_lock();
+    long ret = vfs_ftruncate(f, (uint64_t)length);
+    vfs_unlock();
+    return ret;
 }
 
 static long sys_close(int fd)
@@ -71,38 +611,88 @@ static long sys_close(int fd)
     return proc_fd_close(fd);
 }
 
-/* dup(oldfd)：把 oldfd 复制到当前进程最小空闲 fd，两者指向同一个 file_t（共享偏移）*/
+/* 把 f 复制到 >= from 的最小空闲 fd（dup / fcntl F_DUPFD 共用）。
+ * cloexec 为 true 时给新 fd 置上 FD_CLOEXEC（F_DUPFD_CLOEXEC 用）。 */
+static long dup_fd_from(file_t *f, int from, bool cloexec)
+{
+    int newfd = proc_fd_alloc_from(from);
+    if (newfd < 0)
+    {
+        return newfd; /* 透传 EMFILE / EINVAL */
+    }
+
+    f->f_count++;
+    proc_fd_install(newfd, f);
+    if (cloexec)
+    {
+        proc_fd_set_flags(newfd, FD_CLOEXEC);
+    }
+    return newfd;
+}
+
+/* dup(oldfd)：把 oldfd 复制到当前进程最小空闲 fd，两者指向同一个 file_t（共享偏移）。
+ * 按 POSIX，dup 出来的新 fd 不继承 FD_CLOEXEC（该标志是 per-fd 而非 per-file）。 */
 static long sys_dup(int oldfd)
 {
     file_t *f = proc_fd_get(oldfd);
     if (!f)
     {
-        return -1; /* oldfd 无效 */
+        return ENO19_BAD_FD; /* oldfd 无效 */
     }
-    int newfd = proc_fd_alloc();
-    if (newfd < 0)
+    return dup_fd_from(f, 0, false);
+}
+
+/**
+ * @brief fcntl(fd, cmd, arg)
+ * @note F_GETFL 返回的是 file->f_mode（打开时传入的 O_* 组合）。F_SETFL 按 Linux 语义
+ *   只允许改 O_APPEND/O_NONBLOCK，其余位（尤其是访问模式 O_ACCMODE）静默忽略——
+ *   否则用户态可以把一个只读 fd 改成可写，绕过 open 时的权限判定。
+ */
+static long sys_fcntl(int fd, int cmd, long arg)
+{
+    file_t *f = proc_fd_get(fd);
+    if (!f)
     {
-        return -1; /* fd 表已满 */
+        return ENO19_BAD_FD;
     }
-    f->f_count++;
-    proc_fd_install(newfd, f);
-    return newfd;
+
+    switch (cmd)
+    {
+    case F_DUPFD:
+        return dup_fd_from(f, (int)arg, false);
+    case F_DUPFD_CLOEXEC:
+        return dup_fd_from(f, (int)arg, true);
+    case F_GETFD:
+        return (long)proc_fd_get_flags(fd);
+    case F_SETFD:
+        /* 目前只有 FD_CLOEXEC 一位有意义，其余位丢弃 */
+        proc_fd_set_flags(fd, (uint8_t)(arg & FD_CLOEXEC));
+        return 0;
+    case F_GETFL:
+        return (long)f->f_mode;
+    case F_SETFL:
+    {
+        int mutable_bits = O_APPEND | O_NONBLOCK;
+        f->f_mode = (f->f_mode & ~mutable_bits) | ((int)arg & mutable_bits);
+        return 0;
+    }
+    default:
+        return ENO6_INVAL_PARAM;
+    }
 }
 
 /* dup3(oldfd, newfd, flags)：把 oldfd 复制到指定的 newfd（若已打开则先关掉）。
- * flags 里的 O_CLOEXEC 暂不支持（无 exec fd 表清理逻辑）。用户态 dup2 = dup3(o,n,0)，
- * 且 dup2 在库层处理 oldfd==newfd，故内核 dup3 对相等直接判非法。 */
+ * 用户态 dup2 = dup3(o,n,0)，且 dup2 在库层处理 oldfd==newfd，故内核 dup3 对相等直接判非法。 */
 static long sys_dup3(int oldfd, int newfd, int flags)
 {
-    (void)flags;
     file_t *f = proc_fd_get(oldfd);
     if (!f)
     {
-        return -1; /* oldfd 无效 */
+        return ENO19_BAD_FD; /* oldfd 无效 */
     }
     if (oldfd == newfd || newfd < 0 || newfd >= NOFILE)
     {
-        return -1; /* dup3 要求 oldfd != newfd；newfd 越界非法 */
+        return ENO6_INVAL_PARAM; /* dup3 要求 oldfd != newfd；newfd 越界非法 */
     }
     if (proc_fd_get(newfd))
     {
@@ -111,6 +701,11 @@ static long sys_dup3(int oldfd, int newfd, int flags)
     }
     f->f_count++;
     proc_fd_install(newfd, f);
+    /* dup3 的 flags 里只有 O_CLOEXEC 有意义（Step 7 接上，此前是 (void)flags 丢弃）*/
+    if (flags & O_CLOEXEC)
+    {
+        proc_fd_set_flags(newfd, FD_CLOEXEC);
+    }
     return newfd;
 }
 
@@ -151,7 +746,7 @@ static long sys_wait4(int pid, int *ustatus, int options, void *rusage)
     {
         if (copy_to_user(ustatus, &kstatus, sizeof(kstatus)) != 0)
         {
-            return -1;
+            return ENO8_NULL_POINTER;
         }
     }
     
@@ -166,8 +761,38 @@ long syscall_dispatch(intstkf_t *sp)
         return sys_write((int)sp->x10_a0, (const char *)sp->x11_a1, sp->x12_a2);
     case __NR_read:
         return sys_read((int)sp->x10_a0, (char *)sp->x11_a1, sp->x12_a2);
+    case __NR_writev:
+        return sys_writev((int)sp->x10_a0, (const struct iovec *)sp->x11_a1, (int)sp->x12_a2);
+    case __NR_readv:
+        return sys_readv((int)sp->x10_a0, (const struct iovec *)sp->x11_a1, (int)sp->x12_a2);
+    case __NR_openat:
+        return sys_openat((int)sp->x10_a0, (const char *)sp->x11_a1, (int)sp->x12_a2, (int)sp->x13_a3);
+    case __NR_lseek:
+        return sys_lseek((int)sp->x10_a0, (long)sp->x11_a1, (int)sp->x12_a2);
+    case __NR_getdents64:
+        return sys_getdents64((int)sp->x10_a0, (void *)sp->x11_a1, sp->x12_a2);
+    case __NR_fstat:
+        return sys_fstat((int)sp->x10_a0, (struct linux_stat *)sp->x11_a1);
+    case __NR_newfstatat:
+        return sys_newfstatat((int)sp->x10_a0, (const char *)sp->x11_a1,
+                               (struct linux_stat *)sp->x12_a2, (int)sp->x13_a3);
     case __NR_close:
         return sys_close((int)sp->x10_a0);
+    case __NR_mkdirat:
+        return sys_mkdirat((int)sp->x10_a0, (const char *)sp->x11_a1, (int)sp->x12_a2);
+    case __NR_unlinkat:
+        return sys_unlinkat((int)sp->x10_a0, (const char *)sp->x11_a1, (int)sp->x12_a2);
+    case __NR_renameat:
+        return sys_renameat((int)sp->x10_a0, (const char *)sp->x11_a1,
+                            (int)sp->x12_a2, (const char *)sp->x13_a3);
+    case __NR_chdir:
+        return sys_chdir((const char *)sp->x10_a0);
+    case __NR_getcwd:
+        return sys_getcwd((char *)sp->x10_a0, sp->x11_a1);
+    case __NR_ftruncate:
+        return sys_ftruncate((int)sp->x10_a0, (long)sp->x11_a1);
+    case __NR_fcntl:
+        return sys_fcntl((int)sp->x10_a0, (int)sp->x11_a1, (long)sp->x12_a2);
     case __NR_dup:
         return sys_dup((int)sp->x10_a0);
     case __NR_dup3:
@@ -187,6 +812,6 @@ long syscall_dispatch(intstkf_t *sp)
         return sys_wait4((int)sp->x10_a0, (int *)sp->x11_a1, (int)sp->x12_a2, (void *)sp->x13_a3);
     default:
         printf("syscall: unknown nr=%ld\n", sp->x17_a7);
-        return -1;
+        return ENO20_NOSYS;
     }
 }

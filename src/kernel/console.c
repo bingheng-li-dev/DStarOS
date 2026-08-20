@@ -90,10 +90,12 @@ void panic_impl(const char *func, int line, char *s, ...)
 static ssize_t console_write(file_t *f, const void *buf, size_t len)
 {
     UNUSED(f);
+    spinlock_acquire(&ConsoleLock);
     for (size_t i = 0; i < len; i++)
     {
         sbi_console_putchar(((char *)buf)[i]);
     }
+    spinlock_release(&ConsoleLock);
 
     return len;
 }

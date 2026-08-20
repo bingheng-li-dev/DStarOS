@@ -26,6 +26,9 @@
 #define O_EXCL      0x0080   /* 配合 O_CREAT：文件已存在则失败 */
 #define O_TRUNC     0x0200   /* 打开时截断文件为零长度 */
 #define O_APPEND    0x0400   /* 每次写操作追加到文件末尾 */
+#define O_NONBLOCK  0x0800   /* 非阻塞模式 */
+#define O_DIRECTORY 0x10000  /* 要求路径必须是目录，否则失败（ENOTDIR）*/
+#define O_CLOEXEC   0x80000  /* execve 时自动关闭该 fd */
 
 /* ============================================================
  * lseek 参照点
@@ -223,6 +226,13 @@ struct file_operations
     int     (*close)(file_t *file);                               /* 关闭文件（释放资源）*/
     off_t   (*lseek)(file_t *file, off_t offset, int whence);     /* 移动读写位置 */
     int     (*ioctl)(file_t *file, int cmd, void *arg);           /* 设备控制操作 */
+    /* 读目录项：把尽可能多的 struct linux_dirent64 变长记录紧凑填进 buf。
+     * 放在 file 层而不是 inode 层，是因为"读到第几项"是**打开的目录实例**的属性——
+     * 同一个目录被两个进程同时打开必须有两个独立游标（Linux 同理，放在
+     * file_operations.iterate_shared）。
+     * @return 已填字节数；0 表示目录已读完（EOF）；负值为错误码。
+     *   缓冲区连一条记录都放不下时返回 ENO6_INVAL_PARAM。 */
+    int     (*readdir)(file_t *file, void *buf, size_t len);
 };
 
 /* ============================================================
@@ -244,6 +254,12 @@ void dentry_put_pub(dentry_t *d);   /* 引用计数 -1，归零时释放 */
 /* 初始化 */
 void vfs_init(void);
 
+/* VFS 大锁（睡眠信号量）：保护 dentry/inode 缓存树与 FatFS 卷内部状态（win[] 扇区缓存、
+ * FAT 表等，FatFS 本身 _FS_REENTRANT=0 不可重入）。只在"进入 VFS 的入口"加锁——
+ * vfs.c 内部函数之间互相调用不重复加锁，否则非重入信号量会自锁死。 */
+void vfs_lock(void);
+void vfs_unlock(void);
+
 /* 文件系统注册与注销 */
 int16_t register_filesystem(file_system_type_t *fs_type);
 int16_t unregister_filesystem(file_system_type_t *fs_type);
@@ -258,6 +274,7 @@ int     vfs_close       (file_t *file);
 ssize_t vfs_read        (file_t *file, void *buf, size_t len);
 ssize_t vfs_write       (file_t *file, const void *buf, size_t len);
 int     vfs_truncate    (const char *path, uint64_t size);  /* 截断/扩展文件到指定大小 */
+int     vfs_ftruncate   (file_t *file, uint64_t size);      /* 同上，但按已打开的 file 定位（不经路径）*/
 off_t   vfs_lseek       (file_t *file, off_t offset, int whence);
 
 /* 目录操作 */
@@ -272,6 +289,11 @@ int vfs_getcwd (char *buf, size_t size);
 
 /* 文件信息 */
 int vfs_stat    (const char *path, stat_t *statbuf);
+int vfs_fstat   (file_t *file, stat_t *statbuf);  /* 已打开文件版本，直接读 f_inode，无需再解析路径 */
+
+/* 读目录项（getdents64 的 VFS 层入口）：转发给 f_op->readdir。
+ * 返回已填字节数，0 = 目录读完，负值为错误码。 */
+int vfs_getdents(file_t *file, void *buf, size_t len);
 
 /* 路径解析（返回持有一个引用计数的 dentry，调用者负责 dentry_put_pub）*/
 dentry_t *vfs_lookup(const char *path);

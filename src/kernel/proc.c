@@ -10,6 +10,7 @@
 #include "elf.h"
 #include "sbi.h"
 #include "uaccess.h"
+#include "linux_abi.h"
 
 /* List of all processes. */
 struct list_head proc_list;
@@ -18,7 +19,6 @@ struct list_head pid_stack;
 /* Amount of processes. */
 uint16_t task_count = 0;
 
-#define USER_STACK_TOP  0x40000000UL
 #define USER_STACK_LEN  (16 * PGSIZE)      /* 64 KB，懒分配 */
 
 /* Alloc a new empty pcb(proc). */
@@ -247,35 +247,33 @@ int16_t do_wait(int16_t pid, int *status)
  *   2. **先**把整个 ELF 读进内核堆（内核偏移映射，切 satp 后仍可达）；
  *   3. 建新 mm、切到新地址空间（旧 mm 先留着，加载失败要回滚）；
  *   4. elf_load 到新 mm；失败则切回旧 mm、销毁半成品新 mm、返回错误；
- *   5. 成功后才销毁旧 mm（此刻已不站在它的页表上）；
- *   6. 建全新用户栈 VMA；fd 表原样保留（O_CLOEXEC 属阶段 3）；
+ *   5. 成功后才销毁旧 mm（此刻已不站在它的页表上），随即关闭带 FD_CLOEXEC 的 fd；
+ *   6. 建全新用户栈 VMA；fd 表其余部分原样保留；
  *   7. 改写 trap 帧（sepc=入口、sp=新栈顶、清通用寄存器），走正常 syscall 返回路径进入新程序。
  * @note 不做 argv/envp（无 argc 的 _start）；未来铺 argv 时需让成功路径跳过 trap.c 对 a0 的写回。
+ * @note FD_CLOEXEC 的 fd 在第 5 步（销毁旧 mm 之后）才关闭，而不是一进函数就关——第 1-4 步
+ *   随时可能失败并回滚到旧程序继续执行，那种情况下 fd 表必须原封不动（POSIX 语义：
+ *   execve 失败等价于没发生过）；只有确认新程序已经站稳（旧 mm 已销毁、没有回头路）之后，
+ *   关闭 CLOEXEC fd 才是安全的。
  */
 int do_exec(intstkf_t *sp, const char *path)
 {
     pcb_t *cur = proc_get_current();
 
-    /* 1) 路径来自用户空间：切 satp 前逐字节拷进内核缓冲（到 '\0' 或截断到 VFS_PATH_MAX）*/
+    /* 1) 路径来自用户空间：切 satp 前拷进内核缓冲 */
     char kpath[VFS_PATH_MAX];
-    int i;
-    for (i = 0; i < VFS_PATH_MAX - 1; i++)
+    long path_len = strncpy_from_user(kpath, path, sizeof(kpath));
+    if (path_len < 0)
     {
-        if (copy_from_user(&kpath[i], path + i, 1) != 0)
-        {
-            return ENO6_INVAL_PARAM;
-        }
-        if (kpath[i] == '\0')
-        {
-            break;
-        }
+        return (int)path_len;
     }
-    kpath[i] = '\0';
 
     /* 2) 打开并把整个 ELF 读进内核堆 */
+    vfs_lock();
     file_t *f = vfs_open(kpath, O_RDONLY);
     if (f == NULL)
     {
+        vfs_unlock();
         return ENO5_NOSUCH_ENTRY;
     }
     off_t size = vfs_lseek(f, 0, SEEK_END);
@@ -283,16 +281,19 @@ int do_exec(intstkf_t *sp, const char *path)
     if (size <= 0)
     {
         vfs_close(f);
+        vfs_unlock();
         return ENO6_INVAL_PARAM;
     }
     unsigned char *img = kmalloc((size_t)size);
     if (img == NULL)
     {
         vfs_close(f);
+        vfs_unlock();
         return ENO1_NOMORE_MEM;
     }
     ssize_t rd = vfs_read(f, img, (size_t)size);
     vfs_close(f);
+    vfs_unlock();
     if (rd != (ssize_t)size)
     {
         kfree(img);
@@ -327,10 +328,12 @@ int do_exec(intstkf_t *sp, const char *path)
         return ret;
     }
 
-    /* 5) 成功——此刻站在新页表上，旧 mm 已非活动，安全销毁 */
+    /* 5) 成功——此刻站在新页表上，旧 mm 已非活动，安全销毁；exec 已无回头路，
+     *    此时才能安全关闭带 FD_CLOEXEC 的 fd（理由见函数级注释） */
     vmm_mm_destroy(old_mm);
+    proc_fd_close_on_exec(cur);
 
-    /* 6) 全新用户栈 VMA（懒分配）；fd 表原样保留 */
+    /* 6) 全新用户栈 VMA（懒分配）；fd 表其余部分原样保留 */
     vma_t *stk = vmm_vma_create(USER_STACK_TOP - USER_STACK_LEN, USER_STACK_TOP, VMP_R | VMP_W);
     vmm_vma_insert(new_mm, stk);
 
@@ -423,6 +426,7 @@ static pcb_t *alloc_new_proc(void)
         INIT_LIST_HEAD(&(pcb->proc_sibling_linker));
 
         memset(pcb->proc_fds, 0, sizeof(pcb->proc_fds));
+        memset(pcb->proc_fd_flags, 0, sizeof(pcb->proc_fd_flags));
 
         pcb->proc_sched_class = &fair_sched_class;
         pcb->proc_policy = SCHED_NORMAL;
@@ -719,7 +723,7 @@ static void run_user_program(const unsigned char *elf, unsigned long elf_len)
     enter_user_mode(entry, USER_STACK_TOP);
 }
 
-#if !DEBUG_EXEC_TEST
+#if !DEBUG_EXEC_TEST && !DEBUG_FILE_TEST
 static void run_first_user_program(void)
 {
     run_user_program(user_elf, user_elf_len);
@@ -735,9 +739,10 @@ static void run_fork_wait_test_program(void)
 }
 #endif
 
-#if DEBUG_EXEC_TEST
+#if DEBUG_EXEC_TEST || DEBUG_FILE_TEST
 /* 把嵌入的 hello ELF 写进 ramdisk 的 "/hello"，给 exectest 的 execve 一个可加载的目标；
- * 顺带验证 VFS 写盘（这是 rootfs 上第一个真实写入的文件）。在 init（内核上下文）里调用。 */
+ * 顺带验证 VFS 写盘（这是 rootfs 上第一个真实写入的文件）。在 init（内核上下文）里调用。
+ * filetest 也依赖它：那里的 getdents64 用例要在根目录列表里看到 "hello" 这一项。 */
 static void seed_exec_target(void)
 {
     file_t *f = vfs_open("/hello", O_CREAT | O_WRONLY | O_TRUNC);
@@ -750,12 +755,23 @@ static void seed_exec_target(void)
     vfs_close(f);
     printf("[init] seed /hello: wrote %ld bytes\n", (long)w);
 }
+#endif
 
+#if DEBUG_EXEC_TEST
 static void run_exectest_program(void)
 {
     extern const unsigned char user_exectest_elf[];
     extern const unsigned long user_exectest_elf_len;
     run_user_program(user_exectest_elf, user_exectest_elf_len);
+}
+#endif
+
+#if DEBUG_FILE_TEST
+static void run_filetest_program(void)
+{
+    extern const unsigned char user_filetest_elf[];
+    extern const unsigned long user_filetest_elf_len;
+    run_user_program(user_filetest_elf, user_filetest_elf_len);
 }
 #endif
 
@@ -809,6 +825,11 @@ static int16_t init(void)
     /* 验证 2C dup + 2D execve：先在 ramdisk 塞好 /hello，再跑 exectest（不跑默认用户程序）*/
     seed_exec_target();
     int16_t pid = create_kernel_thread_by_fork((void *)run_exectest_program, NULL, 0);
+#elif DEBUG_FILE_TEST
+    /* 验证 Phase 3 的 POSIX 文件 syscall：同样先塞好 /hello（filetest 的 getdents64
+     * 用例要在根目录列表里看到它），再跑 filetest（不跑默认用户程序）*/
+    seed_exec_target();
+    int16_t pid = create_kernel_thread_by_fork((void *)run_filetest_program, NULL, 0);
 #else
     int16_t pid = create_kernel_thread_by_fork((void *)run_first_user_program, NULL, 0);
 #endif
@@ -929,8 +950,25 @@ void enter_user_mode(virAddr_t entry, virAddr_t ustack)
  */
 int proc_fd_alloc(void)
 {
+    return proc_fd_alloc_from(0);
+}
+
+/**
+ * @brief 从指定下标起找最小的空闲 fd
+ * @param[in] from 起始下标（fcntl 的 F_DUPFD 要求"不小于 arg 的最小空闲 fd"）
+ * @retval >=0 找到的空闲 fd
+ * @retval ENO18_TOO_MANY_FILES 没有空闲槽位
+ * @retval ENO6_INVAL_PARAM     from 越界
+ */
+int proc_fd_alloc_from(int from)
+{
+    if (from < 0 || from >= NOFILE)
+    {
+        return ENO6_INVAL_PARAM;
+    }
+
     file_t **fds = proc_get_current()->proc_fds;
-    for (int i = 0; i < NOFILE; i++)
+    for (int i = from; i < NOFILE; i++)
     {
         if (fds[i] == NULL)
         {
@@ -972,9 +1010,54 @@ int proc_fd_install(int fd, file_t *f)
         return ENO6_INVAL_PARAM;
     }
 
-    proc_get_current()->proc_fds[fd] = f;
+    pcb_t *cur = proc_get_current();
+    cur->proc_fds[fd] = f;
+    cur->proc_fd_flags[fd] = 0; /* 新装入的 fd 默认不带 flag，需要的话调用方另调 proc_fd_set_flags */
 
     return ENO0_NO_ERROR;
+}
+
+/**
+ * @brief 设置某个 fd 的标志位
+ * @param[in] fd    目标文件描述符
+ * @param[in] flags 覆盖写入的标志位组合
+ * @note fd 越界或该槽位未打开时静默忽略——调用方（openat/fcntl）应已先校验过 fd 有效。
+ */
+void proc_fd_set_flags(int fd, uint8_t flags)
+{
+    if (fd < 0 || fd >= NOFILE)
+    {
+        return;
+    }
+
+    pcb_t *cur = proc_get_current();
+    if (cur->proc_fds[fd] == NULL)
+    {
+        return;
+    }
+    cur->proc_fd_flags[fd] = flags;
+}
+
+/**
+ * @brief 读取某个 fd 的标志位
+ * @param[in] fd 目标文件描述符
+ * @return 该 fd 的标志位；fd 越界或槽位未打开时返回 0
+ * @note 调用方（fcntl F_GETFD）应已先用 proc_fd_get() 确认 fd 有效，
+ *   本函数对无效 fd 返回 0 而非报错，是为了让调用点保持简单。
+ */
+uint8_t proc_fd_get_flags(int fd)
+{
+    if (fd < 0 || fd >= NOFILE)
+    {
+        return 0;
+    }
+
+    pcb_t *cur = proc_get_current();
+    if (cur->proc_fds[fd] == NULL)
+    {
+        return 0;
+    }
+    return cur->proc_fd_flags[fd];
 }
 
 /**
@@ -995,9 +1078,13 @@ int proc_fd_close(int fd)
         return ENO6_INVAL_PARAM;
     }
 
-    file_t *f = proc_get_current()->proc_fds[fd];
+    pcb_t *cur = proc_get_current();
+    file_t *f = cur->proc_fds[fd];
+    vfs_lock();
     int ret = vfs_close(f);
-    proc_get_current()->proc_fds[fd] = NULL;
+    vfs_unlock();
+    cur->proc_fds[fd] = NULL;
+    cur->proc_fd_flags[fd] = 0;
 
     return ret;
 }
@@ -1017,6 +1104,7 @@ int proc_fd_copy(pcb_t *dst, pcb_t *src)
     for (int i = 0; i < NOFILE; i++)
     {
         dst->proc_fds[i] = src->proc_fds[i];
+        dst->proc_fd_flags[i] = src->proc_fd_flags[i]; /* FD_CLOEXEC 随 fork 继承，exec 才清 */
         if (src->proc_fds[i])
         {
             src->proc_fds[i]->f_count++;
@@ -1029,15 +1117,42 @@ int proc_fd_copy(pcb_t *dst, pcb_t *src)
 /**
  * @brief 关闭一个进程 fd 表中所有已打开的文件描述符（exit 用）
  * @param[in] p 要清空 fd 表的 pcb
- * @details 逐槽调用 vfs_close()——对空槽位（NULL）调用是安全的，vfs_close()
- *   内部会判空直接返回，不会崩溃。
+ * @details 只在槽位非空时才加锁调用 vfs_close()——大多数内核线程/测试 worker
+ *   fd 表全空（从不碰文件），不该仅仅为了走一遍空循环就在 do_exit() 早期引入
+ *   一个新的睡眠点（VFS 大锁是睡眠信号量，哪怕大概率不阻塞，获取本身仍是一次
+ *   潜在的 sched_schedule()/switch_to() 往返）。
  */
 void proc_fd_close_all(pcb_t *p)
 {
     for (int i = 0; i < NOFILE; i++)
     {
-        vfs_close(p->proc_fds[i]);
+        if (p->proc_fds[i])
+        {
+            vfs_lock();
+            vfs_close(p->proc_fds[i]);
+            vfs_unlock();
+        }
         p->proc_fds[i] = NULL;
+        p->proc_fd_flags[i] = 0;
+    }
+}
+
+/**
+ * @brief execve 成功、已确认不会回滚之后调用：关闭所有带 FD_CLOEXEC 的 fd
+ * @param[in] p 目标 pcb（正在 execve 的当前进程）
+ */
+void proc_fd_close_on_exec(pcb_t *p)
+{
+    for (int i = 0; i < NOFILE; i++)
+    {
+        if (p->proc_fds[i] && (p->proc_fd_flags[i] & FD_CLOEXEC))
+        {
+            vfs_lock();
+            vfs_close(p->proc_fds[i]);
+            vfs_unlock();
+            p->proc_fds[i] = NULL;
+            p->proc_fd_flags[i] = 0;
+        }
     }
 }
 

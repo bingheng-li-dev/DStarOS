@@ -4,9 +4,15 @@
 #include "errorcode.h"
 #include "console.h"
 
+/**
+ * @note 不加 vfs_lock()——此函数运行在 proc_init() 之前的单核启动阶段，此时还没有任何
+ *   pcb（含 idle/init）存在，而 vfs_lock() 内部的 sem_down() 无条件调用
+ *   proc_get_current()，此刻拿到的是无效指针，会直接触发缺页异常。这个阶段本来就是
+ *   单线程执行，没有并发可言，不需要加锁。
+ */
 void fs_init(void)
 {
-    /* 1. 初始化 VFS 全局数据结构 */
+    /* 1. 初始化 VFS 全局数据结构（含 vfs_big_lock 本身的初始化）*/
     vfs_init();
 
     /* 2. 注册 fatfs 文件系统类型 */
@@ -19,5 +25,6 @@ void fs_init(void)
         printf("fs_init: root mount failed, err=%d\n", ret);
         return;
     }
+
     printf("fs_init: root filesystem mounted (fatfs/ramdisk)\n");
 }

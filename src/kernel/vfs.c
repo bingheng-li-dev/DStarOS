@@ -38,6 +38,12 @@ static file_system_type_t *file_system_types = NULL;
 /* 保护上述三个全局结构的自旋锁 */
 osslock_t vfs_fs_lock;
 
+/* VFS 大锁：保护 dentry/inode 缓存树与 FatFS 卷内部状态，调用方在"进入 VFS 的入口"
+ * 处持有（syscall.c 的文件 syscall、proc.c 的 do_exec/fd 关闭路径等），vfs.c 内部
+ * 不再重复加锁。用睡眠信号量而非自旋锁——FatFS 一次调用链可能连续访问多个扇区，
+ * 自旋锁会整段关中断，破坏调度。 */
+static ossem_t vfs_big_lock;
+
 /* VFS 全局根目录项与根挂载点（由 vfs_mount("/", ...) 设置）*/
 dentry_t   *vfs_root_dentry = NULL;
 vfsmount_t *vfs_root_mount  = NULL;
@@ -564,9 +570,29 @@ void vfs_init(void)
     INIT_LIST_HEAD(&super_block_list);
     INIT_LIST_HEAD(&vfs_mount_list);
     spinlock_init(&vfs_fs_lock);
+    sem_init(&vfs_big_lock, 1);
     file_system_types = NULL;
     vfs_root_dentry   = NULL;
     vfs_root_mount    = NULL;
+}
+
+/**
+ * @brief 获取 VFS 大锁
+ * @note 只在"进入 VFS 的入口"调用（syscall.c 的文件 syscall、proc.c 的 do_exec/
+ *   fd 关闭路径等），不要在 vfs.c 内部函数之间嵌套调用——ossem_t 不可重入，
+ *   vfs_open 内部会调 vfs_lookup，嵌套加锁必然自锁死。
+ */
+void vfs_lock(void)
+{
+    sem_down(&vfs_big_lock);
+}
+
+/**
+ * @brief 释放 VFS 大锁
+ */
+void vfs_unlock(void)
+{
+    sem_up(&vfs_big_lock);
 }
 
 /* ============================================================
@@ -1027,15 +1053,22 @@ file_t *vfs_open(const char *path, int mode)
         return NULL;
     }
 
-    /* 不允许对目录使用写模式打开 */
+    /* 目录只允许只读打开（供 getdents64 遍历）；任何写意图一律拒绝。
+     * O_TRUNC 也要挡——截断一个目录没有意义，放过去只会让底层拿到矛盾的语义。 */
     if (S_ISDIR(target->d_inode->i_mode))
     {
         int acc = mode & O_ACCMODE;
-        if (acc == O_WRONLY || acc == O_RDWR)
+        if (acc == O_WRONLY || acc == O_RDWR || (mode & O_TRUNC))
         {
             dentry_put(target);
             return NULL;
         }
+    }
+    /* 反过来：带 O_DIRECTORY 却指向普通文件，按 POSIX 应失败（ENOTDIR） */
+    else if (mode & O_DIRECTORY)
+    {
+        dentry_put(target);
+        return NULL;
     }
 
     /* 分配 file_t */
@@ -1247,6 +1280,35 @@ int vfs_truncate(const char *path, uint64_t size)
     int ret = d->d_inode->i_op->truncate(d->d_inode, size);
     dentry_put(d);
     return ret;
+}
+
+/**
+ * @brief 按已打开的文件对象截断/扩展文件（ftruncate 用）
+ * @param[in] file 已打开的文件对象
+ * @param[in] size 目标大小
+ * @retval ENO0_NO_ERROR 成功
+ * @retval ENO10_IS_DIR  目标是目录
+ * @details 直接用 file->f_inode，不经路径解析——`file->f_path` 只是调试字段，
+ *   文件被 rename 之后就不再指向真身，拿它去 vfs_truncate 会截断错误的文件。
+ */
+int vfs_ftruncate(file_t *file, uint64_t size)
+{
+    if (!file || !file->f_inode)
+    {
+        return ENO8_NULL_POINTER;
+    }
+
+    inode_t *inode = file->f_inode;
+    if (S_ISDIR(inode->i_mode))
+    {
+        return ENO10_IS_DIR;
+    }
+    if (!inode->i_op || !inode->i_op->truncate)
+    {
+        return ENO8_NULL_POINTER;
+    }
+
+    return inode->i_op->truncate(inode, size);
 }
 
 /**
@@ -1816,4 +1878,64 @@ int vfs_stat(const char *path, stat_t *statbuf)
 
     dentry_put(d);
     return ENO0_NO_ERROR;
+}
+
+/**
+ * @brief 获取已打开文件的状态信息（fstat 用）
+ * @param[in]  file    已打开的文件对象
+ * @param[out] statbuf 输出的状态信息
+ * @retval ENO0_NO_ERROR     成功
+ * @retval ENO8_NULL_POINTER 参数为 NULL，或 file 没有关联的 inode
+ * @details 直接读 file->f_inode，不需要像 vfs_stat 那样重新解析路径——
+ *   打开文件时已经持有 inode 的一份引用，不存在"路径已被删除/改名"的竞态。
+ */
+int vfs_fstat(file_t *file, stat_t *statbuf)
+{
+    if (!file || !statbuf)
+    {
+        return ENO8_NULL_POINTER;
+    }
+
+    inode_t *inode = file->f_inode;
+    if (!inode)
+    {
+        return ENO8_NULL_POINTER;
+    }
+
+    statbuf->st_ino   = inode->i_ino;
+    statbuf->st_mode  = inode->i_mode;
+    statbuf->st_size  = inode->i_size;
+    statbuf->st_nlink = 1;
+
+    return ENO0_NO_ERROR;
+}
+
+/**
+ * @brief 读取目录项（getdents64 的 VFS 层入口）
+ * @param[in]  file 已打开的目录文件对象
+ * @param[out] buf  接收紧凑排列的 struct linux_dirent64 记录
+ * @param[in]  len  buf 容量（字节）
+ * @retval >0 已填字节数
+ * @retval 0  目录已读完（EOF）
+ * @retval ENO10_IS_DIR 反过来的情况：file 不是目录
+ * @retval ENO6_INVAL_PARAM 底层不支持 readdir，或缓冲区连一条记录都放不下
+ * @details 薄转发——真正的记录组装（`.`/`..` 合成、`d_reclen` 8 字节对齐、
+ *   放不下时的 pending 暂存）由具体文件系统的 readdir 回调负责。
+ */
+int vfs_getdents(file_t *file, void *buf, size_t len)
+{
+    if (!file || !buf)
+    {
+        return ENO8_NULL_POINTER;
+    }
+    if (!file->f_inode || !S_ISDIR(file->f_inode->i_mode))
+    {
+        return ENO9_NOT_DIR;
+    }
+    if (!file->f_op || !file->f_op->readdir)
+    {
+        return ENO6_INVAL_PARAM;
+    }
+
+    return file->f_op->readdir(file, buf, len);
 }
