@@ -298,6 +298,9 @@ void run_sched_tests(void)
     extern void sync_mutex_test(void);
     extern void rt_preempt_cfs_test(void);
     extern void rt_rr_rotation_test(void);
+    extern void waitq_single_wakeup_test(void);
+    extern void waitq_broadcast_test(void);
+    extern void run_pipe_tests(void);
 
     printf("\n======== SCHEDULER REGRESSION TESTS ========\n");
     sched_test_pass = 0;
@@ -311,6 +314,9 @@ void run_sched_tests(void)
     sync_mutex_test();
     rt_preempt_cfs_test();
     rt_rr_rotation_test();
+    waitq_single_wakeup_test();
+    waitq_broadcast_test();
+    run_pipe_tests();
 
     printf("\n======== SCHED TESTS DONE: %d pass  %d fail ========\n\n",
            sched_test_pass, sched_test_fail);

@@ -23,6 +23,8 @@
 #define ENAMETOOLONG  36
 #define ENOSYS        38
 #define ENOTEMPTY     39
+#define ESPIPE        29
+#define EPIPE         32
 
 /** 内核内部错误码——名字保留历史命名（含数字后缀 ENOx，由于历史原因，现已不代表实际数值）
  * 值统一改写为对应的 * Linux errno 负值，
@@ -54,5 +56,8 @@
 
 #define ENO19_BAD_FD (-EBADF) /* fd 无效/未打开 */
 #define ENO20_NOSYS  (-ENOSYS) /* 未知 syscall 号 */
+
+#define ENO21_ILLEGAL_SEEK (-ESPIPE) /* 对不支持 seek 的 file（管道/设备）做 lseek */
+#define ENO22_BROKEN_PIPE  (-EPIPE)  /* 向读端已全部关闭的管道写入 */
 
 #endif

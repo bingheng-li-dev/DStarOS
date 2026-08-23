@@ -1097,6 +1097,7 @@ file_t *vfs_open(const char *path, int mode)
     file->f_count   = 1;
     file->f_private = NULL;
     file->f_vfsmount = NULL;
+    file->f_kind    = FILE_KIND_VFS;
 
     /* O_APPEND 模式：初始位置设为文件末尾 */
     if (mode & O_APPEND)

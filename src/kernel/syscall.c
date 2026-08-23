@@ -9,6 +9,7 @@
 #include "linux_abi.h"
 #include "kmalloc.h"
 #include "stringops.h"
+#include "pipe.h"
 
 /* read/write 的中转缓冲大小：一页，kmalloc 分配——内核栈只有 1 页 4KB
  * （KERNEL_STACKPSIZE 1），FatFS 调用链本来就深，不能在栈上开这么大的缓冲。 */
@@ -84,9 +85,18 @@ static long sys_write(int fd, const char *ubuf, uint64_t len)
         return ENO1_NOMORE_MEM;
     }
 
-    vfs_lock();
+    /* 管道/设备类 file 会自己阻塞（自带锁或 waitq），不能持 vfs_big_lock 睡——
+     * 否则此后任何进程碰任何文件 syscall 都会卡死在同一把锁上 */
+    bool need_lock = vfs_file_needs_lock(f);
+    if (need_lock)
+    {
+        vfs_lock();
+    }
     long ret = do_write_locked(f, ubuf, len, kbuf);
-    vfs_unlock();
+    if (need_lock)
+    {
+        vfs_unlock();
+    }
 
     kfree(kbuf);
     return ret;
@@ -106,9 +116,16 @@ static long sys_read(int fd, char *ubuf, uint64_t len)
         return ENO1_NOMORE_MEM;
     }
 
-    vfs_lock();
+    bool need_lock = vfs_file_needs_lock(f);
+    if (need_lock)
+    {
+        vfs_lock();
+    }
     long ret = do_read_locked(f, ubuf, len, kbuf);
-    vfs_unlock();
+    if (need_lock)
+    {
+        vfs_unlock();
+    }
 
     kfree(kbuf);
     return ret;
@@ -151,7 +168,11 @@ static long sys_writev(int fd, const struct iovec *uiov, int iovcnt)
     }
 
     long total = 0;
-    vfs_lock();
+    bool need_lock = vfs_file_needs_lock(f);
+    if (need_lock)
+    {
+        vfs_lock();
+    }
     for (int i = 0; i < iovcnt; i++)
     {
         if (kiov[i].iov_len == 0)
@@ -173,7 +194,10 @@ static long sys_writev(int fd, const struct iovec *uiov, int iovcnt)
             break;
         }
     }
-    vfs_unlock();
+    if (need_lock)
+    {
+        vfs_unlock();
+    }
 
     kfree(kbuf);
     kfree(kiov);
@@ -217,7 +241,11 @@ static long sys_readv(int fd, const struct iovec *uiov, int iovcnt)
     }
 
     long total = 0;
-    vfs_lock();
+    bool need_lock = vfs_file_needs_lock(f);
+    if (need_lock)
+    {
+        vfs_lock();
+    }
     for (int i = 0; i < iovcnt; i++)
     {
         if (kiov[i].iov_len == 0)
@@ -239,7 +267,10 @@ static long sys_readv(int fd, const struct iovec *uiov, int iovcnt)
             break;
         }
     }
-    vfs_unlock();
+    if (need_lock)
+    {
+        vfs_unlock();
+    }
 
     kfree(kbuf);
     kfree(kiov);
@@ -310,6 +341,12 @@ static long sys_lseek(int fd, long offset, int whence)
     {
         return ENO19_BAD_FD;
     }
+    /* 管道/设备没有偏移概念，且 vfs_lseek 的 SEEK_END 会解引用 f_inode——
+     * 管道/设备的 f_inode 为空，真进去会空指针崩溃，必须在壳里挡住 */
+    if (f->f_kind != FILE_KIND_VFS)
+    {
+        return ENO21_ILLEGAL_SEEK;
+    }
 
     vfs_lock();
     off_t ret = vfs_lseek(f, (off_t)offset, whence);
@@ -338,6 +375,27 @@ static void stat_to_linux(const stat_t *ks, struct linux_stat *ls)
     ls->st_blocks  = ((int64_t)ks->st_size + 511) / 512;
 }
 
+/**
+ * @brief 给管道/console 这类没有 f_inode 的 file 合成一份 stat_t
+ * @details 只在调用方已确认 `f->f_kind != FILE_KIND_VFS` 时调用——真实 VFS 文件
+ *   走 vfs_fstat（有真 inode）。管道填 S_IFIFO|0600、console 填 S_IFCHR|0620，
+ *   st_size 恒为 0（管道无固定大小概念，console 同理）。
+ */
+static int fill_stat_nonvfs(file_t *f, stat_t *kst)
+{
+    memset(kst, 0, sizeof(*kst));
+    kst->st_nlink = 1;
+    if (f->f_kind == FILE_KIND_PIPE)
+    {
+        kst->st_mode = S_IFIFO | 0600;
+    }
+    else /* FILE_KIND_DEVICE */
+    {
+        kst->st_mode = S_IFCHR | 0620;
+    }
+    return ENO0_NO_ERROR;
+}
+
 static long sys_fstat(int fd, struct linux_stat *ustatbuf)
 {
     file_t *f = proc_fd_get(fd);
@@ -347,9 +405,17 @@ static long sys_fstat(int fd, struct linux_stat *ustatbuf)
     }
 
     stat_t kst;
-    vfs_lock();
-    int ret = vfs_fstat(f, &kst);
-    vfs_unlock();
+    int ret;
+    if (f->f_kind == FILE_KIND_VFS)
+    {
+        vfs_lock();
+        ret = vfs_fstat(f, &kst);
+        vfs_unlock();
+    }
+    else
+    {
+        ret = fill_stat_nonvfs(f, &kst);
+    }
     if (ret != ENO0_NO_ERROR)
     {
         return ret;
@@ -389,9 +455,16 @@ static long sys_newfstatat(int dirfd, const char *upath, struct linux_stat *usta
         {
             return ENO19_BAD_FD;
         }
-        vfs_lock();
-        ret = vfs_fstat(f, &kst);
-        vfs_unlock();
+        if (f->f_kind == FILE_KIND_VFS)
+        {
+            vfs_lock();
+            ret = vfs_fstat(f, &kst);
+            vfs_unlock();
+        }
+        else
+        {
+            ret = fill_stat_nonvfs(f, &kst);
+        }
     }
     else
     {
@@ -611,6 +684,72 @@ static long sys_close(int fd)
     return proc_fd_close(fd);
 }
 
+/**
+ * @brief pipe2(pipefd, flags)：创建一对匿名管道 fd，`pipefd[0]` 读端、`pipefd[1]` 写端
+ * @note flags 白名单：只接受 `O_CLOEXEC | O_NONBLOCK`，其余一律 `-EINVAL`——
+ *   与 `sys_fcntl` 的 `F_SETFL` 只放行两个 flag 的处理保持一致的风格。
+ */
+static long sys_pipe2(int *ufd, int flags)
+{
+    if (flags & ~(O_CLOEXEC | O_NONBLOCK))
+    {
+        return ENO6_INVAL_PARAM;
+    }
+
+    file_t *rf = NULL;
+    file_t *wf = NULL;
+    int ret = pipe_alloc(&rf, &wf);
+    if (ret != ENO0_NO_ERROR)
+    {
+        return ret;
+    }
+
+    if (flags & O_NONBLOCK)
+    {
+        rf->f_mode |= O_NONBLOCK;
+        wf->f_mode |= O_NONBLOCK;
+    }
+
+    int fd0 = proc_fd_alloc();
+    if (fd0 < 0)
+    {
+        vfs_close(rf);
+        vfs_close(wf);
+        return ENO18_TOO_MANY_FILES;
+    }
+    proc_fd_install(fd0, rf);
+    if (flags & O_CLOEXEC)
+    {
+        proc_fd_set_flags(fd0, FD_CLOEXEC);
+    }
+
+    /* fd0 必须先装好才能要第二个 fd——proc_fd_alloc() 是"找最小空闲槽"，装之前
+     * 槽位还是空的，连续调两次会拿到同一个 fd 号，两个 file 装进同一个槽，
+     * 写端指针直接泄漏 */
+    int fd1 = proc_fd_alloc();
+    if (fd1 < 0)
+    {
+        proc_fd_close(fd0); /* 连带关掉已装入的 rf */
+        vfs_close(wf);      /* wf 还没装进任何 fd，直接关 */
+        return ENO18_TOO_MANY_FILES;
+    }
+    proc_fd_install(fd1, wf);
+    if (flags & O_CLOEXEC)
+    {
+        proc_fd_set_flags(fd1, FD_CLOEXEC);
+    }
+
+    int fds[2] = {fd0, fd1};
+    if (copy_to_user(ufd, fds, sizeof(fds)) != 0)
+    {
+        proc_fd_close(fd0);
+        proc_fd_close(fd1);
+        return ENO8_NULL_POINTER;
+    }
+
+    return 0;
+}
+
 /* 把 f 复制到 >= from 的最小空闲 fd（dup / fcntl F_DUPFD 共用）。
  * cloexec 为 true 时给新 fd 置上 FD_CLOEXEC（F_DUPFD_CLOEXEC 用）。 */
 static long dup_fd_from(file_t *f, int from, bool cloexec)
@@ -778,6 +917,8 @@ long syscall_dispatch(intstkf_t *sp)
                                (struct linux_stat *)sp->x12_a2, (int)sp->x13_a3);
     case __NR_close:
         return sys_close((int)sp->x10_a0);
+    case __NR_pipe2:
+        return sys_pipe2((int *)sp->x10_a0, (int)sp->x11_a1);
     case __NR_mkdirat:
         return sys_mkdirat((int)sp->x10_a0, (const char *)sp->x11_a1, (int)sp->x12_a2);
     case __NR_unlinkat:

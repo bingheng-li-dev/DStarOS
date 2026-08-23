@@ -125,6 +125,7 @@ file_t *console_open_file(void)
     f->f_count = 1;
     f->f_op = &console_fops;
     f->f_mode = O_RDWR;
+    f->f_kind = FILE_KIND_DEVICE;
 
     return f;
 }

@@ -112,3 +112,40 @@ void sem_up(ossem_t *sem)
     }
     spinlock_release(&(sem->lock));
 }
+
+void waitq_init(waitq_t *wq)
+{
+    INIT_LIST_HEAD(&(wq->task_list));
+}
+
+void waitq_prepare(waitq_t *wq)
+{
+    pcb_t *tsk = proc_get_current();
+
+    list_add_tail(&(tsk->proc_wait_linker), &(wq->task_list));
+    /* 必须在调用者放掉条件锁之前完成，理由与 sem_down 里的同名注释一致：
+     * "放锁"到"sleep() 内部赋值状态"之间若有窗口，另一个 hart 的
+     * waitq_wake_all() 可能在窗口期把本任务唤醒成 RUNNING，随后被这里
+     * 覆写回 UNINTERRUPTIBLE，唤醒就此丢失、任务永远睡死。 */
+    tsk->proc_state = UNINTERRUPTIBLE;
+}
+
+void waitq_wake_all(waitq_t *wq)
+{
+    /* 先整体摘链到本地临时头，再逐个唤醒：wakeup() 之后任务可能立刻在另一个
+     * hart 上跑起来并重新挂链（比如再次阻塞在同一个 wq 上），若边遍历 wq
+     * 边唤醒，遍历用的 next 指针可能已被那次重新挂链改写。摘到本地链表后
+     * wq 已清空，重新挂入不会与本次遍历冲突。 */
+    struct list_head tmp;
+    INIT_LIST_HEAD(&tmp);
+    list_splice(&(wq->task_list), &tmp);
+    INIT_LIST_HEAD(&(wq->task_list));
+
+    while (!list_empty(&tmp))
+    {
+        struct list_head *node = tmp.next;
+        pcb_t *proc = getContainer(node, pcb_t, proc_wait_linker);
+        list_del(node);
+        wakeup(proc);
+    }
+}

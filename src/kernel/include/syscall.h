@@ -15,6 +15,7 @@
 #define __NR_chdir       49
 #define __NR_openat      56
 #define __NR_close       57
+#define __NR_pipe2       59
 #define __NR_getdents64  61
 #define __NR_lseek       62
 #define __NR_read        63

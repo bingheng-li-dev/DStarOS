@@ -72,6 +72,13 @@
  * 串口应看到 "=== filetest done: N pass  0 fail ==="。置 1 时不跑 exectest/默认用户程序。 */
 #define DEBUG_FILE_TEST 0
 
+/* Phase 4 管道 syscall 验证：置 1 时 init fork 一个 user/pipetest.c 编译出的用户程序，
+ * 端到端触发 pipe2/read/write/close/dup/fcntl(F_SETFL)/lseek/fstat，覆盖 EOF/EPIPE/
+ * EAGAIN/ESPIPE 语义、环形缓冲跨边界、阻塞读写被唤醒、dup 后引用计数、父子管道通信、
+ * 多写者原子性、双向 SMP 压测。串口应看到 "=== pipetest done: N pass  0 fail ==="。
+ * 置 1 时不跑 exectest/filetest/默认用户程序。 */
+#define DEBUG_PIPE_TEST 0
+
 #define DEBUG_TRACK_LINE() printf("DEBUG_TRACK_LINE: %s:%d\n", __FILE__, __LINE__)
 
 #endif /* DEBUG */

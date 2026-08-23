@@ -723,7 +723,7 @@ static void run_user_program(const unsigned char *elf, unsigned long elf_len)
     enter_user_mode(entry, USER_STACK_TOP);
 }
 
-#if !DEBUG_EXEC_TEST && !DEBUG_FILE_TEST
+#if !DEBUG_EXEC_TEST && !DEBUG_FILE_TEST && !DEBUG_PIPE_TEST
 static void run_first_user_program(void)
 {
     run_user_program(user_elf, user_elf_len);
@@ -772,6 +772,15 @@ static void run_filetest_program(void)
     extern const unsigned char user_filetest_elf[];
     extern const unsigned long user_filetest_elf_len;
     run_user_program(user_filetest_elf, user_filetest_elf_len);
+}
+#endif
+
+#if DEBUG_PIPE_TEST
+static void run_pipetest_program(void)
+{
+    extern const unsigned char user_pipetest_elf[];
+    extern const unsigned long user_pipetest_elf_len;
+    run_user_program(user_pipetest_elf, user_pipetest_elf_len);
 }
 #endif
 
@@ -830,6 +839,10 @@ static int16_t init(void)
      * 用例要在根目录列表里看到它），再跑 filetest（不跑默认用户程序）*/
     seed_exec_target();
     int16_t pid = create_kernel_thread_by_fork((void *)run_filetest_program, NULL, 0);
+#elif DEBUG_PIPE_TEST
+    /* 验证 Phase 4 的管道 syscall：pipetest 不依赖 /hello（不做 execve），
+     * 不需要 seed_exec_target，直接跑（不跑 exectest/filetest/默认用户程序）*/
+    int16_t pid = create_kernel_thread_by_fork((void *)run_pipetest_program, NULL, 0);
 #else
     int16_t pid = create_kernel_thread_by_fork((void *)run_first_user_program, NULL, 0);
 #endif
@@ -1080,9 +1093,16 @@ int proc_fd_close(int fd)
 
     pcb_t *cur = proc_get_current();
     file_t *f = cur->proc_fds[fd];
-    vfs_lock();
+    bool need_lock = vfs_file_needs_lock(f);
+    if (need_lock)
+    {
+        vfs_lock();
+    }
     int ret = vfs_close(f);
-    vfs_unlock();
+    if (need_lock)
+    {
+        vfs_unlock();
+    }
     cur->proc_fds[fd] = NULL;
     cur->proc_fd_flags[fd] = 0;
 
@@ -1128,9 +1148,16 @@ void proc_fd_close_all(pcb_t *p)
     {
         if (p->proc_fds[i])
         {
-            vfs_lock();
+            bool need_lock = vfs_file_needs_lock(p->proc_fds[i]);
+            if (need_lock)
+            {
+                vfs_lock();
+            }
             vfs_close(p->proc_fds[i]);
-            vfs_unlock();
+            if (need_lock)
+            {
+                vfs_unlock();
+            }
         }
         p->proc_fds[i] = NULL;
         p->proc_fd_flags[i] = 0;
@@ -1147,9 +1174,16 @@ void proc_fd_close_on_exec(pcb_t *p)
     {
         if (p->proc_fds[i] && (p->proc_fd_flags[i] & FD_CLOEXEC))
         {
-            vfs_lock();
+            bool need_lock = vfs_file_needs_lock(p->proc_fds[i]);
+            if (need_lock)
+            {
+                vfs_lock();
+            }
             vfs_close(p->proc_fds[i]);
-            vfs_unlock();
+            if (need_lock)
+            {
+                vfs_unlock();
+            }
             p->proc_fds[i] = NULL;
             p->proc_fd_flags[i] = 0;
         }
