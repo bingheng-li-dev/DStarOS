@@ -1,16 +1,15 @@
 /**
  * @file pipe_test.c
- * @brief 管道核心读写逻辑回归测试（Phase4 Step 3/4/6：pipe_read/pipe_write/
- *   pipe_alloc/pipe_release/proc_fd_close_on_exec）
+ * @brief 管道核心读写逻辑回归测试（pipe_read/pipe_write/pipe_alloc/pipe_release/
+ *   proc_fd_close_on_exec）
  *
- * @details 由 run_sched_tests()（sched_test.c）调用。前五条用例（Step 3 阶段
- *   写下）手工构造 pipe_t + 伪造的读端 file_t，绕过分配/写入路径，只验证
- *   pipe_read 本身；其余用例（Step 4）改用真实的 pipe_alloc() 端到端验证
- *   pipe_write、原子写、环形缓冲跨边界、阻塞/唤醒、以及 pipe_release 的
- *   EOF/EPIPE 语义；最后一条（Step 6）验证 proc_fd_close_on_exec 对管道 fd
- *   的处理——这是本阶段唯一还没有真实 syscall 触发的路径（sys_pipe2 是
- *   Step 5 才接，`sys_lseek`/`sys_fstat` 等周边适配是 Step 6 才做），
- *   内核态直接调用是当前能做到的最贴近真实使用的验证方式。
+ * @details 由 run_sched_tests()（sched_test.c）调用。前五条用例手工构造
+ *   pipe_t + 伪造的读端 file_t，绕过分配/写入路径，只验证 pipe_read 本身；
+ *   其余用例改用真实的 pipe_alloc() 端到端验证 pipe_write、原子写、环形缓冲
+ *   跨边界、阻塞/唤醒、以及 pipe_release 的 EOF/EPIPE 语义；最后一条验证
+ *   proc_fd_close_on_exec 对管道 fd 的处理——真实 syscall（sys_pipe2 及
+ *   `sys_lseek`/`sys_fstat` 等周边适配）另有覆盖，这里内核态直接调用是
+ *   最贴近真实使用的验证方式。
  */
 
 #include "console.h"
@@ -196,7 +195,7 @@ static void pipe_read_block_wakeup_test(void)
     }
     sched_test_check("reader blocked on empty pipe (queued on wq_read)", blocked);
 
-    /* 模拟写者直接灌数据（pipe_write 是 Step 4 才有，这里手工操作字段）+ 唤醒 */
+    /* 模拟写者直接灌数据（这里手工操作字段，不经 pipe_write）+ 唤醒 */
     const char *msg = "wakeup!";
     size_t msglen = strlen(msg);
     spinlock_acquire(&pipe_block_p.lock);
@@ -483,7 +482,7 @@ static void pipe_release_read_then_write_epipe_test(void)
 }
 
 /* ============================================================
- * 测试十三（Step 6）：proc_fd_close_on_exec 只关带 FD_CLOEXEC 的管道 fd，
+ * 测试十三：proc_fd_close_on_exec 只关带 FD_CLOEXEC 的管道 fd，
  * 且底层 pipe_t 引用计数正确联动——对端能感知到关闭
  * ============================================================ */
 static void pipe_close_on_exec_test(void)

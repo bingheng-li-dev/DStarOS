@@ -1,4 +1,4 @@
-/* user/filetest.c —— 验证 Phase 3（Step 3-7）的 POSIX 文件 syscall
+/* user/filetest.c —— 验证 POSIX 文件 syscall
  *
  * 这是 openat/lseek/readv/writev/fstat/newfstatat/getdents64/mkdirat/unlinkat/
  * renameat/chdir/getcwd/ftruncate/fcntl 这一整批 syscall 的**唯一真实验收手段**：
@@ -356,7 +356,7 @@ void _start(void)
     char dbuf[1024];
     struct linux_stat st;
 
-    puts_fd(1, "\n=== filetest: Phase 3 file syscalls ===\n");
+    puts_fd(1, "\n=== filetest: POSIX file syscalls ===\n");
 
     /* ---------- openat / write / lseek / read ---------- */
     long fd = sys_openat(AT_FDCWD, "/filetest.txt", O_CREAT | O_RDWR, 0644);

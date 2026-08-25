@@ -1,6 +1,7 @@
 #include "fs.h"
 #include "vfs.h"
 #include "fatfs_vfs.h"
+#include "devfs.h"
 #include "errorcode.h"
 #include "console.h"
 
@@ -27,4 +28,20 @@ void fs_init(void)
     }
 
     printf("fs_init: root filesystem mounted (fatfs/ramdisk)\n");
+
+    /* 4. devfs：/dev 挂载点本身必须先在根文件系统（FAT）上建好目录，
+     * vfs_mount() 对非 "/" 目标要求挂载点已存在且是目录（见 vfs.c）。 */
+    devfs_register();
+    ret = vfs_mkdir("/dev", 0755);
+    if (ret != ENO0_NO_ERROR)
+    {
+        printf("fs_init: mkdir /dev failed, err=%d\n", ret);
+        return;
+    }
+    ret = vfs_mount("/dev", "devfs", NULL);
+    if (ret != ENO0_NO_ERROR)
+    {
+        printf("fs_init: devfs mount failed, err=%d\n", ret);
+        return;
+    }
 }

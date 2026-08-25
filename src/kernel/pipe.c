@@ -65,7 +65,7 @@ ssize_t pipe_write(file_t *file, const void *buf, size_t len)
     if (p->readers == 0)
     {
         spinlock_release(&p->lock);
-        return ENO22_BROKEN_PIPE; /* TODO Phase 7: 同时投 SIGPIPE */
+        return ENO22_BROKEN_PIPE; /* TODO：信号机制落地后同时投 SIGPIPE */
     }
 
     /* <= PIPE_BUF 的写要原子：等够整块所需空间再一次性写入；

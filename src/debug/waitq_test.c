@@ -2,11 +2,10 @@
  * @file waitq_test.c
  * @brief 等待队列（waitq_t）回归测试：prepare 阻塞睡眠 / wake_all 唤醒、广播不丢
  *
- * @details 由 run_sched_tests()（sched_test.c）调用。为 Phase 4 管道打地基——
- *   waitq_t 是 pipe_read/pipe_write 阻塞语义的唯一唤醒原语，必须在写 pipe.c
- *   之前独立验证过，否则后续任何"挂死"都无法判断是 waitq 本身的问题还是
- *   管道自己的逻辑错误。套路与 sync_test.c 的 sem_down/sem_up 测试一致：
- *   init 作为驱动任务，通过 sched_schedule 主动让出等 worker 跑到阻塞点。
+ * @details 由 run_sched_tests()（sched_test.c）调用。waitq_t 是 pipe_read/pipe_write
+ *   阻塞语义的唯一唤醒原语，必须独立验证过，否则后续任何"挂死"都无法判断是
+ *   waitq 本身的问题还是管道自己的逻辑错误。套路与 sync_test.c 的 sem_down/sem_up
+ *   测试一致：init 作为驱动任务，通过 sched_schedule 主动让出等 worker 跑到阻塞点。
  */
 
 #include "console.h"

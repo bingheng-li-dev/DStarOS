@@ -454,7 +454,18 @@ void vmm_mm_destroy(mm_t *mm)
  */
 void vmm_page_fault_handler(virAddr_t badva, int fault_type)
 {
-    mm_t *mm = proc_get_current()->proc_mm;
+    pcb_t *curr = proc_get_current();
+    /* curr 为 NULL 只应发生在本 hart 尚未跑到 proc_init() 的极早期窗口——真正的缺页
+     * 不该落到这里，落到这里说明有别的地方在 current_proc 建立之前触发了一次访存异常。
+     * 不加这层判断的话，NULL->proc_mm 会在处理这次异常的过程中再触发一次异常，
+     * 陷入嵌套故障；显式判断能把它变成一条可诊断的 panic，而不是静默死循环。 */
+    if (!curr)
+    {
+        printf("vmm: page fault with no current proc (va=0x%lx)\n", badva);
+        panic("kernel page fault");
+    }
+
+    mm_t *mm = curr->proc_mm;
     if (!mm)
     {
         printf("vmm: page fault with no mm (va=0x%lx)\n", badva);

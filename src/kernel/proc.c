@@ -723,7 +723,7 @@ static void run_user_program(const unsigned char *elf, unsigned long elf_len)
     enter_user_mode(entry, USER_STACK_TOP);
 }
 
-#if !DEBUG_EXEC_TEST && !DEBUG_FILE_TEST && !DEBUG_PIPE_TEST
+#if !DEBUG_EXEC_TEST && !DEBUG_FILE_TEST && !DEBUG_PIPE_TEST && !DEBUG_TTY_TEST
 static void run_first_user_program(void)
 {
     run_user_program(user_elf, user_elf_len);
@@ -784,6 +784,15 @@ static void run_pipetest_program(void)
 }
 #endif
 
+#if DEBUG_TTY_TEST
+static void run_ttytest_program(void)
+{
+    extern const unsigned char user_ttytest_elf[];
+    extern const unsigned long user_ttytest_elf_len;
+    run_user_program(user_ttytest_elf, user_ttytest_elf_len);
+}
+#endif
+
 static int16_t init(void)
 {
     printf("%s::Hello! I'm the init process!!\n", __FUNCTION__);
@@ -831,18 +840,22 @@ static int16_t init(void)
 #endif
 
 #if DEBUG_EXEC_TEST
-    /* 验证 2C dup + 2D execve：先在 ramdisk 塞好 /hello，再跑 exectest（不跑默认用户程序）*/
+    /* 验证 dup + execve：先在 ramdisk 塞好 /hello，再跑 exectest（不跑默认用户程序）*/
     seed_exec_target();
     int16_t pid = create_kernel_thread_by_fork((void *)run_exectest_program, NULL, 0);
 #elif DEBUG_FILE_TEST
-    /* 验证 Phase 3 的 POSIX 文件 syscall：同样先塞好 /hello（filetest 的 getdents64
+    /* 验证 POSIX 文件 syscall：同样先塞好 /hello（filetest 的 getdents64
      * 用例要在根目录列表里看到它），再跑 filetest（不跑默认用户程序）*/
     seed_exec_target();
     int16_t pid = create_kernel_thread_by_fork((void *)run_filetest_program, NULL, 0);
 #elif DEBUG_PIPE_TEST
-    /* 验证 Phase 4 的管道 syscall：pipetest 不依赖 /hello（不做 execve），
+    /* 验证管道 syscall：pipetest 不依赖 /hello（不做 execve），
      * 不需要 seed_exec_target，直接跑（不跑 exectest/filetest/默认用户程序）*/
     int16_t pid = create_kernel_thread_by_fork((void *)run_pipetest_program, NULL, 0);
+#elif DEBUG_TTY_TEST
+    /* 验证 TTY 行规范层：ttytest 不依赖 /hello，不需要 seed_exec_target，
+     * 直接跑（不跑 exectest/filetest/pipetest/默认用户程序）*/
+    int16_t pid = create_kernel_thread_by_fork((void *)run_ttytest_program, NULL, 0);
 #else
     int16_t pid = create_kernel_thread_by_fork((void *)run_first_user_program, NULL, 0);
 #endif

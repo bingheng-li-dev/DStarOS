@@ -21,6 +21,7 @@
 #define EMFILE        24
 #define EROFS         30
 #define ENAMETOOLONG  36
+#define ENOTTY        25
 #define ENOSYS        38
 #define ENOTEMPTY     39
 #define ESPIPE        29
@@ -59,5 +60,6 @@
 
 #define ENO21_ILLEGAL_SEEK (-ESPIPE) /* 对不支持 seek 的 file（管道/设备）做 lseek */
 #define ENO22_BROKEN_PIPE  (-EPIPE)  /* 向读端已全部关闭的管道写入 */
+#define ENO23_NOT_TTY      (-ENOTTY) /* 对非 TTY 的 fd 调 ioctl(TCGETS/...) */
 
 #endif

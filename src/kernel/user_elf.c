@@ -1,9 +1,8 @@
 /**
- * @brief 里程碑 1B 嵌入式测试用户程序：完整 ELF64 可执行文件（已 strip 符号表）
+ * @brief 嵌入式测试用户程序：完整 ELF64 可执行文件（已 strip 符号表）
  * @details 由 user/hello.c 经 user/Makefile + user/user.ld 正式编译链接产出，
  *   交由 elf_load() 解析 PT_LOAD 段并映射。程序行为：write(1, "hi\n", 3); exit(0)。
- *   重新生成方法：进入 user/ 目录执行 make，再 objcopy --strip-all 后转字节数组
- *   （见 doc/Phase1-U态基础设施开发计划.md 里程碑 1B Step 12）。
+ *   重新生成方法：进入 user/ 目录执行 make，再 objcopy --strip-all 后转字节数组。
  */
 const unsigned char user_elf[] = {
 0x7f, 0x45, 0x4c, 0x46, 0x02, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,

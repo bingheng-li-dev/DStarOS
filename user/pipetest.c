@@ -1,4 +1,4 @@
-/* user/pipetest.c —— 验证 Phase 4 的管道（pipe2/pipe_read/pipe_write/pipe_release）
+/* user/pipetest.c —— 验证管道（pipe2/pipe_read/pipe_write/pipe_release）
  *
  * pipe2/pipe_read/pipe_write 这批 syscall 的**唯一真实验收手段**：内核态自测
  * （src/debug/pipe_test.c）手工构造 pipe_t 绕开了 pipe2 本身与 fd 表整合的部分，
@@ -6,7 +6,7 @@
  * 验证 pipe2 → fd 表 → 读写 → 关闭 这条完整链路，以及父子共享 fd 表之后管道的
  * 引用计数语义。不引入 libc，写法与 filetest.c 一致。
  *
- * 用户态没有 sched_yield/nanosleep 之类的 syscall（Phase 8 才有），验证"确实阻塞
+ * 用户态没有 sched_yield/nanosleep 之类的 syscall（目前尚未实现），验证"确实阻塞
  * 过又被唤醒"的用例（阻塞读/阻塞写）靠 busy_delay() 忙等制造时间窗口，再用
  * "子进程最终确实拿到了数据/确实写完了"这个功能性结果间接证明——阻塞/唤醒机制
  * 本身的正确性已经在 pipe_test.c 里用轮询 wq_read/wq_write.task_list 精确验证过，
@@ -15,7 +15,7 @@
  * 管道用错的表现是挂死而不是崩溃：凡是可能阻塞的用例，对端都不依赖"发起阻塞的
  * 一方自己超时退出"，而是由不阻塞的一方在合理时间内完成动作后 wait4 收割，
  * 如果内核逻辑错误导致真正的死锁，这个程序会挂在 wait4 上，QEMU 侧表现为
- * 不再输出——出现这种情况直接说明 Step 3/4 的阻塞/唤醒逻辑有回归。
+ * 不再输出——出现这种情况直接说明阻塞/唤醒逻辑有回归。
  */
 
 #define __NR_dup     23
@@ -453,7 +453,7 @@ static void test_fstat_fifo(void)
 }
 
 /* ============================================================
- * 用例 11：父子传一行字符串（路线图阶段 4 的正式验收项）
+ * 用例 11：父子传一行字符串
  * ============================================================ */
 static void test_parent_child_message(void)
 {
@@ -672,7 +672,7 @@ static void test_smp_stress(void)
 
 void _start(void)
 {
-    puts_fd(1, "\n=== pipetest: Phase 4 pipe syscalls ===\n");
+    puts_fd(1, "\n=== pipetest: pipe syscalls ===\n");
 
     test_pipe2_basic();
     test_write_read_roundtrip();

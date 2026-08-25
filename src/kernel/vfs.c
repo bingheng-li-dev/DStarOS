@@ -600,6 +600,37 @@ void vfs_unlock(void)
  * ============================================================ */
 
 /**
+ * @brief 若 d 是某文件系统的挂载点，穿越进被挂载文件系统的根；否则原样返回
+ * @param[in] d 待检查的目录项，持有一个引用计数
+ * @return 穿越后的目录项（可能是被挂载文件系统的根，也可能是形参 d 本身），
+ *   同样持有一个引用计数——调用者不需要关心是否发生了穿越，统一按"消费掉传入的
+ *   引用、拿到一个新的引用"来处理
+ * @note vfs_lookup() 里两处调用：循环内部（准备处理下一个路径分量之前）、
+ *   以及循环正常退出、path 恰好在这个分量结束时（比如解析 "/dev" 而不是
+ *   "/dev/console"）——后一处如果漏掉，路径恰好等于某个挂载点时，返回的会是
+ *   宿主文件系统那个空目录，而不是真正挂载上去的文件系统根目录；多分量路径
+ *   之所以不受影响，是因为下一个分量会在循环顶部触发这个检查，只有"路径正好
+ *   在挂载点本身结束"这一种情况会被漏掉。
+ */
+static dentry_t *cross_mountpoints(dentry_t *d)
+{
+    while (d->d_mounted)
+    {
+        vfsmount_t *mnt = d->d_mounted;
+        if (!mnt->mnt_sb || !mnt->mnt_sb->s_root_inode ||
+            !mnt->mnt_sb->s_root_inode->i_dentry)
+        {
+            break;
+        }
+        dentry_t *mnt_root = mnt->mnt_sb->s_root_inode->i_dentry;
+        dentry_get(mnt_root);
+        dentry_put(d);
+        d = mnt_root;
+    }
+    return d;
+}
+
+/**
  * @brief 将路径字符串解析为对应的目录项
  * @param[in] path 要解析的路径字符串（绝对或相对）
  * @return 持有一个引用计数的目录项；路径不存在或出错返回 NULL
@@ -610,6 +641,7 @@ void vfs_unlock(void)
  *     - 进入节点前检查 d_mounted，穿越到被挂载文件系统的根；
  *     - "." 保持不动；".." 向上，若已是文件系统局部根则反向穿越挂载点；
  *     - 普通分量先查内存缓存（dentry_lookup），未命中则调 i_op->lookup。
+ *  -# 循环结束（分量耗尽）后再做一次同样的穿越检查——见 cross_mountpoints() 的说明。
  */
 dentry_t *vfs_lookup(const char *path)
 {
@@ -673,19 +705,7 @@ dentry_t *vfs_lookup(const char *path)
         }
 
         /* 穿越挂载点：若当前节点被某文件系统挂载，则进入被挂载文件系统的根 */
-        while (cur->d_mounted)
-        {
-            vfsmount_t *mnt = cur->d_mounted;
-            if (!mnt->mnt_sb || !mnt->mnt_sb->s_root_inode ||
-                !mnt->mnt_sb->s_root_inode->i_dentry)
-            {
-                break;
-            }
-            dentry_t *mnt_root = mnt->mnt_sb->s_root_inode->i_dentry;
-            dentry_get(mnt_root);
-            dentry_put(cur);
-            cur = mnt_root;
-        }
+        cur = cross_mountpoints(cur);
 
         /* 处理 "." 分量（保持不动）*/
         if (comp[0] == '.' && comp[1] == '\0')
@@ -764,7 +784,11 @@ dentry_t *vfs_lookup(const char *path)
         cur = next;
     }
 
-    return cur;
+    /* 路径分量耗尽时也要做一次穿越检查——path 恰好等于某个挂载点本身时
+     * （比如 "/dev"），循环顶部的检查只会在"还有下一个分量要处理"时触发，
+     * 这里补上路径正好在挂载点结束的情况，否则返回的是宿主文件系统那个
+     * 空目录，不是真正挂载上去的文件系统根目录。 */
+    return cross_mountpoints(cur);
 }
 
 /* ============================================================

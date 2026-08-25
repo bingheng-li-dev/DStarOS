@@ -12,7 +12,6 @@
 #include "trap.h"
 #include "vmm.h"
 
-/* 前向声明，避免形成循环包含 */
 struct dentry;
 typedef struct dentry dentry_t;
 struct file;

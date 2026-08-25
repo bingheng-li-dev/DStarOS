@@ -1,6 +1,6 @@
 /* user/fork_wait.c —— U 态 fork/exit/wait4/COW 测试程序
- * 验证 Phase 2B Step 6 的 syscall 接线（sys_clone/sys_wait4，此前只有内核线程测试覆盖过
- * do_fork/do_wait，从没有真正的用户进程调用过这两个 syscall），以及 vmm.c 里的写时复制。
+ * 验证 sys_clone/sys_wait4 的 syscall 接线（此前只有内核线程测试覆盖过 do_fork/do_wait，
+ * 从没有真正的用户进程调用过这两个 syscall），以及 vmm.c 里的写时复制。
  * 父进程 clone 出子进程；子进程改写共享的全局变量后 write+exit(42)；父进程 wait4 收子进程
  * 退出码，检查自己看到的全局变量是否仍是原值（验证父子地址空间已经拆分、不是还在共享），
  * 再自己写一次同一变量（验证子进程退出后引用计数应已降到 1，走的是原地补写权限而不是

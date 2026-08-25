@@ -1,4 +1,4 @@
-/* user/exectest.c —— 验证 Phase 2C 的 dup 与 2D 的 execve
+/* user/exectest.c —— 验证 dup 与 execve
  *
  * 覆盖两个此前没被真实用户进程触发过的缺口：
  *   1) dup(1) 拿到新 fd，向新 fd 写 → 证明 fd 表 dup 生效（新老 fd 指向同一 console file）；

@@ -1,6 +1,5 @@
 /**
- * @brief Phase 2B Step 6 + COW 验证用：U 态 fork/exit/wait4/写时复制测试程序
- *   （完整 ELF64，已 strip 符号表）
+ * @brief U 态 fork/exit/wait4/写时复制测试程序（完整 ELF64，已 strip 符号表）
  * @details 由 user/fork_wait.c 经 user/Makefile + user/user.ld 编译链接产出，交由 elf_load()
  *   解析 PT_LOAD 段并映射。程序行为：clone() 出子进程；子进程改写共享全局变量 shared_val=222，
  *   write("child: hi, wrote 222\n") 后 exit(42)；父进程 wait4(-1, &status, 0, NULL) 收子进程状态，

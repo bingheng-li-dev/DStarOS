@@ -32,6 +32,7 @@
  * getdents64 目录项类型（d_type）
  * ============================================================ */
 #define DT_UNKNOWN  0
+#define DT_CHR      2
 #define DT_DIR      4
 #define DT_REG      8
 
@@ -81,5 +82,74 @@ struct iovec
     void   *iov_base;
     size_t  iov_len;
 };
+
+/* ============================================================
+ * termios / ioctl（asm-generic，riscv64 用的就是这一套）
+ * ============================================================ */
+
+/* ioctl 命令号 */
+#define TCGETS      0x5401
+#define TCSETS      0x5402
+#define TCSETSW     0x5403
+#define TCSETSF     0x5404
+#define TIOCGWINSZ  0x5413
+#define TIOCSWINSZ  0x5414
+
+/* c_iflag */
+#define BRKINT  0x0002
+#define ICRNL   0x0100
+#define IXON    0x0400
+
+/* c_oflag */
+#define OPOST   0x0001
+#define ONLCR   0x0004
+
+/* c_lflag */
+#define ISIG    0x0001
+#define ICANON  0x0002
+#define ECHO    0x0008
+#define ECHOE   0x0010
+#define ECHOK   0x0020
+#define ECHONL  0x0040
+#define IEXTEN  0x8000
+
+/* c_cc 下标 */
+#define VINTR   0
+#define VQUIT   1
+#define VERASE  2
+#define VKILL   3
+#define VEOF    4
+#define VTIME   5
+#define VMIN    6
+#define VSTART  8
+#define VSTOP   9
+#define VSUSP   10
+
+#define NCCS 19  /* struct linux_termios 的 c_cc 长度（不是 musl 的 32） */
+
+/* struct termios（Linux 内核 asm-generic 版，36 字节，字段偏移固定，不可重排）。
+ * musl 的 struct termios 是 60 字节（NCCS=32，尾部还有 __c_ispeed/__c_ospeed）——
+ * 这是 Linux 上的正常行为，内核只按这 36 字节的形状读写，musl 自己截断/补齐，
+ * 不是本内核要对齐 musl 的信号。 */
+struct linux_termios
+{
+    uint32_t c_iflag;
+    uint32_t c_oflag;
+    uint32_t c_cflag;
+    uint32_t c_lflag;
+    uint8_t  c_line;
+    uint8_t  c_cc[NCCS];
+};
+_Static_assert(sizeof(struct linux_termios) == 36, "linux_termios size must match Linux kernel ABI");
+
+/* TIOCGWINSZ / TIOCSWINSZ 用的窗口尺寸，8 字节 */
+struct winsize
+{
+    uint16_t ws_row;
+    uint16_t ws_col;
+    uint16_t ws_xpixel;
+    uint16_t ws_ypixel;
+};
+_Static_assert(sizeof(struct winsize) == 8, "winsize size must match Linux kernel ABI");
 
 #endif

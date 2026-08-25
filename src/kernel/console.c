@@ -2,11 +2,7 @@
 #include "sync.h"
 #include "tinyprintf.h"
 #include "sbi.h"
-#include "vfs.h"
-#include "kmalloc.h"
-#include "stringops.h"
-
-#define UNUSED(x) (void)(x)
+#include "tty.h"
 
 osslock_t ConsoleLock;
 volatile bool panicked = false;
@@ -87,45 +83,11 @@ void panic_impl(const char *func, int line, char *s, ...)
  * console 设备 file（stdin/stdout/stderr 的后端）
  * ============================================================ */
 
-static ssize_t console_write(file_t *f, const void *buf, size_t len)
-{
-    UNUSED(f);
-    spinlock_acquire(&ConsoleLock);
-    for (size_t i = 0; i < len; i++)
-    {
-        sbi_console_putchar(((char *)buf)[i]);
-    }
-    spinlock_release(&ConsoleLock);
-
-    return len;
-}
-
-/* 阶段 5 的 TTY 输入落地前，读端先返回 EOF */
-static ssize_t console_read(file_t *f, void *buf, size_t len)
-{
-    UNUSED(f);
-    UNUSED(buf);
-    UNUSED(len);
-    return 0;
-}
-
-static file_operations_t console_fops = {
-    .read = console_read,
-    .write = console_write,
-};
-
+/* @deprecated 直接转调 tty_open_file()——真正的读写实现已经搬到 tty.c
+ * （tty_read 能真正阻塞读到输入，不再是恒返回 EOF 的占位）。保留这个名字只是为了
+ * proc_install_stdio() 不用改调用点，下一次大改动时直接把调用点也换成 tty_open_file()，
+ * 这个函数连同 console.h 里的声明一起删掉。 */
 file_t *console_open_file(void)
 {
-    file_t *f = kmalloc(sizeof(file_t));
-    if (f == NULL)
-    {
-        return NULL;
-    }
-    memset(f, 0, sizeof(file_t));
-    f->f_count = 1;
-    f->f_op = &console_fops;
-    f->f_mode = O_RDWR;
-    f->f_kind = FILE_KIND_DEVICE;
-
-    return f;
+    return tty_open_file();
 }

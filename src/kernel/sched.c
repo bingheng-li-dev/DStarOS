@@ -7,8 +7,15 @@
 #include "tick.h"
 #include "cpu.h"
 
-/* 按 proc_wake_tick 升序排列的定时睡眠链表，sched_sleep_ticks()/sched_check_timers() 共用 */
-static struct list_head sleeping_tasks;
+/* 按 proc_wake_tick 升序排列的定时睡眠链表，sched_sleep_ticks()/sched_check_timers() 共用。
+ * 静态用 LIST_HEAD_INIT 而不是留给 sched_init() 运行时 INIT_LIST_HEAD：tick_int_handler()
+ * 里 sched_check_timers() 是无条件调用的，若 timer 中断在 sched_init() 跑到这一行之前先触发
+ * （200 Hz tick 下，hart0 的 fs_init() 挂载/格式化 ramdisk 耗时可能超过一个 tick 周期），
+ * BSS 零初始化的 next/prev 都是 NULL，list_for_each_safe 会立刻解引用 NULL 崩溃——
+ * 这正是 sched_init() 里 RT ready_lists 那条注释警告过的同一类"清零链表头"陷阱，
+ * 只是这次的触发窗口在 sched_init() 自身执行完成之前。静态初始化后 sleeping_tasks
+ * 从链接时刻起就是合法的空链表，不再依赖任何运行时初始化顺序。 */
+static struct list_head sleeping_tasks = LIST_HEAD_INIT(sleeping_tasks);
 static osslock_t sleeping_tasks_lock;
 
 static void   fair_enqueue(pcb_t *p);
@@ -599,6 +606,14 @@ void sched_check_timers(void)
 void sched_task_tick(void)
 {
     pcb_t *curr = proc_get_current();
+    /* 本 hart 尚未执行到 proc_init()（current_proc 还没被 sched_set_current() 设置）
+     * 时，timer 中断可能已经先触发——200 Hz tick 下，hart0 的 fs_init() 挂载/格式化
+     * ramdisk 耗时可能超过一个 tick 周期，使得 trap_init() 打开的定时器中断在
+     * proc_init() 之前就打进来。此时无当前任务可结算，直接跳过。 */
+    if (curr == NULL)
+    {
+        return;
+    }
     curr->proc_sched_class->task_tick(curr);
 }
 
@@ -630,6 +645,13 @@ void sched_set_nice(pcb_t *p, int nice)
 void sched_preempt_if_needed(void)
 {
     pcb_t *curr = proc_get_current();
+    /* cpua.S 的 trap_return 无条件调用本函数，每次 trap 返回前都会走一遍；
+     * 本 hart 尚未跑到 proc_init() 时 curr 为 NULL（同 sched_task_tick()，见那里注释），
+     * 此时没有"当前任务"可言，自然也谈不上要不要抢占，直接跳过。 */
+    if (curr == NULL)
+    {
+        return;
+    }
     if (curr->need_resched)
     {
         sched_schedule();

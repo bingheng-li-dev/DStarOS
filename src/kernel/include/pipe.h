@@ -6,7 +6,6 @@
 #include "types.h"   /* ssize_t, size_t */
 #include "pmm.h"     /* pframe_t, alloc_page, dealloc */
 
-/* 前向声明：完整类型在 vfs.h，这里只需要指针，避免把 vfs.h 拉进来 */
 struct file;
 typedef struct file file_t;
 

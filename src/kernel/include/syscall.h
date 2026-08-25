@@ -8,6 +8,7 @@
 #define __NR_dup         23
 #define __NR_dup3        24
 #define __NR_fcntl       25
+#define __NR_ioctl       29
 #define __NR_mkdirat     34
 #define __NR_unlinkat    35
 #define __NR_renameat    38

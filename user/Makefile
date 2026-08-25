@@ -1,6 +1,6 @@
 # 用户态程序独立构建流水线（不参与内核主 makefile）。
 # 产物 hello.elf 由 elf.c 的 elf_load() 解析加载；嵌入内核的字节数组见
-# src/kernel/user_elf.c，重新生成方法见 doc/Phase1-U态基础设施开发计划.md。
+# src/kernel/user_elf.c（该文件头部注释里有重新生成方法）。
 
 TOOLPATH?=/root/riscv/toolchain-kendryte210/bin
 TOOLPREFIX?=$(TOOLPATH)/riscv64-unknown-elf-
@@ -17,7 +17,7 @@ LDFLAGS := -T $(LDSCRIPT) -static
 
 .PHONY: all clean
 
-all: hello.elf fork_wait.elf exectest.elf filetest.elf pipetest.elf
+all: hello.elf fork_wait.elf exectest.elf filetest.elf pipetest.elf ttytest.elf
 
 hello.elf: hello.c $(LDSCRIPT)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ hello.c
@@ -39,5 +39,9 @@ pipetest.elf: pipetest.c $(LDSCRIPT)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ pipetest.c
 	$(OBJCOPY) --strip-all $@ $@
 
+ttytest.elf: ttytest.c $(LDSCRIPT)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ ttytest.c
+	$(OBJCOPY) --strip-all $@ $@
+
 clean:
-	rm -f hello.elf fork_wait.elf exectest.elf filetest.elf pipetest.elf
+	rm -f hello.elf fork_wait.elf exectest.elf filetest.elf pipetest.elf ttytest.elf

@@ -151,8 +151,8 @@ static void vfs_dir_test(void)
     vfs_close(d);
 
     /* ---- 长文件名（LFN）----
-     * Step 2 把 _USE_LFN 从 0 改成 3，唯一的动机就是"getdents64 一做出来长名就会暴露"：
-     * 8.3 短名方案下这个名字会被截断成 A_VERY~1.TXT。这里是第一次能真正验证 LFN 生效。 */
+     * _USE_LFN 从 0 改成 3，唯一的动机就是"getdents64 一做出来长名就会暴露"：
+     * 8.3 短名方案下这个名字会被截断成 A_VERY~1.TXT。这里验证 LFN 生效。 */
     const char *lname = "a_very_long_filename.txt";
     file_t *lf = vfs_open("/testdir/a_very_long_filename.txt", O_RDWR | O_CREAT);
     check("create long-named file", lf != NULL);

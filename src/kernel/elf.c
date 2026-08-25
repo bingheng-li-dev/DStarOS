@@ -94,7 +94,7 @@ int elf_load(mm_t *mm, const unsigned char *image, uint64_t size, virAddr_t *ent
          * 直接触发 store page fault。项目目前没有"先可写、拷完再改回只读"的
          * 重新映射原语（vmm.c 的 get_pte 未导出），所以暂时统一放宽为可写，
          * 不严格区分 R+X 与 R+W+X 段。代价是用户代码段本身也能被自己改写
-         * （无 W^X 隔离）；这是里程碑 1B 的已知简化，非安全加固场景不需要现在补。 */
+         * （无 W^X 隔离）；这是已知简化，非安全加固场景不需要现在补。 */
         pgprot_t flag = VMP_W;
         if (ph->p_flags & PF_R)
         {

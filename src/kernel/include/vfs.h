@@ -139,16 +139,16 @@ struct dentry
  * vfs_big_lock 是一把全局睡眠信号量，只用来保护 dentry/inode 缓存树与 FatFS 卷
  * 内部状态（FatFS 本身不可重入）；管道/设备类 file 的 read/write 会自己阻塞
  * （自带锁或 waitq），若也被套在 vfs_big_lock 里，"持锁睡眠"会让此后任何进程碰
- * 任何文件 syscall 都卡死在同一把锁上（Phase 4 管道引入前必须先解决）。
+ * 任何文件 syscall 都卡死在同一把锁上。
  * 这不是 Linux 的做法——Linux 没有这样一把全局锁，锁天然按对象分散（pipe 自带
  * mutex、文件是 per-inode），也就不需要这个判据；这里只是给 vfs_big_lock 这个
  * DStarOS 自造的粗粒度简化打的一块补丁。不能用 f_inode==NULL 判断，因为
- * Phase 5 的 /dev/console 会是带 inode 的真 VFS 节点，但 read 同样阻塞。 */
+ * 将来的 /dev/console 会是带 inode 的真 VFS 节点，但 read 同样阻塞。 */
 typedef enum file_kind
 {
     FILE_KIND_VFS = 0,   /* 走 VFS/FatFS 的普通文件与目录：必须持 vfs_big_lock */
     FILE_KIND_PIPE,      /* 管道：自带 pipe->lock，不碰 vfs_big_lock */
-    FILE_KIND_DEVICE,    /* 内核虚构的字符设备（console，Phase 5 的 TTY）*/
+    FILE_KIND_DEVICE,    /* 内核虚构的字符设备（console、TTY）*/
 } file_kind_t;
 
 /* ============================================================

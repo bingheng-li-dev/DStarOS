@@ -53,18 +53,18 @@
 #define DEBUG_VFS_TEST 0
 
 /* U 态 fork/wait4 syscall 验证：置 1 时 init 额外 fork 一个 user/fork_wait.c 编译出的
- * 用户程序（clone 出子进程、子进程 exit(42)、父进程 wait4 收状态），验证 Phase 2B Step 6
- * 的 sys_clone/sys_wait4 syscall 接线。串口应看到 "child: hi" 和
+ * 用户程序（clone 出子进程、子进程 exit(42)、父进程 wait4 收状态），验证
+ * sys_clone/sys_wait4 syscall 接线。串口应看到 "child: hi" 和
  * "parent: reaped pid=<N> exitcode=42"。跟 DEBUG_SCHED_TEST 互不冲突，可同时置 1。 */
 #define DEBUG_FORK_WAIT_TEST 0
 
-/* Phase 2C dup + 2D execve 验证：置 1 时 init 先把嵌入的 hello ELF 写进 ramdisk 的 "/hello"，
+/* dup + execve 验证：置 1 时 init 先把嵌入的 hello ELF 写进 ramdisk 的 "/hello"，
  * 再 fork 一个 user/exectest.c 编译出的用户程序：它 dup(1) 后经新 fd 写、再 clone 出子进程
  * execve("/hello")、父进程 wait4 收割。串口应看到 "exectest: hello via dup fd"（dup 生效）、
  * "hi"（子进程 exec 成 hello）、"exectest: child reaped, done"。置 1 时不跑默认用户程序。 */
 #define DEBUG_EXEC_TEST 1
 
-/* Phase 3 POSIX 文件 syscall 验证：置 1 时 init 先把嵌入的 hello ELF 写进 ramdisk 的
+/* POSIX 文件 syscall 验证：置 1 时 init 先把嵌入的 hello ELF 写进 ramdisk 的
  * "/hello"（getdents64 的目录列表里要能看到它），再 fork 一个 user/filetest.c 编译出的
  * 用户程序，端到端触发 openat/lseek/readv/writev/fstat/newfstatat/getdents64/mkdirat/
  * unlinkat/renameat/chdir/getcwd/ftruncate/fcntl，并在两个子进程里并发跑文件操作压 VFS 大锁。
@@ -72,12 +72,21 @@
  * 串口应看到 "=== filetest done: N pass  0 fail ==="。置 1 时不跑 exectest/默认用户程序。 */
 #define DEBUG_FILE_TEST 0
 
-/* Phase 4 管道 syscall 验证：置 1 时 init fork 一个 user/pipetest.c 编译出的用户程序，
+/* 管道 syscall 验证：置 1 时 init fork 一个 user/pipetest.c 编译出的用户程序，
  * 端到端触发 pipe2/read/write/close/dup/fcntl(F_SETFL)/lseek/fstat，覆盖 EOF/EPIPE/
  * EAGAIN/ESPIPE 语义、环形缓冲跨边界、阻塞读写被唤醒、dup 后引用计数、父子管道通信、
  * 多写者原子性、双向 SMP 压测。串口应看到 "=== pipetest done: N pass  0 fail ==="。
  * 置 1 时不跑 exectest/filetest/默认用户程序。 */
 #define DEBUG_PIPE_TEST 0
+
+/* TTY 行规范层 + termios/ioctl 验证：置 1 时 init fork 一个 user/ttytest.c 编译出的
+ * 用户程序，端到端触发 read(0,...) 的 canonical/raw 行规范（\r->\n、退格、^U、^D
+ * EOF、短读续读、缓冲溢出不崩）、O_NONBLOCK、TCGETS/TCSETS/TIOCGWINSZ、非 TTY fd
+ * 的 -ENOTTY、lseek -ESPIPE、fstat S_ISCHR、/dev/null、dup/fork 后 fd 0 的共享语义。
+ * 输入必须靠管道喂给 QEMU stdin（`printf ... | qemu ...`），交互敲键盘跑不动这套
+ * 自动化用例。串口应看到 "=== ttytest done: N pass  0 fail ==="。
+ * 置 1 时不跑 exectest/filetest/pipetest/默认用户程序。 */
+#define DEBUG_TTY_TEST 0
 
 #define DEBUG_TRACK_LINE() printf("DEBUG_TRACK_LINE: %s:%d\n", __FILE__, __LINE__)
 

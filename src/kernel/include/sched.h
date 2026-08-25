@@ -13,9 +13,8 @@
  * @brief 读取调度用的当前时刻
  * @return `time` CSR 的当前值（QEMU virt 为 10 MHz，K210 约 7.8 MHz）
  * @details @TODO
- *   有意**不用** tick 计数（`tick_get_current()`）作为时基：
- *   `timebase = 390000000 / 200` 意味着约 0.2 秒才有一个 tick，而协作式调度下
- *   内核线程往往打印完就让出，运行时长远小于一个 tick ——
+ *   有意**不用** tick 计数（`tick_get_current()`）作为时基：即使按 200 Hz（5 ms/tick）
+ *   折算，协作式调度下内核线程往往打印完就让出，运行时长远小于一个 tick ——
  *   那样所有任务的 delta 恒为 0、vruntime 全为 0，红黑树排序完全退化。
  *   直接读 `time` CSR 可获得约 0.1 微秒的分辨率，vruntime 记账才有意义。
  *   实际读取委托给 `tick_read_time()`（`tick.h`），避免和 tick 模块重复实现

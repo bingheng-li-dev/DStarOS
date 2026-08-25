@@ -11,6 +11,7 @@
 #include "sync.h"
 #include "plic.h"
 #include "sched.h"
+#include "tty.h"
 
 #ifndef QEMU
 #include "sdcard.h"
@@ -44,6 +45,8 @@ void os_init_after_mmu_enable(uint64_t hartid)
         pmm_init_after_mmu_enable();
         trap_init();
         tick_init();
+        tty_init();      /* 全局 TTY 单例只能由 hart 0 初始化一次；必须早于 proc_init()——
+                          * proc_init 会给 init 装 fd 0/1/2，届时 tty 必须已经能用 */
 
 #ifndef QEMU
         fpioa_pin_init();

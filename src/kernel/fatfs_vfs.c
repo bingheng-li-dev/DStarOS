@@ -71,7 +71,6 @@ typedef struct
 /* 全局 FATFS 对象（f_mount 要求持久存在直至卸载）*/
 static FATFS fatfs_obj;  // @todo 全局变量命名风格统一
 
-/* 操作集前向声明 */
 static super_block_operations_t fatfs_sb_ops;
 static inode_operations_t       fatfs_inode_ops;
 static file_operations_t        fatfs_file_ops;

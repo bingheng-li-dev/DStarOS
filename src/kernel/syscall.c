@@ -10,6 +10,7 @@
 #include "kmalloc.h"
 #include "stringops.h"
 #include "pipe.h"
+#include "tty.h"
 
 /* read/write 的中转缓冲大小：一页，kmalloc 分配——内核栈只有 1 页 4KB
  * （KERNEL_STACKPSIZE 1），FatFS 调用链本来就深，不能在栈上开这么大的缓冲。 */
@@ -283,8 +284,7 @@ static long sys_readv(int fd, const struct iovec *uiov, int iovcnt)
  *   建 inode（见 fatfs_vfs.c 建 inode 的四处回调），与 O_CREAT 的调用方无关。
  * @note `dirfd` 只支持 `AT_FDCWD` 或路径本身是绝对路径这两种情况（此时 dirfd 被忽略）；
  *   传入其它 dirfd 值一律返回 `-EBADF`——真正的"相对某个已打开目录 fd 解析路径"需要
- *   `vfs_lookup` 支持从任意 dentry 起点解析，本阶段 VFS 没有这个能力，留给以后
- *   实测撞上再补（见 doc/Phase3-POSIX文件syscall开发计划.md "一、2"节的决策记录）。
+ *   `vfs_lookup` 支持从任意 dentry 起点解析，当前 VFS 没有这个能力，留给以后实测撞上再补。
  * @note `vfs_open` 目前失败时统一返回 NULL，无法区分"文件不存在"/"是目录却按文件打开"/
  *   "权限不足"等具体原因，这里统一按最常见的 ENOENT 处理——已知不精确，是 vfs_open
  *   自身尚未做错误码细分导致的限制，不是本函数引入的新问题。
@@ -331,7 +331,7 @@ static long sys_openat(int dirfd, const char *upath, int flags, int mode)
 }
 
 /* lseek(fd, offset, whence)：vfs_lseek 已经处理了 SEEK_SET/CUR/END 与越界校验，
- * 这里只是薄壳。目录 fd 的特殊语义（仅允许 SEEK_SET 到 0 = rewinddir）留给 Step 3C
+ * 这里只是薄壳。目录 fd 的特殊语义（仅允许 SEEK_SET 到 0 = rewinddir）留给
  * 目录读取通路落地之后——当前 vfs_open 还不支持打开目录，这个分支永远走不到，
  * 现在加上只是死代码。 */
 static long sys_lseek(int fd, long offset, int whence)
@@ -359,8 +359,8 @@ static long sys_lseek(int fd, long offset, int whence)
  * @details 布局填充：
  *   `st_mode`/`st_size`/`st_nlink` 直接搬；`st_blksize` 固定 512（FatFS 扇区大小）；
  *   `st_blocks` 按 512 字节块数向上取整；`st_dev`/`st_rdev`/uid/gid/三个时间戳
- *   FAT 没有对应概念或本阶段没有时钟源，统一填 0（时间戳待 Phase 8 `clock_gettime`
- *   做完再回填）。**`st_mode` 不能是 0**——BusyBox `ls` 靠 `S_ISDIR(st_mode)` 判类型，
+ *   FAT 没有对应概念或目前没有时钟源，统一填 0（时间戳待 `clock_gettime` 实现后再回填）。
+ *   **`st_mode` 不能是 0**——BusyBox `ls` 靠 `S_ISDIR(st_mode)` 判类型，
  *   `ash` 执行程序前靠 `st_mode & 0111` 判可执行位，这也是 fatfs_vfs.c 建 inode 时
  *   必须真的填权限位的原因（见该文件的改动）。
  */
@@ -531,7 +531,7 @@ static long sys_getdents64(int fd, void *ubuf, uint64_t len)
 }
 
 /* ============================================================
- * 路径操作 syscall（Step 6 / 3D）
+ * 路径操作 syscall
  *
  * 都是同构薄壳：strncpy_from_user → 校验 dirfd → vfs_lock → 已有 vfs_* → vfs_unlock。
  * dirfd 的支持范围与 sys_openat 完全一致（只认 AT_FDCWD 或绝对路径），理由见
@@ -820,6 +820,67 @@ static long sys_fcntl(int fd, int cmd, long arg)
     }
 }
 
+/**
+ * @brief ioctl(fd, cmd, arg)
+ * @note 只服务 TTY（`tty_from_file` 判定，不是简单看 `f_kind==FILE_KIND_DEVICE`——
+ *   以后加了 `/dev/null` 之类的其它字符设备，那些 file 的 `f_private` 不是
+ *   `tty_t*`，用 `f_kind` 单独判断会把它们的 `f_private` 错当 `tty_t*` 解释）。
+ *   非 TTY 的 fd 一律 `-ENOTTY`——BusyBox/ash 靠这个错码判断"是不是在终端里跑"。
+ * @note `TCSETS`/`TCSETSW`/`TCSETSF` 当前行为完全相同：不做 drain/flush，
+ *   TTY 缓冲很小，区别在交互上不可见，是有意的简化。改 `tio` 要持 `tty->lock`——
+ *   `tty_input_push` 在中断里读同一份 `c_lflag`。
+ * @note 不清空输入缓冲：ash 每次 fork 前后都会 set 一遍 termios，
+ *   清缓冲会把用户已经敲进去、还没读走的字符吃掉。
+ */
+static long sys_ioctl(int fd, unsigned long cmd, unsigned long arg)
+{
+    file_t *f = proc_fd_get(fd);
+    if (!f)
+    {
+        return ENO19_BAD_FD;
+    }
+    tty_t *tty = tty_from_file(f);
+    if (!tty)
+    {
+        return ENO23_NOT_TTY;
+    }
+
+    switch (cmd)
+    {
+    case TCGETS:
+        if (copy_to_user((void *)arg, &tty->tio, sizeof(tty->tio)) != 0)
+        {
+            return ENO8_NULL_POINTER;
+        }
+        return 0;
+    case TCSETS:
+    case TCSETSW:
+    case TCSETSF:
+    {
+        struct linux_termios kt;
+        if (copy_from_user(&kt, (const void *)arg, sizeof(kt)) != 0)
+        {
+            return ENO8_NULL_POINTER;
+        }
+        spinlock_acquire(&tty->lock);
+        tty->tio = kt;
+        spinlock_release(&tty->lock);
+        return 0;
+    }
+    case TIOCGWINSZ:
+        if (copy_to_user((void *)arg, &tty->ws, sizeof(tty->ws)) != 0)
+        {
+            return ENO8_NULL_POINTER;
+        }
+        return 0;
+    case TIOCSWINSZ:
+        /* 串口没有真实窗口尺寸，收下即可 */
+        return 0;
+    default:
+        return ENO23_NOT_TTY;
+    }
+}
+
 /* dup3(oldfd, newfd, flags)：把 oldfd 复制到指定的 newfd（若已打开则先关掉）。
  * 用户态 dup2 = dup3(o,n,0)，且 dup2 在库层处理 oldfd==newfd，故内核 dup3 对相等直接判非法。 */
 static long sys_dup3(int oldfd, int newfd, int flags)
@@ -840,7 +901,7 @@ static long sys_dup3(int oldfd, int newfd, int flags)
     }
     f->f_count++;
     proc_fd_install(newfd, f);
-    /* dup3 的 flags 里只有 O_CLOEXEC 有意义（Step 7 接上，此前是 (void)flags 丢弃）*/
+    /* dup3 的 flags 里只有 O_CLOEXEC 有意义（此前是 (void)flags 丢弃，现已接上）*/
     if (flags & O_CLOEXEC)
     {
         proc_fd_set_flags(newfd, FD_CLOEXEC);
@@ -934,6 +995,8 @@ long syscall_dispatch(intstkf_t *sp)
         return sys_ftruncate((int)sp->x10_a0, (long)sp->x11_a1);
     case __NR_fcntl:
         return sys_fcntl((int)sp->x10_a0, (int)sp->x11_a1, (long)sp->x12_a2);
+    case __NR_ioctl:
+        return sys_ioctl((int)sp->x10_a0, (unsigned long)sp->x11_a1, (unsigned long)sp->x12_a2);
     case __NR_dup:
         return sys_dup((int)sp->x10_a0);
     case __NR_dup3:

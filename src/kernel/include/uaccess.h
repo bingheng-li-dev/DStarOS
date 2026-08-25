@@ -8,7 +8,7 @@
  * run_user_program），往下是用户程序的全部合法虚拟地址。内核高半区地址远高于此
  * （KERNEL_VA_OFFSET = 0xffffffc000000000），所以拿它当一条最粗糙的用户指针范围
  * 检查——挡住"误传内核指针"这类最蠢的越界，不是完备的地址空间校验（真正的校验
- * 需要 page-fault fixup，本阶段不做，见 doc/Phase3-POSIX文件syscall开发计划.md）。 */
+ * 需要 page-fault fixup，目前未做）。 */
 #define USER_STACK_TOP  0x40000000UL
 
 int copy_from_user(void *kdst, const void *usrc, uint64_t n);

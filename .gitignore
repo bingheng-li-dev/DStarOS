@@ -10,3 +10,4 @@ CLAUDE.md
 *.log
 RustSBI/
 .claude/
+.VSCodeCounter/
