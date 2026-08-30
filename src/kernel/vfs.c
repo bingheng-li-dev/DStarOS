@@ -186,35 +186,75 @@ static void dentry_get(dentry_t *d)
 }
 
 /**
- * @brief 减少目录项引用计数（内部使用）
- * @param[in] d 目录项指针；引用计数归零时调用 d_release 回调并释放内存
+ * @brief 减少目录项引用计数，归零时销毁（内部使用）
+ * @param[in] d 目录项指针
+ * @details 引用归零时依次：调用 d_release 回调、从父目录子链表摘除、
+ *   销毁所属 inode、释放名称与描述符本身，最后**释放它对父目录持有的那个引用**
+ *   （见 dentry_create()）。父目录因此可能连锁归零，所以这里写成沿 d_parent
+ *   向上的循环而不是递归——内核栈只有 KERNEL_STACKPSIZE 页，深路径递归会踩爆。
+ * @note d_ref 的含义是"外部持有者数量 + 子目录项数量"。外部持有者包括
+ *   vfs_lookup() 返回给调用者的那一个、proc_cwd、file_t.f_dentry、
+ *   以及挂载点的 vfsmount.mnt_host_dentry。
  */
 static void dentry_put(dentry_t *d)
 {
-    if (!d)
+    while (d != NULL)
+    {
+        if (d->d_ref == 0)
+        {
+            return; /* 防御：引用已归零的目录项不应再被释放 */
+        }
+        d->d_ref--;
+        if (d->d_ref > 0)
+        {
+            return;
+        }
+
+        /* 引用归零：调用释放回调 */
+        if (d->d_op && d->d_op->d_release)
+        {
+            d->d_op->d_release(d);
+        }
+
+        /* 文件系统局部根的 d_parent 指向自身，不参与父引用 */
+        dentry_t *parent = (d->d_parent != d) ? d->d_parent : NULL;
+        if (parent != NULL)
+        {
+            list_del_init(&d->d_child);
+        }
+
+        /* inode 与 dentry 是一对一的，dentry 消失时 inode 必须一起回收，
+         * 否则每解析一次路径就漏掉一个 inode 加它的 i_private。 */
+        if (d->d_inode != NULL)
+        {
+            destory_inode(d->d_inode);
+            d->d_inode = NULL;
+        }
+
+        kfree(d->d_name);
+        kfree(d);
+
+        d = parent;
+    }
+}
+
+/**
+ * @brief 把目录项从父目录的子链表中摘除，并释放它对父目录持有的引用
+ * @param[in] d 要脱链的目录项
+ * @details 用于 unlink/rmdir/rename——这些操作必须让后续 lookup 看不到这个
+ *   目录项，不能等到引用归零才摘。脱链后 d_parent 指向自身，既标记"已脱链"
+ *   使重复调用无副作用，也让仍持有它的进程做 ".." 时原地不动而不是解引用悬空指针。
+ */
+static void dentry_detach(dentry_t *d)
+{
+    if (!d || d->d_parent == d || d->d_parent == NULL)
     {
         return;
     }
-    d->d_ref--;
-    if (d->d_ref > 0)
-    {
-        return;
-    }
-
-    /* 引用归零：调用释放回调 */
-    if (d->d_op && d->d_op->d_release)
-    {
-        d->d_op->d_release(d);
-    }
-
-    /* 从父目录的子列表中摘除 */
-    if (d->d_parent != d)
-    {
-        list_del(&d->d_child);
-    }
-
-    kfree(d->d_name);
-    kfree(d);
+    dentry_t *parent = d->d_parent;
+    list_del_init(&d->d_child);
+    d->d_parent = d;
+    dentry_put(parent);
 }
 
 /**
@@ -503,7 +543,11 @@ dentry_t *dentry_create(const char *name, inode_t *inode,
     }
     else
     {
+        /* 子目录项持有父目录的一个引用：否则 vfs_lookup 逐分量前进时对中间分量做的
+         * dentry_put 会把刚当上父节点的目录项直接释放掉，留下 d_parent 悬空、
+         * d_child 挂在已释放内存里的子节点。 */
         d->d_parent = parent;
+        dentry_get(parent);
         list_add(&d->d_child, &parent->d_subdirs);
     }
 
@@ -1039,9 +1083,7 @@ file_t *vfs_open(const char *path, int mode)
 
         if (!parent->d_inode->i_op || !parent->d_inode->i_op->create)
         {
-            list_del(&new_d->d_child);
-            kfree(new_d->d_name);
-            kfree(new_d);
+            dentry_put(new_d);
             dentry_put(parent);
             return NULL;
         }
@@ -1051,9 +1093,7 @@ file_t *vfs_open(const char *path, int mode)
         dentry_put(parent);
         if (ret != ENO0_NO_ERROR)
         {
-            list_del(&new_d->d_child);
-            kfree(new_d->d_name);
-            kfree(new_d);
+            dentry_put(new_d);
             return NULL;
         }
 
@@ -1446,9 +1486,7 @@ int vfs_mkdir(const char *path, mode_t mode)
 
     if (!parent->d_inode->i_op || !parent->d_inode->i_op->mkdir)
     {
-        list_del(&nd->d_child);
-        kfree(nd->d_name);
-        kfree(nd);
+        dentry_put(nd);
         dentry_put(parent);
         return ENO8_NULL_POINTER;
     }
@@ -1456,13 +1494,11 @@ int vfs_mkdir(const char *path, mode_t mode)
     int ret = parent->d_inode->i_op->mkdir(parent->d_inode, nd,
                                             S_IFDIR | (mode & 0777));
     dentry_put(parent);
-    if (ret != ENO0_NO_ERROR)
-    {
-        /* 创建失败：清理负目录项 */
-        list_del(&nd->d_child);
-        kfree(nd->d_name);
-        kfree(nd);
-    }
+    /* 成功与否都要释放 nd：本函数只返回错误码，不把目录项交给调用者。
+     * 成功路径以前漏了这一次 put，把新目录永久钉在缓存里（vfs_rmdir 那边
+     * 还得靠 "d_ref > 1" 猜出这笔多余引用再补一次 put）——那个猜测在别的进程
+     * 正好把该目录当 cwd 时会猜错，把人家的引用给释放掉。 */
+    dentry_put(nd);
     return ret;
 }
 
@@ -1521,23 +1557,14 @@ int vfs_rmdir(const char *path)
         return ENO8_NULL_POINTER;
     }
 
-    int was_cached = (d->d_ref > 1);
     int ret = parent->d_inode->i_op->rmdir(parent->d_inode, d);
     if (ret == ENO0_NO_ERROR)
     {
-        /* Evict from dentry cache and destroy the inode */
-        list_del_init(&d->d_child);
-        if (d->d_inode)
-        {
-            destory_inode(d->d_inode);
-            d->d_inode = NULL;
-        }
+        /* 逐出缓存：后续 lookup 不能再看到这个已删除的目录项。inode 留给
+         * dentry_put 在引用归零时销毁——此刻可能还有进程把它当作 cwd。 */
+        dentry_detach(d);
     }
-    dentry_put(d);  /* drop the lookup ref from vfs_lookup */
-    if (ret == ENO0_NO_ERROR && was_cached)
-    {
-        dentry_put(d);  /* drop the cache ownership ref left by vfs_mkdir */
-    }
+    dentry_put(d);  /* 释放 vfs_lookup 给的那个引用 */
     return ret;
 }
 
@@ -1580,23 +1607,14 @@ int vfs_unlink(const char *path)
         return ENO8_NULL_POINTER;
     }
 
-    int was_cached = (d->d_ref > 1);
     int ret = parent->d_inode->i_op->unlink(parent->d_inode, d);
     if (ret == ENO0_NO_ERROR)
     {
-        /* Evict from dentry cache and destroy the inode */
-        list_del_init(&d->d_child);
-        if (d->d_inode)
-        {
-            destory_inode(d->d_inode);
-            d->d_inode = NULL;
-        }
+        /* 逐出缓存；inode 留给 dentry_put 在引用归零时销毁——此刻可能还有
+         * 打开着的 file_t 持有这个目录项（POSIX 允许删除已打开的文件）。 */
+        dentry_detach(d);
     }
-    dentry_put(d);  /* drop the lookup ref from vfs_lookup */
-    if (ret == ENO0_NO_ERROR && was_cached)
-    {
-        dentry_put(d);  /* drop the cache ownership ref (e.g. from vfs_open still in cache) */
-    }
+    dentry_put(d);  /* 释放 vfs_lookup 给的那个引用 */
     return ret;
 }
 
@@ -1678,15 +1696,15 @@ int vfs_rename(const char *oldpath, const char *newpath)
     if (ret != ENO0_NO_ERROR)
     {
         /* 失败：清理临时新目录项 */
-        list_del(&new_d->d_child);
-        kfree(new_d->d_name);
-        kfree(new_d);
+        dentry_put(new_d);
         dentry_put(old_d);
         dentry_put(new_parent);
         return ret;
     }
 
-    /* 成功：将原目录项移到新父目录下，更新名称 */
+    /* 成功：将原目录项移到新父目录下，更新名称。改父目录意味着子→父引用要
+     * 跟着搬家——先给新父加引用，摘链改名之后再放掉旧父的那一份。 */
+    dentry_t *old_parent = (old_d->d_parent != old_d) ? old_d->d_parent : NULL;
     list_del(&old_d->d_child);
     kfree(old_d->d_name);
     int nl = (int)strlen(new_name);
@@ -1696,12 +1714,15 @@ int vfs_rename(const char *oldpath, const char *newpath)
         memcpy(old_d->d_name, new_name, nl + 1);
     }
     old_d->d_parent = new_parent;
+    dentry_get(new_parent);
     list_add(&old_d->d_child, &new_parent->d_subdirs);
+    if (old_parent != NULL)
+    {
+        dentry_put(old_parent);
+    }
 
     /* 释放用于传递的临时新目录项 */
-    list_del(&new_d->d_child);
-    kfree(new_d->d_name);
-    kfree(new_d);
+    dentry_put(new_d);
 
     dentry_put(old_d);
     dentry_put(new_parent);

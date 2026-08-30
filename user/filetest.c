@@ -519,6 +519,14 @@ void _start(void)
     check_eq("renameat: old name gone -> -ENOENT",
              sys_newfstatat(AT_FDCWD, "/fdir/inner.txt", &st, 0), -ENOENT);
 
+    check_eq("mkdirat /fdir/sub", sys_mkdirat(AT_FDCWD, "/fdir/sub", 0755), 0);
+    long ddfd = sys_openat(AT_FDCWD, "/fdir/sub/deep.txt", O_CREAT | O_RDWR, 0644);
+    check_eq("openat /fdir/sub/deep.txt", ddfd >= 0 ? 1 : 0, 1);
+    if (ddfd >= 0) { sys_close(ddfd); }
+    check_eq("stat /fdir/sub/deep.txt", sys_newfstatat(AT_FDCWD, "/fdir/sub/deep.txt", &st, 0), 0);
+    check_eq("unlinkat /fdir/sub/deep.txt", sys_unlinkat(AT_FDCWD, "/fdir/sub/deep.txt", 0), 0);
+    check_eq("unlinkat /fdir/sub", sys_unlinkat(AT_FDCWD, "/fdir/sub", AT_REMOVEDIR), 0);
+
     /* ---------- unlinkat（文件 + AT_REMOVEDIR 删目录）---------- */
     check_eq("unlinkat /fdir/renamed.txt", sys_unlinkat(AT_FDCWD, "/fdir/renamed.txt", 0), 0);
     check_eq("unlinkat(AT_REMOVEDIR) /fdir",
