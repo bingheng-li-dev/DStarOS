@@ -11,6 +11,7 @@
 #include "stringops.h"
 #include "pipe.h"
 #include "tty.h"
+#include "vmm.h"
 
 /* read/write 的中转缓冲大小：一页，kmalloc 分配——内核栈只有 1 页 4KB
  * （KERNEL_STACKPSIZE 1），FatFS 调用链本来就深，不能在栈上开这么大的缓冲。 */
@@ -953,6 +954,237 @@ static long sys_wait4(int pid, int *ustatus, int options, void *rusage)
     return ret;
 }
 
+static inline virAddr_t syscall_round_up_page(virAddr_t va)
+{
+    return (va + PGSIZE - 1) & ~(virAddr_t)(PGSIZE - 1);
+}
+
+/**
+ * @name sys_brk
+ * @brief 查询或调整进程堆顶
+ * @param[in] addr 期望的新堆顶；0 表示只查询
+ * @return 生效后的 brk 值
+ * @details 成功返回新 brk，失败返回**旧 brk**——内核侧的 brk 不返回负 errno。
+ *   musl 的 __expand_heap 判断成功的方式是"返回值 >= 请求的 addr"，返回
+ *   -ENOMEM 会被它当成一个合法的天文数字堆顶，随后立刻踩空。
+ *
+ *   扩张只改 brk_current 这一个整数，物理页留给缺页处理懒分配；收缩则必须真正
+ *   解映射并归还物理页，否则 malloc 每次 free 大块后堆都不缩，6 MB 撑不了几轮。
+ */
+static long sys_brk(virAddr_t addr)
+{
+    mm_t *mm = proc_get_current()->proc_mm;
+    if (mm == NULL || mm->brk_start == 0)
+    {
+        return 0;
+    }
+
+    virAddr_t old = mm->brk_current;
+    if (addr == 0 || addr < mm->brk_start || addr > mm->brk_start + USER_HEAP_MAX)
+    {
+        return (long)old;
+    }
+
+    virAddr_t new_page_end = syscall_round_up_page(addr);
+    virAddr_t old_page_end = syscall_round_up_page(old);
+    if (new_page_end < old_page_end)
+    {
+        vmm_unmap_range(mm, new_page_end, old_page_end);
+    }
+    mm->brk_current = addr;
+    return (long)addr;
+}
+
+/* PROT_NONE（0）在本项目没有对应表示——VMA 存在即可访问，没有"存在但不可访问"
+ * 这一档，第一版按 VMP_R 处理。@TODO 需要真实 PROT_NONE 语义时补 VMA 级别的标志。 */
+static pgprot_t prot_to_vmp(int prot)
+{
+    pgprot_t flag = 0;
+    if (prot & PROT_READ)
+    {
+        flag |= VMP_R;
+    }
+    if (prot & PROT_WRITE)
+    {
+        flag |= VMP_W;
+    }
+    if (prot & PROT_EXEC)
+    {
+        flag |= VMP_X;
+    }
+    if (flag == 0)
+    {
+        flag = VMP_R;
+    }
+    return flag;
+}
+
+/**
+ * @name sys_mmap
+ * @brief 匿名私有映射，返回一段新的用户虚拟地址
+ * @param[in] addr   建议地址，本实现忽略（不支持 MAP_FIXED）
+ * @param[in] len    映射长度，向上取整到页
+ * @param[in] prot   PROT_READ/WRITE/EXEC 组合
+ * @param[in] flags  必须含 MAP_ANONYMOUS，不能含 MAP_FIXED
+ * @param[in] fd     必须为 -1（不支持文件映射）
+ * @param[in] offset 忽略
+ * @retval <0 -errno
+ * @return 映射区起始地址
+ * @note 与 brk 相反，这里失败返回 -errno 而不是 MAP_FAILED——MAP_FAILED((void*)-1)
+ *   是 libc 层的约定，内核返回 -1 会被 musl 解读成 errno=EPERM 且地址有效。
+ *   只建 VMA 不建映射，物理页由缺页处理懒分配。
+ */
+static long sys_mmap(virAddr_t addr, uint64_t len, int prot, int flags, int fd, uint64_t offset)
+{
+    (void)addr;
+    (void)offset;
+
+    mm_t *mm = proc_get_current()->proc_mm;
+    if (mm == NULL || len == 0)
+    {
+        return ENO6_INVAL_PARAM;
+    }
+    if ((flags & MAP_ANONYMOUS) == 0)
+    {
+        return ENO20_NOSYS;
+    }
+    if (flags & MAP_FIXED)
+    {
+        return ENO6_INVAL_PARAM; /* @TODO musl 若真的需要，再补 MAP_FIXED */
+    }
+    if (fd != -1)
+    {
+        return ENO6_INVAL_PARAM;
+    }
+
+    len = syscall_round_up_page(len);
+    virAddr_t va = vmm_mmap_find_free_area(mm, len);
+    if (va == 0)
+    {
+        return ENO1_NOMORE_MEM;
+    }
+    vma_t *vma = vmm_vma_create(va, va + len, prot_to_vmp(prot));
+    if (vma == NULL)
+    {
+        return ENO1_NOMORE_MEM;
+    }
+    vmm_vma_insert(mm, vma);
+    return (long)va;
+}
+
+/**
+ * @name sys_munmap
+ * @brief 解除 [addr, addr+len) 的映射，回收物理页并调整/删除/分裂相关 VMA
+ * @param[in] addr 起始地址，必须页对齐
+ * @param[in] len  长度，向上取整到页
+ * @retval 0 成功
+ * @retval <0 -errno
+ * @details 请求区间可以横跨多个 VMA，所以外层循环每轮重新定位；与单个 VMA 的
+ *   四种关系分别处理：
+ *   1. 完全覆盖 → 摘链并销毁整个 VMA；
+ *   2. 截断头部 → vm_start = 区间末尾；
+ *   3. 截断尾部 → vm_end = 区间开头；
+ *   4. 中间打洞 → 原 VMA 收尾，另建一条 [洞末尾, 原 vm_end)。
+ *
+ *   情形 4 的新 vma_t 必须在动原 VMA 之前分配好，分配失败直接返回，
+ *   不留"洞已打、VMA 还没分裂"的半截状态。
+ * @note 打到堆 VMA 上第一版直接拒绝：本项目的堆边界由 brk_current 单独表达，
+ *   截断堆 VMA 会与它冲突。musl 与 BusyBox 都不会 munmap 堆区。
+ */
+static long sys_munmap(virAddr_t addr, uint64_t len)
+{
+    mm_t *mm = proc_get_current()->proc_mm;
+    if (mm == NULL || len == 0 || (addr % PGSIZE) != 0)
+    {
+        return ENO6_INVAL_PARAM;
+    }
+
+    virAddr_t start = addr;
+    virAddr_t end = syscall_round_up_page(addr + len);
+    if (end <= start)
+    {
+        return ENO6_INVAL_PARAM;
+    }
+
+    /* 堆 VMA 的拒绝必须在动手之前判掉：请求区间可以横跨多条 VMA，
+     * 边解边判的话前面几条已经解完了才发现要拒绝，留下半截状态 */
+    struct list_head *scan;
+    list_for_each(scan, &mm->mmap_list)
+    {
+        vma_t *cur = list_entry(scan, vma_t, vma_list_linker);
+        if ((cur->vm_flag & VMA_HEAP) && cur->vm_start < end && start < cur->vm_end)
+        {
+            return ENO6_INVAL_PARAM;
+        }
+    }
+
+    while (start < end)
+    {
+        vma_t *vma = vmm_vma_get(mm, start);
+        if (vma == NULL)
+        {
+            /* 这一页本来就没映射：跳到下一条起始地址 >= start 的 VMA 继续 */
+            virAddr_t next = 0;
+            struct list_head *pos;
+            list_for_each(pos, &mm->mmap_list)
+            {
+                vma_t *cur = list_entry(pos, vma_t, vma_list_linker);
+                if (cur->vm_start > start)
+                {
+                    next = cur->vm_start;
+                    break;
+                }
+            }
+            if (next == 0 || next >= end)
+            {
+                break;
+            }
+            start = next;
+            continue;
+        }
+
+        virAddr_t seg_end = vma->vm_end < end ? vma->vm_end : end;
+
+        if (start > vma->vm_start && seg_end < vma->vm_end)
+        {
+            vma_t *tail = vmm_vma_create(seg_end, vma->vm_end, vma->vm_flag);
+            if (tail == NULL)
+            {
+                return ENO1_NOMORE_MEM;
+            }
+            vmm_unmap_range(mm, start, seg_end);
+            vma->vm_end = start;
+            mm->last_access = NULL;
+            vmm_vma_insert(mm, tail);
+        }
+        else
+        {
+            vmm_unmap_range(mm, start, seg_end);
+            if (start <= vma->vm_start && seg_end >= vma->vm_end)
+            {
+                list_del(&vma->vma_list_linker);
+                mm->map_count--;
+                mm->last_access = NULL;
+                vmm_vma_destroy(vma);
+            }
+            else if (start <= vma->vm_start)
+            {
+                vma->vm_start = seg_end;
+                mm->last_access = NULL;
+            }
+            else
+            {
+                vma->vm_end = start;
+                mm->last_access = NULL;
+            }
+        }
+
+        start = seg_end;
+    }
+
+    return ENO0_NO_ERROR;
+}
+
 long syscall_dispatch(intstkf_t *sp)
 {
     switch (sp->x17_a7) /* a7中存放了系统调用号 */
@@ -1014,6 +1246,13 @@ long syscall_dispatch(intstkf_t *sp)
         return sys_execve(sp);
     case __NR_wait4:
         return sys_wait4((int)sp->x10_a0, (int *)sp->x11_a1, (int)sp->x12_a2, (void *)sp->x13_a3);
+    case __NR_brk:
+        return sys_brk((virAddr_t)sp->x10_a0);
+    case __NR_mmap:
+        return sys_mmap((virAddr_t)sp->x10_a0, (uint64_t)sp->x11_a1, (int)sp->x12_a2,
+                        (int)sp->x13_a3, (int)sp->x14_a4, (uint64_t)sp->x15_a5);
+    case __NR_munmap:
+        return sys_munmap((virAddr_t)sp->x10_a0, (uint64_t)sp->x11_a1);
     default:
         printf("syscall: unknown nr=%ld\n", sp->x17_a7);
         return ENO20_NOSYS;

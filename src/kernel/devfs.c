@@ -1,4 +1,5 @@
 #include "devfs.h"
+#include "slab.h"
 #include "vfs.h"
 #include "tty.h"
 #include "kmalloc.h"
@@ -209,7 +210,7 @@ static dentry_t *devfs_mount_cb(file_system_type_t *fst, const char *source, voi
         return NULL;
     }
 
-    inode_t *root_inode = (inode_t *)kmalloc(sizeof(inode_t));
+    inode_t *root_inode = (inode_t *)slab_cache_alloc(inode_cache);
     if (!root_inode)
     {
         return NULL; /* sb 故意不回收：devfs 只在启动时挂载一次，失败即 panic 级别的
@@ -243,7 +244,7 @@ static dentry_t *devfs_mount_cb(file_system_type_t *fst, const char *source, voi
 
     for (size_t i = 0; i < DEVFS_ENTRY_COUNT; i++)
     {
-        inode_t *inode = (inode_t *)kmalloc(sizeof(inode_t));
+        inode_t *inode = (inode_t *)slab_cache_alloc(inode_cache);
         if (!inode)
         {
             return NULL;

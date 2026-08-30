@@ -11,6 +11,22 @@
  * 需要 page-fault fixup，目前未做）。 */
 #define USER_STACK_TOP  0x40000000UL
 
+/* 用户地址空间布局（见 doc/虚拟内存管理.md）：
+ *
+ *   0x00010000  ELF text/data/bss（user.ld 定死入口）
+ *   brk_start   堆，向上长，上限 brk_start + USER_HEAP_MAX
+ *   0x20000000  USER_MMAP_BASE，mmap 区，向上长
+ *   0x3fff0000  用户栈底（固定 64 KB，不自动增长）
+ *   0x40000000  USER_STACK_TOP
+ *
+ * 堆与 mmap 区之间留一大段空洞，"堆撞上 mmap 区"因此是编译期就不可能发生的事，
+ * sys_brk 不需要运行时检查（下面的 _Static_assert 把这条钉死）。 */
+#define USER_HEAP_MAX   0x1000000UL     /* 16 MB */
+#define USER_MMAP_BASE  0x20000000UL
+
+_Static_assert(0x10000UL + USER_HEAP_MAX < USER_MMAP_BASE,
+               "heap must not reach the mmap area");
+
 int copy_from_user(void *kdst, const void *usrc, uint64_t n);
 int copy_to_user(void *udst, const void *ksrc, uint64_t n);
 

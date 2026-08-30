@@ -14,6 +14,7 @@ CFLAGS := -O
 CFLAGS += -nostdlib -fno-pic -Wall -Werror
 CFLAGS += -mcmodel=medany -march=rv64imafdc -mabi=lp64d
 CFLAGS += -ffreestanding -fno-common -mno-relax
+CFLAGS += -MMD -MP
 CFLAGS += -D $(PLATFORM)
 
 LDSCRIPT:=./lds/linker_qemu.ld
@@ -40,6 +41,7 @@ C_SRC_S := $(foreach n,$(SRC_DIR),$(wildcard $(n)/*.S))
 C_OBJS_C := $(patsubst %.c,$(OUTDIR)/%.o,$(C_SRC_C))
 C_OBJS_S := $(patsubst %.S,$(OUTDIR)/%.o,$(C_SRC_S))
 C_OBJS   := $(C_OBJS_C) $(C_OBJS_S)
+C_DEPS   := $(C_OBJS:.o=.d)
 
 KERNEL_ELF := $(OUTDIR)/$(KERNEL_ELF)
 KERNEL_BIN := $(OUTDIR)/$(KERNEL_BIN)
@@ -73,4 +75,8 @@ $(KERNEL_ELF): $(C_OBJS)
 	$(OBJCOPY) $(KERNEL_ELF) --strip-all -O binary $(KERNEL_BIN)
 
 clean:
-	rm -fv $(C_OBJS) $(KERNEL_ELF) $(KERNEL_BIN)
+	rm -fv $(C_OBJS) $(C_DEPS) $(KERNEL_ELF) $(KERNEL_BIN)
+
+# 头文件依赖：没有它，改 pmm.h 里 pframe_t 的布局只会重编直接改动的 .c，
+# 其余 .o 仍按旧 sizeof 编译，症状是完全无关的位置莫名其妙地挂掉
+-include $(C_DEPS)

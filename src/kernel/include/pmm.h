@@ -14,6 +14,7 @@
 typedef struct phyframe pframe_t;
 typedef struct freeSpaceList fslist_t;
 typedef struct bestfitFrameAllocator bffa_t;
+typedef struct kmem_cache kmem_cache_t;
 
 struct phyframe
 {
@@ -24,6 +25,10 @@ struct phyframe
     struct list_head list_linker_inFreeList;
     struct list_head list_linker_inFreeAList;
     struct list_head list_linker_inClockList;
+    kmem_cache_t *slab_cache;      /* NULL 表示非 slab 页，kfree 靠它 O(1) 分派 */
+    void *slab_freelist;           /* 页内第一个空闲对象（KVA） */
+    uint16_t slab_inuse;           /* 页内已分配对象数 */
+    struct list_head slab_linker;  /* 挂进 cache->partial[] / cache->full */
 };
 
 struct freeSpaceList /* Record the addr of the free list from small to large. */
@@ -49,9 +54,6 @@ void pmm_init(void);
 pframe_t *alloc(uint16_t nsize);
 pframe_t *alloc_page(void);
 void dealloc(pframe_t *baseppn);
-void *microAlloc(uint64_t size);
-/* Maybe memories in pool have ran out.So return true if target memory has been dealloced in pool. */
-bool microDemalloc(void *ptr);
 void pmm_init_after_mmu_enable(void);
 
 /* RoundDown(Left)*/

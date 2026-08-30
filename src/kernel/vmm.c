@@ -1,4 +1,5 @@
 #include "vmm.h"
+#include "slab.h"
 #include "errorcode.h"
 #include "kmalloc.h"
 #include "console.h"
@@ -253,7 +254,7 @@ vma_t *vmm_vma_get(mm_t *mm, virAddr_t va)
  */
 mm_t *vmm_mm_create(void)
 {
-    mm_t *ret = kmalloc(sizeof(mm_t));
+    mm_t *ret = slab_cache_alloc(mm_cache);
     if (ret != NULL)
     {
         ret->last_access = NULL;
@@ -277,7 +278,7 @@ mm_t *vmm_mm_create(void)
  */
 vma_t *vmm_vma_create(virAddr_t va_start, virAddr_t va_end, pgprot_t flag)
 {
-    vma_t *ret = kmalloc(sizeof(vma_t));
+    vma_t *ret = slab_cache_alloc(vma_cache);
     if (ret != NULL)
     {
         ret->vm_start = va_start;
@@ -330,6 +331,48 @@ void vmm_vma_insert(mm_t *mm, vma_t *vma)
 }
 
 /**
+ * @brief 在 mmap 区里找一段长度为 len 的空闲虚拟地址（first-fit）
+ * @param[in] mm  目标进程地址空间描述符
+ * @param[in] len 需要的长度（页对齐）
+ * @retval 0 mmap 区已无足够大的空洞
+ * @return 空洞起始虚拟地址
+ * @details 从 USER_MMAP_BASE 起沿 mmap_list（按 vm_start 升序）线性扫描，
+ *   逐个检查"游标到当前 VMA 起始"这段空洞够不够 len，不够就把游标推到该 VMA 末尾。
+ * @note 用户栈自己也是一条 VMA，所以扫描不需要为它单独留边界；
+ *   上界只用 USER_STACK_TOP 兜底。
+ */
+virAddr_t vmm_mmap_find_free_area(mm_t *mm, uint64_t len)
+{
+    virAddr_t cursor = USER_MMAP_BASE;
+    struct list_head *pos;
+
+    if (len == 0 || len > USER_STACK_TOP - USER_MMAP_BASE)
+    {
+        return 0;
+    }
+
+    list_for_each(pos, &mm->mmap_list)
+    {
+        vma_t *vma = list_entry(pos, vma_t, vma_list_linker);
+        if (vma->vm_end <= cursor)
+        {
+            continue;
+        }
+        if (vma->vm_start >= cursor + len)
+        {
+            return cursor;
+        }
+        cursor = vma->vm_end;
+    }
+
+    if (cursor + len <= USER_STACK_TOP)
+    {
+        return cursor;
+    }
+    return 0;
+}
+
+/**
  * @brief 将 VMA 保护标志（pgprot_t）转换为用户空间 PTE 标志位（pteflg_t）
  * @param[in] prot VMA 保护标志，VMP_R / VMP_W / VMP_X 的任意组合
  * @return 对应的 PTE 标志位组合，始终包含 PTE_U（用户可访问）
@@ -358,7 +401,7 @@ int vmm_map_vma(mm_t *mm, vma_t *vma)
     pteflg_t flags = vma_prot_to_pte_flags(vma->vm_flag);
     for (virAddr_t va = vma->vm_start; va < vma->vm_end; va += PGSIZE)
     {
-        pframe_t *frame = alloc_page();
+        pframe_t *frame = slab_alloc_page_retry();
         if (!frame)
         {
             return ENO1_NOMORE_MEM;
@@ -381,16 +424,27 @@ int vmm_map_vma(mm_t *mm, vma_t *vma)
  * @brief 解除 VMA 描述的整个虚拟地址区间的物理页映射并归还物理帧
  * @param[in] mm  所属进程地址空间描述符
  * @param[in] vma 要解映射的 VMA
- * @details 对区间内每个页：
- *   1. 查找对应 PTE，若无效则跳过；
- *   2. 递减物理帧引用计数，计数归零时调用 dealloc() 释放帧；
- *   3. 将 PTE 清零（清除 PTE_V）并刷新 TLB。
  * @note 此函数不释放页表中间节点帧，也不释放 vma_t 描述符本身；
  *       调用者需另行处理（见 vmm_mm_destroy()）。
  */
 void vmm_unmap_vma(mm_t *mm, vma_t *vma)
 {
-    for (virAddr_t va = vma->vm_start; va < vma->vm_end; va += PGSIZE)
+    vmm_unmap_range(mm, vma->vm_start, vma->vm_end);
+}
+
+/**
+ * @brief 解除 [start, end) 范围内的映射并按引用计数回收物理帧
+ * @param[in] mm    目标地址空间
+ * @param[in] start 起始虚拟地址（页对齐，含）
+ * @param[in] end   结束虚拟地址（页对齐，不含）
+ * @details 逐页查 PTE：无效则跳过；否则递减 pframe_t.reference，归零时 dealloc()，
+ *   随后清零 PTE 并刷新该地址的 TLB。
+ * @note 不释放页表中间节点帧，也不动 mm->mmap_list 上的 vma_t——
+ *   VMA 的删除/截断/分裂由调用方负责。
+ */
+void vmm_unmap_range(mm_t *mm, virAddr_t start, virAddr_t end)
+{
+    for (virAddr_t va = start; va < end; va += PGSIZE)
     {
         pte_t *ptep = get_pte(mm->pgd_ppn, va, false, true);
         if (!ptep || !pte_is_valid(*ptep))
@@ -452,6 +506,33 @@ void vmm_mm_destroy(mm_t *mm)
  * @note 此函数由 trap.c 中的 trap_handler() 调用，运行在中断上下文中（中断已关闭）。
  *   panic 路径不会返回；正常路径返回后，异常指令将被重新执行。
  */
+/**
+ * @brief 处理一次非法访问：U 态发起的只杀该进程，S 态发起的 panic
+ * @param[in] badva 触发异常的虚拟地址
+ * @param[in] why   诊断用的原因描述
+ * @details sstatus.SPP 记录的是进入本次 trap 之前的特权级，进入缺页处理到这里
+ *   之间没有发生嵌套 trap，所以它就是"谁踩的这一下"。用户程序踩野指针是它自己的
+ *   事，不该拖垮内核；内核踩了才说明是内核 bug，只能 panic。
+ * @note 本函数不返回。退出码取 128 + SIGSEGV(11) = 139，与 shell 表示"被信号杀死"
+ *   的惯例一致——本内核还没有信号机制，用这个约定值让父进程 wait4 能区分开
+ *   "子进程自己 exit" 与 "子进程被杀"。
+ */
+static void vmm_segfault(virAddr_t badva, const char *why)
+{
+    pcb_t *curr = proc_get_current();
+    /* sepc 一起打出来：S 态故障时它是唯一能把现场对回到具体调用点的线索
+     * （反汇编 build/kernel.elf 查这个地址即可），偶发故障没有第二次机会 */
+    printf("vmm: segfault - %s va=0x%lx sepc=0x%lx spp=%d pid=%d\n",
+           why, badva, read_csr(sepc),
+           (read_csr(sstatus) & SSTATUS_SPP) ? 1 : 0, curr->proc_pid);
+    if ((read_csr(sstatus) & SSTATUS_SPP) == 0)
+    {
+        printf("vmm: killing pid=%d\n", curr->proc_pid);
+        do_exit(139);
+    }
+    panic("segfault");
+}
+
 void vmm_page_fault_handler(virAddr_t badva, int fault_type)
 {
     pcb_t *curr = proc_get_current();
@@ -475,19 +556,16 @@ void vmm_page_fault_handler(virAddr_t badva, int fault_type)
     vma_t *vma = vmm_vma_get(mm, badva);
     if (!vma)
     {
-        printf("vmm: segfault - no vma for va=0x%lx\n", badva);
-        panic("segfault");
+        vmm_segfault(badva, "no vma");
     }
 
     if (fault_type == 2 && !(vma->vm_flag & VMP_W))
     {
-        printf("vmm: write fault on non-writable vma va=0x%lx\n", badva);
-        panic("segfault");
+        vmm_segfault(badva, "write on non-writable vma");
     }
     if (fault_type == 0 && !(vma->vm_flag & VMP_X))
     {
-        printf("vmm: exec fault on non-exec vma va=0x%lx\n", badva);
-        panic("segfault");
+        vmm_segfault(badva, "exec on non-exec vma");
     }
 
     /* 将触发页错误的虚拟地址对齐到页面边界（低12位即页内偏移清零） */
@@ -519,7 +597,7 @@ void vmm_page_fault_handler(virAddr_t badva, int fault_type)
 #if DEBUG_VMM_page_fault_handler
                 printf("vmm: cow duplicate va=0x%lx refs=%u\n", page_va, old_frame->reference);
 #endif
-                pframe_t *new_frame = alloc_page();
+                pframe_t *new_frame = slab_alloc_page_retry();
                 if (!new_frame)
                 {
                     panic("vmm: OOM in COW fault handler");
@@ -538,7 +616,7 @@ void vmm_page_fault_handler(virAddr_t badva, int fault_type)
     }
 
     /* 该 va 从未被映射过（第一次触碰）：懒分配一个全新清零页 */
-    pframe_t *frame = alloc_page();
+    pframe_t *frame = slab_alloc_page_retry();
     if (!frame)
     {
         panic("vmm: OOM in page fault handler");
@@ -624,3 +702,87 @@ int vmm_mm_copy(mm_t *dst, mm_t *src)
     dst->brk_current = src->brk_current;
     return ENO0_NO_ERROR;
 }
+
+#if DEBUG_PTE_AD_PROBE
+/**
+ * @brief 实测本平台是否由硬件自动置位 PTE 的 A（访问）/ D（脏）标志
+ * @details RISC-V 特权规范允许两种实现：硬件在页表遍历时自动写回 A/D，
+ *   或者硬件不写、访问 A=0 的页时抛缺页异常交由软件置位。时钟（二次机会）
+ *   置换算法完全依赖前者，因此动手前必须实测而不能照规范假设。
+ *
+ *   取一个刚分配的物理页（内核偏移映射保证它有叶子 PTE），依次观察四个时刻的
+ *   A/D 位：分配清零之后、手工清零并刷 TLB 之后、一次读访问之后、一次写访问之后。
+ * @note 若本平台是软件管理 A 位，第三步的读访问会直接触发缺页异常——
+ *   打印顺序已保证在那之前能看到前两条输出，据此即可判断。
+ */
+void vmm_probe_pte_ad(void)
+{
+    pframe_t *frame = alloc_page();
+    if (!frame)
+    {
+        printf("pte_ad_probe: alloc_page failed\n");
+        return;
+    }
+
+    virAddr_t kva = convert_pframe2kva(frame);
+    pte_t *ptep = get_pte(vmm_kernel_pgd_ppn, kva, false, true);
+    if (!ptep || !pte_is_valid(*ptep))
+    {
+        printf("pte_ad_probe: no valid pte for kva=0x%lx\n", kva);
+        dealloc(frame);
+        return;
+    }
+
+    printf("pte_ad_probe: kva=0x%lx pte=0x%lx\n", kva, *ptep);
+    printf("pte_ad_probe: [1] after alloc(memset)  A=%d D=%d\n",
+           (*ptep & PTE_A) ? 1 : 0, (*ptep & PTE_D) ? 1 : 0);
+
+    *ptep &= ~(pte_t)(PTE_A | PTE_D);
+    tlb_flush_va(kva);
+    printf("pte_ad_probe: [2] after manual clear   A=%d D=%d\n",
+           (*ptep & PTE_A) ? 1 : 0, (*ptep & PTE_D) ? 1 : 0);
+
+    /* 不碰这一页，只做无关工作，确认 A 不会被无端置回——时钟算法要靠
+     * "清零之后还是 0" 来判断这一轮没被访问过，这条不成立算法就失效。 */
+    for (volatile int i = 0; i < 1000; i++)
+    {
+    }
+    printf("pte_ad_probe: [2b] after unrelated work A=%d D=%d (expect 0 0)\n",
+           (*ptep & PTE_A) ? 1 : 0, (*ptep & PTE_D) ? 1 : 0);
+
+    printf("pte_ad_probe: issuing LOAD...\n");
+    volatile uint8_t got = *(volatile uint8_t *)kva;
+    (void)got;
+    printf("pte_ad_probe: [3] after LOAD           A=%d D=%d\n",
+           (*ptep & PTE_A) ? 1 : 0, (*ptep & PTE_D) ? 1 : 0);
+
+    printf("pte_ad_probe: issuing STORE...\n");
+    *(volatile uint8_t *)kva = 0x5a;
+    printf("pte_ad_probe: [4] after STORE          A=%d D=%d\n",
+           (*ptep & PTE_A) ? 1 : 0, (*ptep & PTE_D) ? 1 : 0);
+
+    /* 关键一问：清 A 位而不刷 TLB 时，后续访问还会不会重走页表把 A 写回内存。
+     * 若不会（TLB 命中直接跳过页表遍历），时钟算法每清一个候选页的 A 位就必须
+     * 配一次 tlb_flush_va，否则会把刚被访问过的热页误判成冷页换出去。 */
+    *ptep &= ~(pte_t)PTE_A;
+    /* 故意不刷 TLB */
+    volatile uint8_t again = *(volatile uint8_t *)kva;
+    (void)again;
+    int a_without_sfence = (*ptep & PTE_A) ? 1 : 0;
+    printf("pte_ad_probe: [5] LOAD after clear w/o sfence  A=%d\n", a_without_sfence);
+
+    if ((*ptep & PTE_A) || (*ptep & PTE_D))
+    {
+        printf("pte_ad_probe: RESULT = hardware updates A/D -> clock usable%s\n",
+               a_without_sfence ? "" : " (MUST sfence.vma after clearing A)");
+    }
+    else
+    {
+        printf("pte_ad_probe: RESULT = A/D NOT updated by hardware -> clock degrades to fifo\n");
+    }
+
+    *ptep |= (pte_t)(PTE_A | PTE_D);
+    tlb_flush_va(kva);
+    dealloc(frame);
+}
+#endif

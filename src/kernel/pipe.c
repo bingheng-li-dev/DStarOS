@@ -1,4 +1,5 @@
 #include "pipe.h"
+#include "slab.h"
 #include "vfs.h"
 #include "sched.h"
 #include "errorcode.h"
@@ -172,20 +173,20 @@ static file_operations_t pipe_write_fops = {
 
 int pipe_alloc(file_t **rfile, file_t **wfile)
 {
-    pipe_t *p = kmalloc(sizeof(pipe_t));
+    pipe_t *p = slab_cache_alloc(pipe_cache);
     if (!p)
     {
         return ENO1_NOMORE_MEM;
     }
 
-    pframe_t *frame = alloc_page();
+    pframe_t *frame = slab_alloc_page_retry();
     if (!frame)
     {
         kfree(p);
         return ENO1_NOMORE_MEM;
     }
 
-    file_t *rf = kmalloc(sizeof(file_t));
+    file_t *rf = slab_cache_alloc(file_cache);
     if (!rf)
     {
         dealloc(frame);
@@ -193,7 +194,7 @@ int pipe_alloc(file_t **rfile, file_t **wfile)
         return ENO1_NOMORE_MEM;
     }
 
-    file_t *wf = kmalloc(sizeof(file_t));
+    file_t *wf = slab_cache_alloc(file_cache);
     if (!wf)
     {
         kfree(rf);

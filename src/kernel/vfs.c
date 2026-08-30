@@ -15,6 +15,7 @@
  */
 
 #include "vfs.h"
+#include "slab.h"
 #include "kmalloc.h"
 #include "errorcode.h"
 #include "sync.h"
@@ -511,7 +512,7 @@ dentry_t *dentry_create(const char *name, inode_t *inode,
         return NULL;
     }
 
-    dentry_t *d = (dentry_t *)kmalloc(sizeof(dentry_t));
+    dentry_t *d = (dentry_t *)slab_cache_alloc(dentry_cache);
     if (!d)
     {
         return NULL;
@@ -1136,7 +1137,7 @@ file_t *vfs_open(const char *path, int mode)
     }
 
     /* 分配 file_t */
-    file_t *file = (file_t *)kmalloc(sizeof(file_t));
+    file_t *file = (file_t *)slab_cache_alloc(file_cache);
     if (!file)
     {
         dentry_put(target);

@@ -1,30 +1,42 @@
 #include "pmm.h"
 #include "kmalloc.h"
 #include "memtype.h"
+#include "slab.h"
 #include "sync.h"
 
-extern pframe_t *MicroPhysicalMemoryPoolBase;
+/* 只尝试一次，不做回收重试；重试由 kmalloc 在不持任何锁的层面上做。 */
+static void *kmalloc_once(uint64_t size)
+{
+    if (size == 0)
+    {
+        return NULL;
+    }
 
-/* microAlloc/microDemalloc/alloc/dealloc 各自内部持 PmmLock，这里不需要再包一层——
- * 那样反而会在同一个 hart 上对同一把非重入锁二次 acquire，直接自锁死。 */
+    kmem_cache_t *cache = slab_size_cache(size);
+    if (cache != NULL)
+    {
+        return slab_cache_alloc(cache);
+    }
+
+    pframe_t *frame = alloc(convert_pa2ppn_cil((phyAddr_t)size));
+    if (frame == NULL)
+    {
+        return NULL;
+    }
+    return (void *)convert_pframe2kva(frame);
+}
+
+/* reclaim 必须留在这一层：alloc() 内部持着 PmmLock，就地调 slab_reclaim_all()
+ * 既是对非重入锁的二次 acquire，锁序也与 cache->lock → PmmLock 恰好相反。 */
 void *kmalloc(uint64_t size)
 {
-    void *ret = NULL, *tmp = NULL;
-    if (MicroPhysicalMemoryPoolBase != NULL && size <= 1024)
+    void *ptr = kmalloc_once(size);
+    if (ptr != NULL)
     {
-        tmp = microAlloc(size);
-        if (tmp != NULL)
-        {
-            return tmp;
-        }
-        /* microAlloc pool exhausted, fall through to PMM page allocator */
+        return ptr;
     }
-    /* "MicroPhysicalMemoryPoolBase" is null, size > 1024, or micro pool is full */
-    tmp = alloc(convert_pa2ppn_cil(size)); /* Here "convert" is used to calculate amount of pframes. */
-    /* MMU 开启后调用者使用 KVA，MMU 关闭时用 PA */
-    phyAddr_t frame_pa = convert_pframe2pa(tmp);
-    ret = mmu_is_enabled() ? (void *)pa_to_kva(frame_pa) : (void *)frame_pa;
-    return ret;
+    slab_reclaim_all();
+    return kmalloc_once(size);
 }
 
 void kfree(void *ptr)
@@ -34,24 +46,13 @@ void kfree(void *ptr)
         return;
     }
 
-    /* MMU 开启后外部指针均为 KVA，归一化到 PA 以统一做范围判断和 pframe 换算 */
-    phyAddr_t ptr_pa = mmu_is_enabled()
-                       ? kva_to_pa((virAddr_t)ptr)
-                       : (phyAddr_t)ptr;
-
-    if (MicroPhysicalMemoryPoolBase != NULL)
+    pframe_t *frame = convert_pa2pframe_flr(kva_to_pa((virAddr_t)ptr));
+    if (frame->slab_cache == NULL)
     {
-        phyAddr_t pool_pa = convert_pframe2pa(MicroPhysicalMemoryPoolBase);
-        if (pool_pa < ptr_pa && ptr_pa < pool_pa + 2 * PGSIZE)
-        {
-            /* microDemalloc 内部通过原始指针（KVA 或 PA）操作 pool */
-            if (microDemalloc(ptr))
-            {
-                return;
-            }
-        }
+        dealloc(frame);
     }
-    /* Maybe memories in pool have ran out. */
-    pframe_t *base = convert_pa2pframe_flr(ptr_pa);
-    dealloc(base);
+    else
+    {
+        slab_cache_free(frame->slab_cache, frame, ptr);
+    }
 }

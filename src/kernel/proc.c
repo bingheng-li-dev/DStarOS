@@ -1,4 +1,5 @@
 #include "proc.h"
+#include "slab.h"
 #include "kmalloc.h"
 #include "stringops.h"
 #include "errorcode.h"
@@ -404,7 +405,7 @@ void proc_init(void)
 
 static pcb_t *alloc_new_proc(void)
 {
-    pcb_t *pcb = kmalloc(sizeof(pcb_t));
+    pcb_t *pcb = slab_cache_alloc(pcb_cache);
     if (pcb != NULL)
     {
         pcb->kernel_stack = 0;
@@ -489,7 +490,7 @@ static int16_t copy_proc_mm(uint32_t clone_flags, pcb_t *pcb)
     }
 
     /* 必须先建立独立 PGD 并设好 mm->pgd_ppn，vmm_mm_copy 才能向正确的页表写 PTE */
-    pframe_t *new_pgd_frame = alloc_page();
+    pframe_t *new_pgd_frame = slab_alloc_page_retry();
     if (!new_pgd_frame)
     {
         panic("Failed to alloc new page for child process PGD!\n");
@@ -666,7 +667,7 @@ static mm_t *create_user_mm(void)
     {
         return NULL;
     }
-    pframe_t *pgd = alloc_page();
+    pframe_t *pgd = slab_alloc_page_retry();
     if (pgd == NULL)
     {
         return NULL; /* OOM 极端边界：此处不回收 mm（系统已濒临耗尽），可接受 */
@@ -723,7 +724,7 @@ static void run_user_program(const unsigned char *elf, unsigned long elf_len)
     enter_user_mode(entry, USER_STACK_TOP);
 }
 
-#if !DEBUG_EXEC_TEST && !DEBUG_FILE_TEST && !DEBUG_PIPE_TEST && !DEBUG_TTY_TEST
+#if !DEBUG_EXEC_TEST && !DEBUG_FILE_TEST && !DEBUG_PIPE_TEST && !DEBUG_TTY_TEST && !DEBUG_MEM_TEST
 static void run_first_user_program(void)
 {
     run_user_program(user_elf, user_elf_len);
@@ -793,6 +794,15 @@ static void run_ttytest_program(void)
 }
 #endif
 
+#if DEBUG_MEM_TEST
+static void run_memtest_program(void)
+{
+    extern const unsigned char user_memtest_elf[];
+    extern const unsigned long user_memtest_elf_len;
+    run_user_program(user_memtest_elf, user_memtest_elf_len);
+}
+#endif
+
 static int16_t init(void)
 {
     printf("%s::Hello! I'm the init process!!\n", __FUNCTION__);
@@ -813,6 +823,15 @@ static int16_t init(void)
     }
     dealloc(t_frame);
     printf("[init] kernel thread KVA after switch_to: PASS\n");
+#endif
+
+#if DEBUG_SLAB_TEST
+    /* slab 分配器自检：跑完直接关机，不启动用户程序。测试代码在 src/debug/slab_test.c。 */
+    {
+        extern void run_slab_tests(void);
+        run_slab_tests();
+        sbi_shutdown();
+    }
 #endif
 
 #if DEBUG_SCHED_TEST
@@ -856,6 +875,10 @@ static int16_t init(void)
     /* 验证 TTY 行规范层：ttytest 不依赖 /hello，不需要 seed_exec_target，
      * 直接跑（不跑 exectest/filetest/pipetest/默认用户程序）*/
     int16_t pid = create_kernel_thread_by_fork((void *)run_ttytest_program, NULL, 0);
+#elif DEBUG_MEM_TEST
+    /* 验证内存管理 syscall：memtest 不依赖 /hello，不需要 seed_exec_target，
+     * 直接跑（不跑 exectest/filetest/pipetest/ttytest/默认用户程序）*/
+    int16_t pid = create_kernel_thread_by_fork((void *)run_memtest_program, NULL, 0);
 #else
     int16_t pid = create_kernel_thread_by_fork((void *)run_first_user_program, NULL, 0);
 #endif
@@ -877,6 +900,11 @@ static int16_t init(void)
         {
             // @TODO sbi_shutdown测试用
             printf("[init] no more children, shutting down\n");
+#if DEBUG_MEM_TEST || DEBUG_FILE_TEST
+            /* 压力用例跑完之后核对各 cache 的 nr_inuse 是否回到基线（vma_cache 尤其）*/
+            slab_dump_stats();
+            printf("[init] FreeList.fnsize=%d\n", FreeList.fnsize);
+#endif
             sbi_shutdown();
         }
     }

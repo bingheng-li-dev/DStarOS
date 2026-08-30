@@ -29,8 +29,11 @@
 #define __NR_exit_group  94
 #define __NR_getpid     172
 #define __NR_getppid    173
+#define __NR_brk        214
+#define __NR_munmap     215
 #define __NR_clone      220
 #define __NR_execve     221
+#define __NR_mmap       222
 #define __NR_wait4      260
 
 /* Linux riscv64 的 syscall 接口约定返回类型就是 long */

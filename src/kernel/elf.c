@@ -2,6 +2,7 @@
 #include "console.h"
 #include "stringops.h"
 #include "errorcode.h"
+#include "uaccess.h"
 
 /* 向下取整到页边界 */
 static inline virAddr_t round_down_page(virAddr_t va)
@@ -57,6 +58,7 @@ int elf_load(mm_t *mm, const unsigned char *image, uint64_t size, virAddr_t *ent
 
     /* 程序头表在 e_phoff 处；PT_LOAD 段的内容在 image + phdr[i].p_offset 处 */
     Elf64_Phdr *phdr_base = (Elf64_Phdr *)(image + ehdr->e_phoff);
+    virAddr_t max_end = 0;
     /* 遍历 e_phnum 个 Elf64_Phdr，处理 PT_LOAD 可加载段
      * 注意：调用者需保证各 PT_LOAD 段按页对齐、互不共享物理页（见 lds/user.ld 的段间对齐），
      * 本函数按段独立建 VMA 并映射，不处理多个段共享同一物理页的场景。 */
@@ -128,8 +130,26 @@ int elf_load(mm_t *mm, const unsigned char *image, uint64_t size, virAddr_t *ent
         }
         /* 零填充bss区：内存大小 > 文件大小的部分清零 */
         memset((void *)ph->p_vaddr + ph->p_filesz, 0, ph->p_memsz - ph->p_filesz);
+
+        if (vma->vm_end > max_end)
+        {
+            max_end = vma->vm_end;
+        }
     }
     *entry = ehdr->e_entry; /* 输出程序入口地址 */
+
+    /* 堆 VMA 一次性建到最大尺寸，实际可访问边界由 mm->brk_current 单独控制
+     * （vmm_vma_get 对 VMA_HEAP 有 va >= brk_current 即越界的特判），
+     * 所以 sys_brk 扩张时只改一个整数，不需要动 VMA 链表。全程懒分配，不 map。 */
+    mm->brk_start   = max_end;
+    mm->brk_current = max_end;
+    vma_t *heap = vmm_vma_create(max_end, max_end + USER_HEAP_MAX,
+                                 VMP_R | VMP_W | VMA_HEAP);
+    if (!heap)
+    {
+        return ENO1_NOMORE_MEM;
+    }
+    vmm_vma_insert(mm, heap);
 
     return ENO0_NO_ERROR;
 }

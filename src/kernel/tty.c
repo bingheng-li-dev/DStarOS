@@ -1,4 +1,5 @@
 #include "tty.h"
+#include "slab.h"
 #include "stringops.h"
 #include "sbi.h"
 #include "sched.h"
@@ -326,7 +327,7 @@ file_operations_t tty_fops = {
 
 file_t *tty_open_file(void)
 {
-    file_t *f = kmalloc(sizeof(file_t));
+    file_t *f = slab_cache_alloc(file_cache);
     if (f == NULL)
     {
         return NULL;

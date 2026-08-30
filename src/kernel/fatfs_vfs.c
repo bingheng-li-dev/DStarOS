@@ -15,6 +15,7 @@
  */
 
 #include "fatfs_vfs.h"
+#include "slab.h"
 #include "vfs.h"
 #include "ff.h"
 #include "diskio.h"
@@ -236,7 +237,7 @@ static int fresult_to_vfs(FRESULT fr)
  */
 static inode_t *fatfs_alloc_inode_internal(super_block_t *sb)
 {
-    inode_t *inode = (inode_t *)kmalloc(sizeof(inode_t));
+    inode_t *inode = (inode_t *)slab_cache_alloc(inode_cache);
     if (!inode)
     {
         return NULL;
@@ -768,7 +769,7 @@ static int fatfs_open_cb(inode_t *inode, file_t *file, int mode)
         fa |= FA_OPEN_EXISTING;    /* 文件不存在则失败 */
     }
 
-    FIL *fil = (FIL *)kmalloc(sizeof(FIL));
+    FIL *fil = (FIL *)slab_cache_alloc(fil_cache);
     if (!fil)
     {
         return ENO1_NOMORE_MEM;

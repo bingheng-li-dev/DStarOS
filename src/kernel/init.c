@@ -12,6 +12,7 @@
 #include "plic.h"
 #include "sched.h"
 #include "tty.h"
+#include "slab.h"
 
 #ifndef QEMU
 #include "sdcard.h"
@@ -43,7 +44,11 @@ void os_init_after_mmu_enable(uint64_t hartid)
         /* init_printf先前存放了stdout_putc函数的物理绝对地址，更新为高虚拟地址 */
         console_init();
         pmm_init_after_mmu_enable();
+        slab_init();
         trap_init();
+#if DEBUG_PTE_AD_PROBE
+        vmm_probe_pte_ad();
+#endif
         tick_init();
         tty_init();      /* 全局 TTY 单例只能由 hart 0 初始化一次；必须早于 proc_init()——
                           * proc_init 会给 init 装 fd 0/1/2，届时 tty 必须已经能用 */

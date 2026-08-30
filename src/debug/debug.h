@@ -21,8 +21,6 @@
 #define DEBUG_MMU_mm_dealloc 0
 #define DEBUG_MMU_deleteAndReinsert 0
 #define DEBUG_MMU_insertAndMerge 0
-#define DEBUG_MMU_initMicroPhysicalMemoryPool 0
-#define DEBUG_MMU_microAlloc 0
 #define DEBUG_LOCK_irq_enable 0
 #define DEBUG_PROC_idle 0   /* hart 1 的 idle 会一直空转，置 1 会刷屏 */
 #define DEBUG_PROC_createFirstProcIdle 1
@@ -45,6 +43,12 @@
  * 等文件，入口 run_sched_tests()。 */
 #define DEBUG_SCHED_TEST 0
 
+/* slab 分配器内核态自检：置 1 时 init 进程改为运行 run_slab_tests()（src/debug/slab_test.c）
+ * 再关机，不启动用户程序。覆盖基本分配/复用、通用尺寸类 kmalloc 往返、碎片化下的
+ * partial 分档效果、空页回收与 slab_reclaim_all()。
+ * 串口应看到 "=== slabtest done: N pass  0 fail ==="。 */
+#define DEBUG_SLAB_TEST 0
+
 /* VFS/FatFS 回归测试：置 1 时在 main() 里跑 vfs_test()（src/debug/vfs_fatfs_test.c），
  * 覆盖 open/read/write/stat/mkdir/truncate/rename/unlink/rmdir 以及目录读取通路
  * （getdents64 后端：'.'/'..' 合成、d_reclen 对齐、pending 暂存、LFN 长文件名）。
@@ -62,7 +66,7 @@
  * 再 fork 一个 user/exectest.c 编译出的用户程序：它 dup(1) 后经新 fd 写、再 clone 出子进程
  * execve("/hello")、父进程 wait4 收割。串口应看到 "exectest: hello via dup fd"（dup 生效）、
  * "hi"（子进程 exec 成 hello）、"exectest: child reaped, done"。置 1 时不跑默认用户程序。 */
-#define DEBUG_EXEC_TEST 1
+#define DEBUG_EXEC_TEST 0
 
 /* POSIX 文件 syscall 验证：置 1 时 init 先把嵌入的 hello ELF 写进 ramdisk 的
  * "/hello"（getdents64 的目录列表里要能看到它），再 fork 一个 user/filetest.c 编译出的
@@ -87,6 +91,20 @@
  * 自动化用例。串口应看到 "=== ttytest done: N pass  0 fail ==="。
  * 置 1 时不跑 exectest/filetest/pipetest/默认用户程序。 */
 #define DEBUG_TTY_TEST 0
+
+/* 内存管理 syscall 验证：置 1 时 init fork 一个 user/memtest.c 编译出的用户程序，
+ * 端到端触发 brk/mmap/munmap，覆盖堆扩张收缩与越界拒绝、匿名映射懒分配、
+ * munmap 四种覆盖情形（含中间打洞导致的 VMA 分裂）、跨多 VMA 解除、地址复用、
+ * MAP_PRIVATE 的 fork COW 语义，以及 mmap/munmap 交错 200 轮的压力用例。
+ * 串口应看到 "=== memtest done: N pass  0 fail ==="。
+ * 置 1 时不跑 exectest/filetest/pipetest/ttytest/默认用户程序。 */
+#define DEBUG_MEM_TEST 1
+
+/* PTE A/D 位实测探针：置 1 时在 hart0 初始化阶段（trap_init 之后）跑
+ * vmm_probe_pte_ad()，判定本平台是硬件自动置位 A/D 还是软件管理。
+ * 时钟置换算法依赖硬件自动置位，动手前用它确认，不要照规范假设。
+ * 串口应看到 "pte_ad_probe: RESULT = ..."。 */
+#define DEBUG_PTE_AD_PROBE 0
 
 #define DEBUG_TRACK_LINE() printf("DEBUG_TRACK_LINE: %s:%d\n", __FILE__, __LINE__)
 
