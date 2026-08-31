@@ -17,6 +17,7 @@
 #include "cpu.h"
 #include "tick.h"
 #include "atomic.h"
+#include "sync.h"
 
 /* ============================================================
  * 共享断言计数器（sync_test.c / rt_sched_test.c 也用，故非 static）
@@ -154,9 +155,81 @@ static void sched_lifecycle_test(void)
  * ============================================================ */
 #define CFS_WORKERS (2 * CORE_NUMBER) /* 保证可运行任务数 > hart 数，制造真实竞争 */
 
+/* 这个用例**只测权重是否生效，不测有没有人被饿死**——后者由等权重的
+ * sched_cfs_nostarve_test() 负责。这条分工是 2026-08-31 查那个断续出现的 73/74
+ * （`all CFS workers ran` 偶发失败）时定下来的，原因值得写清楚，免得又被合回去：
+ *
+ * nice-10 权重 9548、nice+10 权重 110，四个 worker 总权重 2*9548 + 2*110 = 19316，
+ * 每个低权重 worker 的应得份额只有 110/19316 = 0.57%。预算 400 时期望只有 2.3 次，
+ * "至少 1 次"直接压在噪声底上。但把预算加到 4000 之后**次数一点没变**，还是 2——
+ * 份额与预算无关，那是被饿死而不是分得少的特征，顺着这条线查出了两个真的内核 bug
+ * （vruntime 整数截断、改 nice 前不结算，均已修，见 sched.c）。
+ *
+ * 修完之后用次数仍然测不准，根因是**观测量选错了**：CFS 分配的是 CPU 时间，而
+ * 轮转次数 = 时间 / 单轮成本；单轮成本取决于那次让出有没有真的发生 switch_to——
+ * 重权重 worker 让出后往往被重新选中，走"不真正切换"的快路径，每轮约 1.2 µs；
+ * 低权重 worker 每次轮到都要付一次真正的 switch_to（含 satp 写入 + sfence.vma，
+ * QEMU 下实测约 100 µs）。差 40 倍，于是次数由开销而非权重决定，实测出现过
+ * nice-10 拿 691、nice+10 拿 3309 的**反转**。
+ *
+ * 改成断言累计 CPU 时间之后，实测比值稳定在 70~90 倍（理论 86.8），余量充足。
+ * 次数只留着打印和"预算是否耗尽"用。无饥饿则交给等权重的用例，那里四个 worker
+ * 行为对称、单轮成本一致，次数才是可信的观测量。 */
+#define CFS_BUDGET  4000
+
 static volatile int cfs_budget;
 static volatile int cfs_count[CFS_WORKERS];
-static volatile int cfs_start; /* 0 = 所有 worker 就位前不许动预算 */
+static volatile uint64_t cfs_rt[CFS_WORKERS]; /* 测量阶段内各自累计的真实 CPU 时间 */
+
+/* 起跑线闸门：四个 worker 阻塞在这上面，由 init **一次性广播**放行。
+ * 两条要求都是踩出来的，改动前请先看完：
+ *
+ * ① **不能忙等**。原先写的是 `while (!cfs_start) sched_schedule();`——忙等是真的在
+ *    烧 CPU，每个 worker 烧掉多少取决于它落在哪个 hart、跟谁抢，实测能差三个数量级
+ *    （一个 worker 在屏障上累计 13 毫秒，另一个只有 50 微秒）。烧得多的那个进入测量
+ *    阶段时 vruntime 已经背了十几万的债，一次都轮不到。**这是屏障污染了起跑线，
+ *    不是调度器不公平**——CFS 让多吃了 CPU 的任务等，恰恰是对的。阻塞则不累积运行
+ *    时间，唤醒重新入队时 fair_enqueue 把 vruntime 统一钳到 min_vruntime，起跑线才齐。
+ *
+ * ② **放行必须是一次广播，不能逐个唤醒**。用信号量试过（init 连调 CFS_WORKERS 次
+ *    sem_up）：前两个被唤醒的 worker 会立刻把 init 抢下 CPU，等 init 再跑起来放行
+ *    后两个时，预算早被前两个吃光——实测出现过等权重下 `counts: 208 192 0 0`，
+ *    以及加权用例里轻权重独自跑了 4.4 毫秒导致 CPU 时间反转。waitq_wake_all 在持锁
+ *    状态下一次唤醒全部，没有这个窗口。
+ *
+ * 也试过 sched_sleep_ticks 轮询：起跑线同样齐，但受 tick 粒度拖累，单次运行从
+ * 0.5 秒涨到 12 秒以上，不值。 */
+static osslock_t    cfs_gate_lock;
+static waitq_t      cfs_gate_wq;
+static volatile int cfs_gate_open;
+
+static void cfs_gate_init(void)
+{
+    spinlock_init(&cfs_gate_lock);
+    waitq_init(&cfs_gate_wq);
+    cfs_gate_open = 0;
+}
+
+static void cfs_gate_wait(void)
+{
+    spinlock_acquire(&cfs_gate_lock);
+    while (!cfs_gate_open)
+    {
+        waitq_prepare(&cfs_gate_wq);
+        spinlock_release(&cfs_gate_lock);
+        sched_schedule();
+        spinlock_acquire(&cfs_gate_lock);
+    }
+    spinlock_release(&cfs_gate_lock);
+}
+
+static void cfs_gate_release(void)
+{
+    spinlock_acquire(&cfs_gate_lock);
+    cfs_gate_open = 1;
+    waitq_wake_all(&cfs_gate_wq);
+    spinlock_release(&cfs_gate_lock);
+}
 
 /* 前一半 nice-10（权重 9548），后一半 nice+10（权重 110），相差约 87 倍 */
 static int cfs_nice_of(int idx)
@@ -169,14 +242,14 @@ static void *cfs_fair_worker(void *arg)
     int idx = (int)(intptr_t)arg;
 
     /* 等所有 worker 都被 fork 出来再开跑，避免先建好的把预算独吞。
-     * 在设 nice 之前等，让各 worker 空转阶段的权重一致，不污染公平性测量 */
-    while (!cfs_start)
-    {
-        sched_schedule();
-    }
+     * 在设 nice 之前等，让各 worker 阻塞阶段的权重一致。闸门为什么必须是"阻塞 +
+     * 一次广播放行"而不是忙等或逐个唤醒，见 cfs_gate_* 上方的说明。 */
+    cfs_gate_wait();
 
     /* 对自己设 nice：running 任务不在队列里，on_rq=false，只改字段，安全 */
     sched_set_nice(proc_get_current(), cfs_nice_of(idx));
+
+    uint64_t rt0 = proc_get_current()->proc_sum_exec_runtime;
 
     while (1)
     {
@@ -190,6 +263,8 @@ static void *cfs_fair_worker(void *arg)
         cfs_count[idx] += 1; /* 每个 worker 只写自己那格，无竞争 */
         sched_schedule();    /* 主动让出，仍 RUNNING → 被重新入队 */
     }
+
+    cfs_rt[idx] = proc_get_current()->proc_sum_exec_runtime - rt0;
     return NULL;
 }
 
@@ -197,8 +272,86 @@ static void sched_cfs_fairness_test(void)
 {
     printf("\n-- CFS fairness: nice weighting --\n");
 
-    cfs_budget = 400;
-    cfs_start = 0;
+    cfs_budget = CFS_BUDGET;
+    cfs_gate_init();
+    for (int i = 0; i < CFS_WORKERS; i++)
+    {
+        cfs_count[i] = 0;
+        cfs_rt[i] = 0;
+    }
+
+    for (int i = 0; i < CFS_WORKERS; i++)
+    {
+        create_kernel_thread_by_fork(cfs_fair_worker, (void *)(intptr_t)i, 0);
+    }
+    cfs_gate_release(); /* 全部就位，一次广播放行 */
+    sched_test_reap_all();
+
+    int low_cnt = 0, high_cnt = 0;
+    uint64_t low_rt = 0, high_rt = 0;
+    for (int i = 0; i < CFS_WORKERS; i++)
+    {
+        if (cfs_nice_of(i) < 0)
+        {
+            low_cnt += cfs_count[i];
+            low_rt  += cfs_rt[i];
+        }
+        else
+        {
+            high_cnt += cfs_count[i];
+            high_rt  += cfs_rt[i];
+        }
+    }
+
+    printf("  workers=%d  counts: nice-10=%d nice+10=%d   cputime: nice-10=%d nice+10=%d\n",
+           CFS_WORKERS, low_cnt, high_cnt, (int)low_rt, (int)high_rt);
+
+    sched_test_check("budget fully consumed", low_cnt + high_cnt == CFS_BUDGET);
+    /* **断言 CPU 时间而不是轮转次数**。CFS 分配的是时间；轮转次数 = 时间 / 单轮成本，
+     * 而单轮成本取决于该次让出有没有真的发生 switch_to（快路径约 1.2 µs，真切换约
+     * 100 µs，差 40 倍），跟权重无关。用次数断言时实测出现过 nice-10 拿 691、
+     * nice+10 拿 3309 的反转——不是调度器错了，是这个观测量选错了。 */
+    sched_test_check("lower nice got more CPU time", low_rt > high_rt);
+}
+
+/* ============================================================
+ * 无饥饿测试：**等权重**下每个 worker 都必须被调度到，且份额大致均等
+ *
+ * 与上面的公平性用例分工：那边比例悬殊（87:1），单轮成本又不对称，测得出"权重生效"
+ * 但测不出"没人被饿死"；这边全部 nice 0，四个 worker 行为对称、单轮成本一致，
+ * 于是"每人都跑到"和"份额均等"都成为稳稳可测的性质。真有人拿到 0，就是调度器
+ * 漏掉了就绪队列里的某个任务，那才是需要查的 bug。
+ * ============================================================ */
+static void *cfs_nostarve_worker(void *arg)
+{
+    int idx = (int)(intptr_t)arg;
+
+    cfs_gate_wait();
+
+    while (1)
+    {
+        if (atomic_add(&cfs_budget, -1) <= 0)
+        {
+            atomic_add(&cfs_budget, 1);
+            break;
+        }
+        cfs_count[idx] += 1;
+        sched_schedule();
+    }
+    return NULL;
+}
+
+#define NOSTARVE_BUDGET 4000
+/* 均等份额是 400/4 = 100；取 1/8 的下限（12）留足抖动余量，同时仍能抓住
+ * "某个 worker 被系统性冷落"这类真问题 */
+#define NOSTARVE_MIN    (NOSTARVE_BUDGET / CFS_WORKERS / 8)
+
+static void sched_cfs_nostarve_test(void)
+{
+    printf("\n-- CFS no-starvation: equal weights --\n");
+
+    cfs_budget = NOSTARVE_BUDGET;
+    cfs_gate_init();
     for (int i = 0; i < CFS_WORKERS; i++)
     {
         cfs_count[i] = 0;
@@ -206,35 +359,37 @@ static void sched_cfs_fairness_test(void)
 
     for (int i = 0; i < CFS_WORKERS; i++)
     {
-        create_kernel_thread_by_fork(cfs_fair_worker, (void *)(intptr_t)i, 0);
+        create_kernel_thread_by_fork(cfs_nostarve_worker, (void *)(intptr_t)i, 0);
     }
-    cfs_start = 1; /* 全部就位，放行 */
+    cfs_gate_release();
     sched_test_reap_all();
 
-    int low_nice = 0;  /* nice-10 一组（高权重）合计 */
-    int high_nice = 0; /* nice+10 一组（低权重）合计 */
+    int total = 0;
     int all_ran = 1;
+    int all_fair = 1;
     for (int i = 0; i < CFS_WORKERS; i++)
     {
+        total += cfs_count[i];
         if (cfs_count[i] <= 0)
         {
             all_ran = 0;
         }
-        if (cfs_nice_of(i) < 0)
+        if (cfs_count[i] < NOSTARVE_MIN)
         {
-            low_nice += cfs_count[i];
-        }
-        else
-        {
-            high_nice += cfs_count[i];
+            all_fair = 0;
         }
     }
 
-    printf("  workers=%d  nice-10 total=%d   nice+10 total=%d\n",
-           CFS_WORKERS, low_nice, high_nice);
-    sched_test_check("all CFS workers ran", all_ran);
-    sched_test_check("budget fully consumed", low_nice + high_nice == 400);
-    sched_test_check("lower nice got more CPU", low_nice > high_nice);
+    printf("  counts:");
+    for (int i = 0; i < CFS_WORKERS; i++)
+    {
+        printf(" %d", cfs_count[i]);
+    }
+    printf("   total=%d\n", total);
+
+    sched_test_check("every equal-weight worker ran", all_ran);
+    sched_test_check("no equal-weight worker starved", all_fair);
+    sched_test_check("no-starve budget fully consumed", total == NOSTARVE_BUDGET);
 }
 
 /* ============================================================
@@ -309,6 +464,7 @@ void run_sched_tests(void)
     sched_unit_tests();
     sched_lifecycle_test();
     sched_cfs_fairness_test();
+    sched_cfs_nostarve_test();
     sched_timed_sleep_test();
     sync_sem_wakeup_test();
     sync_mutex_test();

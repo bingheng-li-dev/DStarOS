@@ -104,8 +104,24 @@ static void fair_update_curr(pcb_t *curr)
      * "这次换上 CPU 以来跑了多久"，供 fair_task_tick 判断是否跑满 SCHED_MIN_GRANULARITY */
     curr->proc_sum_exec_runtime += delta;
 
-    /* Δvruntime = delta * nice0 / proc_weight */
-    curr->proc_vruntime += delta * SCHED_NICE_0_WEIGHT / curr->proc_weight;
+    /* Δvruntime = delta * nice0 / proc_weight，**除不尽的余数必须留到下次**。
+     *
+     * sched_now() 的单位是 time CSR 的一格（QEMU 上 100 ns），而 delta 是"这次在 CPU 上
+     * 待了多久"。频繁主动让出的任务每次只待几百纳秒，于是 delta * 1024 常常小于
+     * proc_weight——整数除法直接得 0。这对高权重任务是灾难性的：nice-10 的权重 9548，
+     * 只要 delta < 9548/1024 ≈ 9.3 格（932 ns）它的 vruntime 就**一格都不涨**，而同样
+     * 短的一次运行给 nice+10（权重 110）涨 9。结果是高权重任务的 vruntime 永远停在原地、
+     * 独占 CPU，低权重任务跑一次就被顶到队尾再也回不来——**完全丧失加权公平，退化成
+     * 高权重独占**。实测（sched_test 的公平性用例，预算 4000）：低权重两个 worker 合计
+     * 只拿到 2 次，而理论份额是 45 次，且把预算从 400 加到 4000 这个数一点不变——
+     * "份额与预算无关"正是被饿死而不是分得少的特征。
+     *
+     * 把余数累加回下一次，换算就是精确的：无论切片多短，时间都不会凭空丢掉。
+     * （Linux 走的是另一条路——预计算 inv_weight 做定点乘法移位，精度同样够，
+     * 但要多一张表；这里任务数少，留余数更直白。） */
+    uint64_t numerator = delta * SCHED_NICE_0_WEIGHT + curr->proc_vruntime_rem;
+    curr->proc_vruntime     += numerator / curr->proc_weight;
+    curr->proc_vruntime_rem  = (uint32_t)(numerator % curr->proc_weight);
 
     /* 比较rbtree最左节点进程vruntime和当前进程vruntime，
      * 选择更小的那个与旧的min_vruntime比较，择其大者 */
@@ -643,8 +659,26 @@ void sched_set_nice(pcb_t *p, int nice)
 
     spinlock_acquire(&run_queue.lock);
 
+    /* 换权重之前，先把**已经跑过、但还没结算进 vruntime 的那段时间**按旧权重结清。
+     * 不结清的话这段时间会被追溯按新权重计价：一个任务在自己正跑着的时候把 nice
+     * 从 0 调到 +10（权重 1024 → 110），换权重前跑的那几微秒会被按 110 计成 9 倍多的
+     * vruntime，一次就足以把它顶到红黑树很靠后的位置、长时间轮不到。sched_test 的
+     * 公平性用例正是这么用的（worker 自己给自己设 nice），实测低权重 worker 因此
+     * 时好时坏地只拿到 1~5 次而不是应得的 20 次左右。Linux 的 reweight_entity()
+     * 同样是先 update_curr() 再改权重。
+     *
+     * 只结算"正在本 CPU 上跑的那个任务"：其余任务被换下时已在 sched_schedule() 里
+     * 结算过，它们的 proc_exec_start 是陈旧值，拿来算 delta 会得到一个巨大的假账。 */
+    if (p == proc_get_current())
+    {
+        fair_update_curr(p);
+    }
+
     p->proc_nice = nice;
     p->proc_weight = fair_nice_to_weight(nice);
+    /* 余数是"按旧权重还没换算完的那部分"，换了权重就没有意义了，丢掉。
+     * 它恒小于旧权重，最多损失不到一格 vruntime。 */
+    p->proc_vruntime_rem = 0;
 
     if (p->proc_on_rq)
     {

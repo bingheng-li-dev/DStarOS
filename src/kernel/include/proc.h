@@ -102,6 +102,8 @@ struct proc_control_block
     int proc_nice;               /* nice 值 [-20, 19]，默认 0 */
     uint32_t proc_weight;        /* 由 nice 派生的权重，nice=0 时为 SCHED_NICE_0_WEIGHT */
     uint64_t proc_vruntime;      /* 加权虚拟运行时间，单位同 sched_now() */
+    uint32_t proc_vruntime_rem;  /* 上次换算 vruntime 时除不尽的余数，见 fair_update_curr()
+                                  * 里的说明；恒 < proc_weight，改 nice 时清零 */
     uint64_t proc_exec_start;    /* 上次结算（换入/每个 tick）的时刻，用于算本次 delta；每次结算都刷新 */
     uint64_t proc_sum_exec_runtime_prev; /* 换入 CPU 那一刻对 proc_sum_exec_runtime 拍的快照，只在换入时写 */
     uint64_t proc_sum_exec_runtime;      /* 累计执行时间 */

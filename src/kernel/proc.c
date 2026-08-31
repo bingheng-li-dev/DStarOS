@@ -436,6 +436,7 @@ static pcb_t *alloc_new_proc(void)
         pcb->proc_nice = 0;
         pcb->proc_weight = SCHED_NICE_0_WEIGHT;
         pcb->proc_vruntime = 0;
+        pcb->proc_vruntime_rem = 0;
         pcb->proc_exec_start = 0;
         pcb->proc_sum_exec_runtime = 0;
         pcb->proc_sum_exec_runtime_prev = 0;
