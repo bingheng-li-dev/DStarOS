@@ -16,33 +16,69 @@
 
 extern void sched_test_check(const char *name, int cond);
 extern int sched_test_reap_all(void);
+/* 广播门闩：实现在 sched_test.c，两个测试文件共用（为什么必须是"阻塞 + 一次广播放行"
+ * 而不是忙等或逐个唤醒，见那边的说明） */
+extern void sched_test_gate_init(void);
+extern void sched_test_gate_wait(void);
+extern void sched_test_gate_release(void);
 
 /* ============================================================
- * 测试一：RT 抢占 CFS —— RT 任务只要就绪就永远排在 CFS 前面
- * 用一个全局递增序号记录两个 worker 的活动区间，RT 应完全跑在 CFS 之前
+ * 测试一：RT 抢占 CFS —— 只要还有 RT 任务可运行，CFS 就分不到 CPU
+ *
+ * **RT worker 数必须等于 hart 数**。就绪队列是全局唯一的，两个 hart 各自从中取任务；
+ * 只有 1 个 RT 任务时，它占住一个 hart，另一个 hart 空着自然会去跑 CFS 任务——
+ * 那是正确行为（不能因为别处有 RT 任务就让一个 CPU 闲着），不是抢占失效。
+ * 占满所有 hart，"CFS 一次都跑不到"才成为一条可断言的性质。
+ *
+ * 【2026-08-31 修】原来只开 1 个 RT worker，断言 `rt_last < cfs_first`（RT 全程跑完
+ * 才轮到 CFS）。那要求严格串行，在双 hart 上根本不成立，能长期通过只是因为 RT worker
+ * 那 10 次迭代太快、hart1 通常来不及把 CFS worker 调上来——实测余量恰好 1 格
+ * （cfs_first 总是 rt_last+1），约 0.3% 的运行会翻。人为放大 fork 与提升 RT 之间的
+ * 窗口后必现 `rt[1..22] cfs[3..13]`，即两个 worker 在两个 hart 上并行跑。
+ *
+ * 另一处一并修掉：原来靠"init 在 fork 与提升 RT 之间不让出"来保证 worker 不会抢跑。
+ * 这个前提同样不成立——fork 里的 sched_activate 会 IPI 另一个 hart，worker 可能在
+ * 还是 CFS 身份时就被调度起来。改成让 worker 阻塞在广播门闩上，init 设完调度类再放行。
  * ============================================================ */
-static volatile int seq;
-static volatile int rt_first, rt_last, cfs_first, cfs_last;
+#define RTP_RT_WORKERS  CORE_NUMBER  /* 占满所有 hart，见上方说明 */
+#define RTP_ITERS       10
+
+static volatile int rtp_seq;
+static volatile int rtp_rt_done[RTP_RT_WORKERS]; /* 各 RT worker 跑完那一刻的序号 */
+static volatile int rtp_cfs_first;               /* CFS worker 第一次拿到 CPU 的序号 */
+static volatile int rtp_cfs_last;
+
+/* 多个 worker 在不同 hart 上并发领号，必须原子自增；atomic_add 返回旧值 */
+static int rtp_next_seq(void)
+{
+    return atomic_add(&rtp_seq, 1) + 1;
+}
 
 static void *rtp_rt_worker(void *arg)
 {
-    (void)arg;
-    rt_first = ++seq;
-    for (int k = 0; k < 10; k++)
+    int id = (int)(intptr_t)arg;
+
+    sched_test_gate_wait();
+
+    for (int k = 0; k < RTP_ITERS; k++)
     {
-        rt_last = ++seq;
-        sched_schedule(); /* RR/FIFO 让出：RT 类里只有它，仍会被立刻选回 */
+        rtp_next_seq();
+        sched_schedule(); /* RR 让出：让出前会被重新入队，本优先级里仍是它，立刻被选回 */
     }
+    rtp_rt_done[id] = rtp_next_seq();
     return NULL;
 }
 
 static void *rtp_cfs_worker(void *arg)
 {
     (void)arg;
-    cfs_first = ++seq;
-    for (int k = 0; k < 10; k++)
+
+    sched_test_gate_wait();
+
+    rtp_cfs_first = rtp_next_seq();
+    for (int k = 1; k < RTP_ITERS; k++)
     {
-        cfs_last = ++seq;
+        rtp_cfs_last = rtp_next_seq();
         sched_schedule();
     }
     return NULL;
@@ -52,28 +88,58 @@ void rt_preempt_cfs_test(void)
 {
     printf("\n-- RT preempts CFS --\n");
 
-    seq = 0;
-    rt_first = rt_last = cfs_first = cfs_last = 0;
-
-    int16_t rp = create_kernel_thread_by_fork(rtp_rt_worker, NULL, 0);
-    int16_t cp = create_kernel_thread_by_fork(rtp_cfs_worker, NULL, 0);
-    (void)cp;
-
-    /* 在两个 worker 被调度上台前，把 rp 提升为 RT（SCHED_RR，优先级 10）。
-     * init 在 fork 与此处之间不让出，故 worker 不会提前运行。 */
-    pcb_t *rt = proc_find_by_pid(rp);
-    sched_test_check("found rt worker pcb", rt != NULL);
-    if (rt)
+    rtp_seq = 0;
+    rtp_cfs_first = 0;
+    rtp_cfs_last = 0;
+    for (int i = 0; i < RTP_RT_WORKERS; i++)
     {
-        sched_setscheduler(rt, SCHED_RR, 10);
+        rtp_rt_done[i] = 0;
     }
+    sched_test_gate_init();
 
+    int16_t rp[RTP_RT_WORKERS];
+    for (int i = 0; i < RTP_RT_WORKERS; i++)
+    {
+        rp[i] = create_kernel_thread_by_fork(rtp_rt_worker, (void *)(intptr_t)i, 0);
+    }
+    create_kernel_thread_by_fork(rtp_cfs_worker, NULL, 0);
+
+    /* 门闩关着，谁也没开跑，这里从容把 RT worker 全部设成 SCHED_RR */
+    int found_all = 1;
+    for (int i = 0; i < RTP_RT_WORKERS; i++)
+    {
+        pcb_t *w = proc_find_by_pid(rp[i]);
+        if (w == NULL)
+        {
+            found_all = 0;
+        }
+        else
+        {
+            sched_setscheduler(w, SCHED_RR, 10);
+        }
+    }
+    sched_test_check("found all RT worker pcbs", found_all);
+
+    sched_test_gate_release(); /* 一次广播放行：RT 与 CFS 同时变为可运行 */
     sched_test_reap_all();
 
-    printf("  rt活动区间[%d..%d]  cfs活动区间[%d..%d]\n", rt_first, rt_last, cfs_first, cfs_last);
-    sched_test_check("both RT and CFS workers ran", rt_first > 0 && cfs_first > 0);
-    /* RT 全程跑完（rt_last）才轮到 CFS 开始（cfs_first） */
-    sched_test_check("RT fully ran before CFS started", rt_last < cfs_first);
+    /* 第一个 RT worker 退出的那一刻，才空出第一个 hart */
+    int first_rt_done = rtp_rt_done[0];
+    for (int i = 1; i < RTP_RT_WORKERS; i++)
+    {
+        if (rtp_rt_done[i] < first_rt_done)
+        {
+            first_rt_done = rtp_rt_done[i];
+        }
+    }
+
+    printf("  最先跑完的 RT worker 在序号 %d 退出，CFS 活动区间[%d..%d]\n",
+           first_rt_done, rtp_cfs_first, rtp_cfs_last);
+    sched_test_check("both RT and CFS workers ran",
+                     first_rt_done > 0 && rtp_cfs_first > 0);
+    /* 所有 hart 都被 RT 占着的那段时间里，CFS 一次都不该跑到 */
+    sched_test_check("CFS got no CPU while RT occupied every hart",
+                     rtp_cfs_first > first_rt_done);
 }
 
 /* ============================================================

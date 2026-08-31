@@ -181,7 +181,8 @@ static volatile int cfs_budget;
 static volatile int cfs_count[CFS_WORKERS];
 static volatile uint64_t cfs_rt[CFS_WORKERS]; /* 测量阶段内各自累计的真实 CPU 时间 */
 
-/* 起跑线闸门：四个 worker 阻塞在这上面，由 init **一次性广播**放行。
+/* 起跑线闸门（rt_sched_test.c 也用，故非 static）：worker 阻塞在这上面，由 init
+ * **一次性广播**放行。
  * 两条要求都是踩出来的，改动前请先看完：
  *
  * ① **不能忙等**。原先写的是 `while (!cfs_start) sched_schedule();`——忙等是真的在
@@ -203,14 +204,14 @@ static osslock_t    cfs_gate_lock;
 static waitq_t      cfs_gate_wq;
 static volatile int cfs_gate_open;
 
-static void cfs_gate_init(void)
+void sched_test_gate_init(void)
 {
     spinlock_init(&cfs_gate_lock);
     waitq_init(&cfs_gate_wq);
     cfs_gate_open = 0;
 }
 
-static void cfs_gate_wait(void)
+void sched_test_gate_wait(void)
 {
     spinlock_acquire(&cfs_gate_lock);
     while (!cfs_gate_open)
@@ -223,7 +224,7 @@ static void cfs_gate_wait(void)
     spinlock_release(&cfs_gate_lock);
 }
 
-static void cfs_gate_release(void)
+void sched_test_gate_release(void)
 {
     spinlock_acquire(&cfs_gate_lock);
     cfs_gate_open = 1;
@@ -243,8 +244,8 @@ static void *cfs_fair_worker(void *arg)
 
     /* 等所有 worker 都被 fork 出来再开跑，避免先建好的把预算独吞。
      * 在设 nice 之前等，让各 worker 阻塞阶段的权重一致。闸门为什么必须是"阻塞 +
-     * 一次广播放行"而不是忙等或逐个唤醒，见 cfs_gate_* 上方的说明。 */
-    cfs_gate_wait();
+     * 一次广播放行"而不是忙等或逐个唤醒，见 sched_test_gate_* 上方的说明。 */
+    sched_test_gate_wait();
 
     /* 对自己设 nice：running 任务不在队列里，on_rq=false，只改字段，安全 */
     sched_set_nice(proc_get_current(), cfs_nice_of(idx));
@@ -273,7 +274,7 @@ static void sched_cfs_fairness_test(void)
     printf("\n-- CFS fairness: nice weighting --\n");
 
     cfs_budget = CFS_BUDGET;
-    cfs_gate_init();
+    sched_test_gate_init();
     for (int i = 0; i < CFS_WORKERS; i++)
     {
         cfs_count[i] = 0;
@@ -284,7 +285,7 @@ static void sched_cfs_fairness_test(void)
     {
         create_kernel_thread_by_fork(cfs_fair_worker, (void *)(intptr_t)i, 0);
     }
-    cfs_gate_release(); /* 全部就位，一次广播放行 */
+    sched_test_gate_release(); /* 全部就位，一次广播放行 */
     sched_test_reap_all();
 
     int low_cnt = 0, high_cnt = 0;
@@ -326,7 +327,7 @@ static void *cfs_nostarve_worker(void *arg)
 {
     int idx = (int)(intptr_t)arg;
 
-    cfs_gate_wait();
+    sched_test_gate_wait();
 
     while (1)
     {
@@ -351,7 +352,7 @@ static void sched_cfs_nostarve_test(void)
     printf("\n-- CFS no-starvation: equal weights --\n");
 
     cfs_budget = NOSTARVE_BUDGET;
-    cfs_gate_init();
+    sched_test_gate_init();
     for (int i = 0; i < CFS_WORKERS; i++)
     {
         cfs_count[i] = 0;
@@ -361,7 +362,7 @@ static void sched_cfs_nostarve_test(void)
     {
         create_kernel_thread_by_fork(cfs_nostarve_worker, (void *)(intptr_t)i, 0);
     }
-    cfs_gate_release();
+    sched_test_gate_release();
     sched_test_reap_all();
 
     int total = 0;
