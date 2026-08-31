@@ -456,13 +456,13 @@ void vmm_unmap_range(mm_t *mm, virAddr_t start, virAddr_t end)
 
         /* 同一帧可能还被别的进程共享，其它 hart 上的 fork/page fault 可能正
          * 同时改它的 reference，减计数+判断归零必须整体互斥。 */
-        spinlock_acquire(&vmm_lock);
+        irq_key_t vmm_lock_key = spinlock_acquire(&vmm_lock);
         frame->reference--;
         if (frame->reference == 0)
         {
             dealloc(frame);
         }
-        spinlock_release(&vmm_lock);
+        spinlock_release(&vmm_lock, vmm_lock_key);
 
         *ptep = 0;
         tlb_flush_va(va);
@@ -579,7 +579,7 @@ void vmm_page_fault_handler(virAddr_t badva, int fault_type)
         {
             /* reference 的读-判断-改必须整体互斥：另一个共享此帧的进程可能正在
              * 别的 hart 上对同一个 pframe_t 做同样的事。 */
-            spinlock_acquire(&vmm_lock);
+            irq_key_t vmm_lock_key = spinlock_acquire(&vmm_lock);
 
             ppn_t old_ppn = (*ptep) >> PTE_PPN_OFFSET;
             pframe_t *old_frame = convert_ppn2pframe(old_ppn);
@@ -609,7 +609,7 @@ void vmm_page_fault_handler(virAddr_t badva, int fault_type)
                 *ptep = pte_create(convert_pframe2ppn(new_frame), flags);
             }
 
-            spinlock_release(&vmm_lock);
+            spinlock_release(&vmm_lock, vmm_lock_key);
             tlb_flush_va(page_va);
             return;
         }
@@ -679,7 +679,7 @@ int vmm_mm_copy(mm_t *dst, mm_t *src)
 
             /* frame->reference 可能同时被这个帧的另一个共享者在别的 hart 上
              * 改（page fault 拆分 / 进程退出释放），整段增计数+改 PTE 得互斥。 */
-            spinlock_acquire(&vmm_lock);
+            irq_key_t vmm_lock_key = spinlock_acquire(&vmm_lock);
             frame->reference++;
 
             /* 双方共享同一帧，都改成只读：谁先写谁在 page fault 里触发拆分 */
@@ -691,11 +691,11 @@ int vmm_mm_copy(mm_t *dst, mm_t *src)
             if (!dp)
             {
                 frame->reference--;
-                spinlock_release(&vmm_lock);
+                spinlock_release(&vmm_lock, vmm_lock_key);
                 return ENO1_NOMORE_MEM;
             }
             *dp = pte_create(ppn, ro_flags); /* 使用sp的ppn，实现共享 */
-            spinlock_release(&vmm_lock);
+            spinlock_release(&vmm_lock, vmm_lock_key);
         }
     }
     dst->brk_start   = src->brk_start;

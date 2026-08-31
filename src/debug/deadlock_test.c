@@ -18,26 +18,26 @@ int deadlockTest(int argc, char **args)
         spinlock_init(&lock1);
         spinlock_init(&lock2);
         flag = true;
-        spinlock_acquire(&lock1);
+        irq_key_t lock1_key = spinlock_acquire(&lock1);
         tick_delay(1);
         printf("core0 delay finished!\n");
-        spinlock_acquire(&lock2);
+        irq_key_t lock2_key = spinlock_acquire(&lock2);
         printf("core0 Acquire\n");
-        spinlock_release(&lock1);
-        spinlock_release(&lock2);
+        spinlock_release(&lock1, lock1_key);
+        spinlock_release(&lock2, lock2_key);
         printf("core0 Release\n");
     }
     else
     {
         while (!flag)
             ;
-        spinlock_acquire(&lock2);
+        irq_key_t lock2_key = spinlock_acquire(&lock2);
         tick_delay(1);
         printf("core1 delay finished!\n");
-        spinlock_acquire(&lock1);
+        irq_key_t lock1_key = spinlock_acquire(&lock1);
         printf("core1 Acquire\n");
-        spinlock_release(&lock1);
-        spinlock_release(&lock2);
+        spinlock_release(&lock1, lock1_key);
+        spinlock_release(&lock2, lock2_key);
         printf("core1 Release\n");
     }
     return 0;

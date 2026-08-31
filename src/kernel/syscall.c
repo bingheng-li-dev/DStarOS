@@ -863,9 +863,9 @@ static long sys_ioctl(int fd, unsigned long cmd, unsigned long arg)
         {
             return ENO8_NULL_POINTER;
         }
-        spinlock_acquire(&tty->lock);
+        irq_key_t tty_lock_key = spinlock_acquire(&tty->lock);
         tty->tio = kt;
-        spinlock_release(&tty->lock);
+        spinlock_release(&tty->lock, tty_lock_key);
         return 0;
     }
     case TIOCGWINSZ:

@@ -73,7 +73,7 @@ static void tty_echo_str(const char *s)
 
 void tty_input_push(char c)
 {
-    spinlock_acquire(&g_tty.lock);
+    irq_key_t g_tty_lock_key = spinlock_acquire(&g_tty.lock);
 
     /* 1. ICRNL：串口送来的 \r 当作行结束，放最前面，后面所有判断只需认 \n */
     if (c == '\r' && (g_tty.tio.c_iflag & ICRNL))
@@ -100,7 +100,7 @@ void tty_input_push(char c)
         {
             tty_echo('\a');
         }
-        spinlock_release(&g_tty.lock);
+        spinlock_release(&g_tty.lock, g_tty_lock_key);
         return;
     }
 
@@ -111,7 +111,7 @@ void tty_input_push(char c)
         tty_echo_str("^C\n");
         /* 此处是投递 SIGINT 给前台进程组的钩子；当前没有信号机制，只做行丢弃 */
         waitq_wake_all(&g_tty.wq_read);
-        spinlock_release(&g_tty.lock);
+        spinlock_release(&g_tty.lock, g_tty_lock_key);
         return;
     }
 
@@ -123,7 +123,7 @@ void tty_input_push(char c)
         {
             tty_echo('\n');
         }
-        spinlock_release(&g_tty.lock);
+        spinlock_release(&g_tty.lock, g_tty_lock_key);
         return;
     }
 
@@ -139,7 +139,7 @@ void tty_input_push(char c)
                 tty_echo_str("\b \b");
             }
         }
-        spinlock_release(&g_tty.lock);
+        spinlock_release(&g_tty.lock, g_tty_lock_key);
         return;
     }
 
@@ -170,7 +170,7 @@ void tty_input_push(char c)
             g_tty.line_pos = g_tty.edit_pos;
         }
         waitq_wake_all(&g_tty.wq_read);
-        spinlock_release(&g_tty.lock);
+        spinlock_release(&g_tty.lock, g_tty_lock_key);
         return;
     }
 
@@ -178,7 +178,7 @@ void tty_input_push(char c)
     if (g_tty.edit_pos - g_tty.read_pos >= TTY_BUF_SIZE)
     {
         tty_echo('\a');
-        spinlock_release(&g_tty.lock);
+        spinlock_release(&g_tty.lock, g_tty_lock_key);
         return;
     }
     g_tty.buf[g_tty.edit_pos % TTY_BUF_SIZE] = c;
@@ -192,28 +192,29 @@ void tty_input_push(char c)
         g_tty.line_pos = g_tty.edit_pos;
         waitq_wake_all(&g_tty.wq_read);
     }
-    spinlock_release(&g_tty.lock);
+    spinlock_release(&g_tty.lock, g_tty_lock_key);
 }
 
 ssize_t tty_read(file_t *file, void *buf, size_t len)
 {
     tty_t *tty = (tty_t *)file->f_private;
 
-    spinlock_acquire(&tty->lock);
+    irq_key_t tty_lock_key = spinlock_acquire(&tty->lock);
     while (tty->read_pos == tty->line_pos &&
            !(tty->eof_count > 0 && tty->read_pos == tty->eof_queue[0]))
     {
         if (file->f_mode & O_NONBLOCK)
         {
-            spinlock_release(&tty->lock);
+            spinlock_release(&tty->lock, tty_lock_key);
             return -EAGAIN;
         }
         waitq_prepare(&tty->wq_read);
-        spinlock_release(&tty->lock);
+        spinlock_release(&tty->lock, tty_lock_key);
         /* 被 tty_input_push 唤醒后从这里继续，回到循环开头重新检查条件——
          * 可能被虚假唤醒，或数据已被抢先取走，不能想当然直接成功 */
         sched_schedule();
-        spinlock_acquire(&tty->lock);
+        /* 重新取锁：赋值给循环外的 key，不能再声明一个同名局部把它遮蔽掉 */
+        tty_lock_key = spinlock_acquire(&tty->lock);
     }
 
     /* 用 read_pos == eof_queue[0]（而不是 read_pos == line_pos）判断 EOF 是否该在此刻
@@ -228,7 +229,7 @@ ssize_t tty_read(file_t *file, void *buf, size_t len)
         {
             tty->eof_queue[i] = tty->eof_queue[i + 1];
         }
-        spinlock_release(&tty->lock);
+        spinlock_release(&tty->lock, tty_lock_key);
         return 0;
     }
 
@@ -275,7 +276,7 @@ ssize_t tty_read(file_t *file, void *buf, size_t len)
     }
     tty->read_pos += (uint32_t)n;
 
-    spinlock_release(&tty->lock);
+    spinlock_release(&tty->lock, tty_lock_key);
     return (ssize_t)n; /* 短读合法（POSIX read 语义）*/
 }
 
@@ -286,7 +287,7 @@ ssize_t tty_write(file_t *file, const void *buf, size_t len)
     /* 持 ConsoleLock（不持 tty->lock），保证整段用户输出不被 printf 打断；
      * termios 里的 c_oflag 只读一次问题不大——写的过程中被 ioctl 并发改掉是
      * 罕见场景，不值得为此再抢一次 tty->lock。 */
-    spinlock_acquire(&ConsoleLock);
+    irq_key_t ConsoleLock_key = spinlock_acquire(&ConsoleLock);
     for (size_t i = 0; i < len; i++)
     {
         char c = ((const char *)buf)[i];
@@ -296,7 +297,7 @@ ssize_t tty_write(file_t *file, const void *buf, size_t len)
         }
         sbi_console_putchar((int)c);
     }
-    spinlock_release(&ConsoleLock);
+    spinlock_release(&ConsoleLock, ConsoleLock_key);
 
     return (ssize_t)len;
 }

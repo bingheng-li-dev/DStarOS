@@ -139,7 +139,7 @@ void pmm_init_after_mmu_enable(void)
 pframe_t *alloc(uint16_t nsize)
 {
     pframe_t *ret = NULL;
-    spinlock_acquire(&PmmLock);
+    irq_key_t PmmLock_key = spinlock_acquire(&PmmLock);
     if (nsize > FreeList.fnsize)
     {
         goto f1;
@@ -170,7 +170,7 @@ pframe_t *alloc(uint16_t nsize)
     }
 
 f1:
-    spinlock_release(&PmmLock);
+    spinlock_release(&PmmLock, PmmLock_key);
     return ret;
 }
 
@@ -181,7 +181,7 @@ pframe_t *alloc_page(void)
 
 void dealloc(pframe_t *baseppn)
 {
-    spinlock_acquire(&PmmLock);
+    irq_key_t PmmLock_key = spinlock_acquire(&PmmLock);
 
     pframe_t *currentFrame;
     uint16_t nsize;
@@ -206,7 +206,7 @@ void dealloc(pframe_t *baseppn)
     printf("dealloc::Frame has been deallocated!ppn:%ld,pa:%08lx,nsize:%d\n", ppnDealloc, convert_ppn2pa(ppnDealloc), nsize);
 #endif
 
-    spinlock_release(&PmmLock);
+    spinlock_release(&PmmLock, PmmLock_key);
 }
 
 static pframe_t *deleteAndReinsert(uint16_t nsize)

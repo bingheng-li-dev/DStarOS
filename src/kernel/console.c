@@ -22,9 +22,9 @@ void printf(char *fmt, ...)
 {
     va_list args;
     va_start(args, fmt);
-    spinlock_acquire(&ConsoleLock);
+    irq_key_t ConsoleLock_key = spinlock_acquire(&ConsoleLock);
     tfp_format(NULL, stdout_putc, fmt, args);
-    spinlock_release(&ConsoleLock);
+    spinlock_release(&ConsoleLock, ConsoleLock_key);
     va_end(args);
 }
 

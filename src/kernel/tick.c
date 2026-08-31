@@ -47,7 +47,7 @@ void tick_init(void)
 
 void tick_int_handler(void)
 {
-    spinlock_acquire(&tick_lock);
+    irq_key_t tick_lock_key = spinlock_acquire(&tick_lock);
     cpu_get_current()->tick += 1;
 #if DEBUG_TICK
     if (cpu_get_current()->tick % 100 == 0)
@@ -55,7 +55,7 @@ void tick_int_handler(void)
         printf("core %ld : %ld ticks\n", cpu_get_current()->tick);
     }
 #endif
-    spinlock_release(&tick_lock);
+    spinlock_release(&tick_lock, tick_lock_key);
     /* 以下几步都必须在 tick_lock 释放之后，它们各自要抢别的锁，叠在 tick_lock
      * 里面只会多一层没必要的锁序：
      *   sched_task_tick 要抢 run_queue.lock（它读就绪队列，必须与 enqueue/dequeue 互斥）；

@@ -435,6 +435,8 @@ static pcb_t *alloc_new_proc(void)
         pcb->proc_on_cpu = false;
         pcb->proc_nice = 0;
         pcb->proc_weight = SCHED_NICE_0_WEIGHT;
+        /* 新任务第一次被换上时，fork_out 里的 sched_finish_switch 要用它把中断打开 */
+        pcb->proc_rq_key = true;
         pcb->proc_vruntime = 0;
         pcb->proc_vruntime_rem = 0;
         pcb->proc_exec_start = 0;
@@ -936,11 +938,11 @@ static void fork_out(void)
     /* current_proc 已由 sched_schedule() 在调 switch_to() 之前经 sched_set_current()设好 */
 
     /* 本执行流第一次被 switch_to() 换上：调用方 sched_schedule() 在 switch_to()
-     * 之前 spinlock_acquire(&run_queue.lock) 拿了锁、并把 irq_disable_nesting 加了 1，
-     * 按"接力"约定应由被换上的执行流自己补上这次"放锁 + decrement"（sched_schedule()
-     * 里 switch_to 之后的 sched_finish_switch() 配对，这里是同一约定在"从未被调度过的
-     * 新执行流"这一分支上的对应写法）。漏掉会让 run_queue.lock 永远不被释放（整个调度
-     * 器死锁），也会让 irq_disable_nesting 永久多计 1，等效于此后中断永久关闭。 */
+     * 之前 spinlock_acquire(&run_queue.lock) 拿了锁，按"接力"约定应由被换上的执行流
+     * 自己补上这次放锁（sched_schedule() 里 switch_to 之后的 sched_finish_switch()
+     * 配对，这里是同一约定在"从未被调度过的新执行流"这一分支上的对应写法）。
+     * 漏掉会让 run_queue.lock 永远不被释放，整个调度器死锁。
+     * 放锁用的中断 key 取自本任务的 proc_rq_key，alloc_new_proc 已把它初始化成 true。 */
     sched_finish_switch();
 
     fork_out_asm(proc_get_current()->proc_int_stack);
@@ -1282,9 +1284,13 @@ int proc_install_stdio(void)
  */
 pcb_t *proc_get_current(void)
 {
-    irq_disable_nesting_increment();
+    /* 关中断读：读 hartid 与解引用该 hart 的 cpu_t 之间若被中断走、又在别的 hart 上
+     * 被换上，读到的就是另一个 hart 的 current_proc。这里不涉及任何锁，直接用
+     * 中断开关的原语即可，不需要走 spinlock 那套 key。 */
+    bool key;
+    __local_intr_save(key);
     cpu_t *cpu = cpu_get_current();
     pcb_t *proc = cpu->current_proc;
-    irq_disable_nesting_decrement();
+    __local_intr_restore(key);
     return proc;
 }

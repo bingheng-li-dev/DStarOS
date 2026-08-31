@@ -213,23 +213,24 @@ void sched_test_gate_init(void)
 
 void sched_test_gate_wait(void)
 {
-    spinlock_acquire(&cfs_gate_lock);
+    irq_key_t cfs_gate_lock_key = spinlock_acquire(&cfs_gate_lock);
     while (!cfs_gate_open)
     {
         waitq_prepare(&cfs_gate_wq);
-        spinlock_release(&cfs_gate_lock);
+        spinlock_release(&cfs_gate_lock, cfs_gate_lock_key);
         sched_schedule();
-        spinlock_acquire(&cfs_gate_lock);
+        /* 重新取锁：赋值给循环外的 key，不能再声明一个同名局部把它遮蔽掉 */
+        cfs_gate_lock_key = spinlock_acquire(&cfs_gate_lock);
     }
-    spinlock_release(&cfs_gate_lock);
+    spinlock_release(&cfs_gate_lock, cfs_gate_lock_key);
 }
 
 void sched_test_gate_release(void)
 {
-    spinlock_acquire(&cfs_gate_lock);
+    irq_key_t cfs_gate_lock_key = spinlock_acquire(&cfs_gate_lock);
     cfs_gate_open = 1;
     waitq_wake_all(&cfs_gate_wq);
-    spinlock_release(&cfs_gate_lock);
+    spinlock_release(&cfs_gate_lock, cfs_gate_lock_key);
 }
 
 /* 前一半 nice-10（权重 9548），后一半 nice+10（权重 110），相差约 87 倍 */

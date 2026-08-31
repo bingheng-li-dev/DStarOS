@@ -10,25 +10,26 @@ ssize_t pipe_read(file_t *file, void *buf, size_t len)
 {
     pipe_t *p = (pipe_t *)file->f_private;
 
-    spinlock_acquire(&p->lock);
+    irq_key_t p_lock_key = spinlock_acquire(&p->lock);
     while (p->count == 0)
     {
         if (p->writers == 0)
         {
-            spinlock_release(&p->lock);
+            spinlock_release(&p->lock, p_lock_key);
             return 0; /* 写端已全部关闭：EOF */
         }
         if (file->f_mode & O_NONBLOCK)
         {
-            spinlock_release(&p->lock);
+            spinlock_release(&p->lock, p_lock_key);
             return -EAGAIN;
         }
         waitq_prepare(&p->wq_read);
-        spinlock_release(&p->lock);
+        spinlock_release(&p->lock, p_lock_key);
         /* 被 pipe_write 或 pipe_release（写端）唤醒后从这里继续，回到循环开头
          * 重新检查条件——可能被虚假唤醒或被别的读者抢先取走，不能想当然直接成功 */
         sched_schedule();
-        spinlock_acquire(&p->lock);
+        /* 重新取锁：赋值给循环外的 key，不能再声明一个同名局部把它遮蔽掉 */
+        p_lock_key = spinlock_acquire(&p->lock);
     }
 
     size_t n = len;
@@ -53,7 +54,7 @@ ssize_t pipe_read(file_t *file, void *buf, size_t len)
     p->count -= (uint32_t)n;
 
     waitq_wake_all(&p->wq_write);
-    spinlock_release(&p->lock);
+    spinlock_release(&p->lock, p_lock_key);
 
     return (ssize_t)n; /* 短读合法，不循环补满 */
 }
@@ -62,10 +63,10 @@ ssize_t pipe_write(file_t *file, const void *buf, size_t len)
 {
     pipe_t *p = (pipe_t *)file->f_private;
 
-    spinlock_acquire(&p->lock);
+    irq_key_t p_lock_key = spinlock_acquire(&p->lock);
     if (p->readers == 0)
     {
-        spinlock_release(&p->lock);
+        spinlock_release(&p->lock, p_lock_key);
         return ENO22_BROKEN_PIPE; /* TODO：信号机制落地后同时投 SIGPIPE */
     }
 
@@ -81,20 +82,21 @@ ssize_t pipe_write(file_t *file, const void *buf, size_t len)
     {
         if (p->readers == 0)
         {
-            spinlock_release(&p->lock);
+            spinlock_release(&p->lock, p_lock_key);
             return ENO22_BROKEN_PIPE;
         }
         if (file->f_mode & O_NONBLOCK)
         {
-            spinlock_release(&p->lock);
+            spinlock_release(&p->lock, p_lock_key);
             return -EAGAIN;
         }
         waitq_prepare(&p->wq_write);
-        spinlock_release(&p->lock);
+        spinlock_release(&p->lock, p_lock_key);
         /* 被 pipe_read 或 pipe_release（读端）唤醒后从这里继续，回到循环开头
          * 重新检查条件——可能被虚假唤醒或被别的写者抢先占用了腾出的空间 */
         sched_schedule();
-        spinlock_acquire(&p->lock);
+        /* 重新取锁：赋值给循环外的 key，不能再声明一个同名局部把它遮蔽掉 */
+        p_lock_key = spinlock_acquire(&p->lock);
     }
 
     /* 从 head 拷入 need 字节，可能跨越缓冲区末端，分两段 */
@@ -113,7 +115,7 @@ ssize_t pipe_write(file_t *file, const void *buf, size_t len)
     p->count += (uint32_t)need;
 
     waitq_wake_all(&p->wq_read);
-    spinlock_release(&p->lock);
+    spinlock_release(&p->lock, p_lock_key);
 
     return (ssize_t)need;
 }
@@ -124,7 +126,7 @@ ssize_t pipe_write(file_t *file, const void *buf, size_t len)
  * 两条 waitq_wake_all 都不能省。 */
 static void pipe_release_common(pipe_t *p, bool is_reader)
 {
-    spinlock_acquire(&p->lock);
+    irq_key_t p_lock_key = spinlock_acquire(&p->lock);
     if (is_reader)
     {
         p->readers--;
@@ -136,7 +138,7 @@ static void pipe_release_common(pipe_t *p, bool is_reader)
         waitq_wake_all(&p->wq_read);
     }
     bool empty = (p->readers == 0 && p->writers == 0);
-    spinlock_release(&p->lock);
+    spinlock_release(&p->lock, p_lock_key);
 
     if (empty)
     {

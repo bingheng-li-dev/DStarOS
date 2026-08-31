@@ -185,9 +185,9 @@ static void pipe_read_block_wakeup_test(void)
     for (int spin = 0; spin < PIPE_YIELD_SPINS; spin++)
     {
         sched_schedule();
-        spinlock_acquire(&pipe_block_p.lock);
+        irq_key_t pipe_block_p_lock_key = spinlock_acquire(&pipe_block_p.lock);
         blocked = !list_empty(&pipe_block_p.wq_read.task_list);
-        spinlock_release(&pipe_block_p.lock);
+        spinlock_release(&pipe_block_p.lock, pipe_block_p_lock_key);
         if (blocked)
         {
             break;
@@ -198,12 +198,12 @@ static void pipe_read_block_wakeup_test(void)
     /* 模拟写者直接灌数据（这里手工操作字段，不经 pipe_write）+ 唤醒 */
     const char *msg = "wakeup!";
     size_t msglen = strlen(msg);
-    spinlock_acquire(&pipe_block_p.lock);
+    irq_key_t pipe_block_p_lock_key = spinlock_acquire(&pipe_block_p.lock);
     memcpy(pipe_block_p.buf, msg, msglen);
     pipe_block_p.head = (uint32_t)msglen;
     pipe_block_p.count = (uint32_t)msglen;
     waitq_wake_all(&pipe_block_p.wq_read);
-    spinlock_release(&pipe_block_p.lock);
+    spinlock_release(&pipe_block_p.lock, pipe_block_p_lock_key);
 
     int status = 0;
     int16_t c = do_wait(-1, &status);
@@ -355,9 +355,9 @@ static void pipe_write_block_wakeup_test(void)
     for (int spin = 0; spin < PIPE_YIELD_SPINS; spin++)
     {
         sched_schedule();
-        spinlock_acquire(&p->lock);
+        irq_key_t p_lock_key = spinlock_acquire(&p->lock);
         blocked = !list_empty(&p->wq_write.task_list);
-        spinlock_release(&p->lock);
+        spinlock_release(&p->lock, p_lock_key);
         if (blocked)
         {
             break;
@@ -408,9 +408,9 @@ static void pipe_release_write_then_read_eof_test(void)
     for (int spin = 0; spin < PIPE_YIELD_SPINS; spin++)
     {
         sched_schedule();
-        spinlock_acquire(&p->lock);
+        irq_key_t p_lock_key = spinlock_acquire(&p->lock);
         blocked = !list_empty(&p->wq_read.task_list);
-        spinlock_release(&p->lock);
+        spinlock_release(&p->lock, p_lock_key);
         if (blocked)
         {
             break;
@@ -460,9 +460,9 @@ static void pipe_release_read_then_write_epipe_test(void)
     for (int spin = 0; spin < PIPE_YIELD_SPINS; spin++)
     {
         sched_schedule();
-        spinlock_acquire(&p->lock);
+        irq_key_t p_lock_key = spinlock_acquire(&p->lock);
         blocked = !list_empty(&p->wq_write.task_list);
-        spinlock_release(&p->lock);
+        spinlock_release(&p->lock, p_lock_key);
         if (blocked)
         {
             break;

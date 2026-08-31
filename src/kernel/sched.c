@@ -405,9 +405,34 @@ void sched_set_current(pcb_t *p)
 
 void sched_schedule(void)
 {
-    spinlock_acquire(&run_queue.lock);
+    irq_key_t run_queue_lock_key = spinlock_acquire(&run_queue.lock);
 
     pcb_t *curr = proc_get_current();
+    /* 这把锁由"被换上的那条执行流"接力释放（见 sched_finish_switch），所以 key 要
+     * 随任务走：存进自己的 pcb，将来自己被换回来时再取出来用。 */
+    curr->proc_rq_key = run_queue_lock_key;
+
+    /* 护栏：本 hart 连续调度了这么多次，tick 却一格没动——时钟中断停了。
+     * 2026-08-31 遇到过一次：某个任务把中断关着被换上，此后该 hart 的定时器再没
+     * 响过，睡眠任务永远醒不来，表现是整机静默卡死，靠加心跳探针空转两千万圈才
+     * 反推出来。在这里当场 panic 才拿得到现场，代价只是每次调度一次比较。
+     * 阈值给得很松：公平性用例每个 tick 也才几千次调度，这里留了两个数量级余量。 */
+    cpu_t *sched_cpu = cpu_get_current();
+    if (sched_cpu->tick == sched_cpu->sched_last_tick)
+    {
+        sched_cpu->sched_same_tick += 1;
+        if (sched_cpu->sched_same_tick > 1000000u)
+        {
+            panic("hart %d: timer stalled (tick=%ld stuck, sie=%d, pid=%d)",
+                  (int)cpu_get_core_id(), sched_cpu->tick,
+                  (int)((read_csr(sstatus) & SSTATUS_SIE) != 0), curr->proc_pid);
+        }
+    }
+    else
+    {
+        sched_cpu->sched_last_tick = sched_cpu->tick;
+        sched_cpu->sched_same_tick = 0;
+    }
     fair_update_curr(curr);
     if (curr->proc_state == RUNNING && curr->proc_sched_class != &idle_sched_class)
     {
@@ -428,8 +453,8 @@ void sched_schedule(void)
      * 队列里挑走 curr，并按这份尚未写入的旧上下文把它"换上"——同一个任务会在两个
      * hart 上用同一个内核栈并发执行，后果是随机的内存/状态损坏。
      *
-     * 因此改由"被换上的执行流"在 switch_to 之后释放这把锁（与 irq_disable_nesting
-     * 的"接力"约定完全一致：谁被换上，谁负责补上前一条执行流欠下的那次释放）。
+     * 因此改由"被换上的执行流"在 switch_to 之后释放这把锁：谁被换上，谁负责补上
+     * 前一条执行流欠下的那次释放，用的是它自己 pcb 里存的 proc_rq_key。
      * switch_to 是纯汇编、内部不获取任何锁，临界区长度有界，不会死锁。 */
     if (next != curr)
     {
@@ -458,7 +483,12 @@ void sched_finish_switch(void)
         cpu->prev_proc = NULL;
     }
 
-    spinlock_release(&run_queue.lock);
+    /* 用**被换上的这个任务自己**存下的 key：它是这条执行流当初 acquire 时记下的
+     * "进来之前中断是开是关"。绝不能读 per-CPU 的槽——acquire 在别的执行流、
+     * 甚至别的 hart 上发生，per-CPU 槽里的值与这次 release 并不配对。 */
+    pcb_t *me = cpu->current_proc;
+    spinlock_release(&run_queue.lock, me->proc_rq_key);
+
 }
 
 void sched_enqueue(pcb_t *p)
@@ -485,7 +515,7 @@ void sched_dequeue(pcb_t *p)
 
 void sched_activate(pcb_t *p)
 {
-    spinlock_acquire(&run_queue.lock);
+    irq_key_t run_queue_lock_key = spinlock_acquire(&run_queue.lock);
 
     /* p 可能正在另一个 hart 上执行（典型场景：它刚把自己标成待睡眠、放掉了外层的
      * 条件锁，但还没走到 sched_schedule 的 switch_to）。这种情况下绝不能入队——
@@ -503,7 +533,7 @@ void sched_activate(pcb_t *p)
         enqueued = true;
     }
 
-    spinlock_release(&run_queue.lock);
+    spinlock_release(&run_queue.lock, run_queue_lock_key);
 
     if (enqueued)
     {
@@ -575,7 +605,7 @@ void sched_sleep_ticks(uint64_t ticks)
     pcb_t *curr = proc_get_current();
     uint64_t wake_at = tick_get_os_tick() + ticks;
 
-    spinlock_acquire(&sleeping_tasks_lock);
+    irq_key_t sleeping_tasks_lock_key = spinlock_acquire(&sleeping_tasks_lock);
 
     curr->proc_wake_tick = wake_at;
     curr->proc_state = INTERRUPTIBLE;
@@ -591,7 +621,7 @@ void sched_sleep_ticks(uint64_t ticks)
     }
     list_add_tail(&curr->proc_timer_linker, pos);
 
-    spinlock_release(&sleeping_tasks_lock);
+    spinlock_release(&sleeping_tasks_lock, sleeping_tasks_lock_key);
 
     sched_schedule();
 }
@@ -609,7 +639,7 @@ void sched_check_timers(void)
     uint64_t now = tick_get_os_tick();
     struct list_head *pos, *tmp;
 
-    spinlock_acquire(&sleeping_tasks_lock);
+    irq_key_t sleeping_tasks_lock_key = spinlock_acquire(&sleeping_tasks_lock);
     list_for_each_safe(pos, tmp, &sleeping_tasks)
     {
         pcb_t *p = list_entry(pos, pcb_t, proc_timer_linker);
@@ -620,7 +650,7 @@ void sched_check_timers(void)
         list_del(&p->proc_timer_linker);
         wakeup(p);
     }
-    spinlock_release(&sleeping_tasks_lock);
+    spinlock_release(&sleeping_tasks_lock, sleeping_tasks_lock_key);
 }
 
 void sched_task_tick(void)
@@ -641,9 +671,9 @@ void sched_task_tick(void)
      * 这里的 rb_first() 就返回 NULL，rb_entry(NULL, ...) 得到一个负地址，
      * 内核态访问它直接 segfault（va=0xffffffffffffffe0）。
      * 锁序：本函数由 tick_int_handler 在释放 tick_lock 之后调用，不嵌套在 tick_lock 内。 */
-    spinlock_acquire(&run_queue.lock);
+    irq_key_t run_queue_lock_key = spinlock_acquire(&run_queue.lock);
     curr->proc_sched_class->task_tick(curr);
-    spinlock_release(&run_queue.lock);
+    spinlock_release(&run_queue.lock, run_queue_lock_key);
 }
 
 void sched_set_nice(pcb_t *p, int nice)
@@ -657,7 +687,7 @@ void sched_set_nice(pcb_t *p, int nice)
         nice = SCHED_NICE_MAX;
     }
 
-    spinlock_acquire(&run_queue.lock);
+    irq_key_t run_queue_lock_key = spinlock_acquire(&run_queue.lock);
 
     /* 换权重之前，先把**已经跑过、但还没结算进 vruntime 的那段时间**按旧权重结清。
      * 不结清的话这段时间会被追溯按新权重计价：一个任务在自己正跑着的时候把 nice
@@ -686,7 +716,7 @@ void sched_set_nice(pcb_t *p, int nice)
         sched_enqueue(p);
     }
 
-    spinlock_release(&run_queue.lock);
+    spinlock_release(&run_queue.lock, run_queue_lock_key);
 }
 
 void sched_preempt_if_needed(void)
@@ -707,7 +737,7 @@ void sched_preempt_if_needed(void)
 
 void sched_setscheduler(pcb_t *p, int policy, uint8_t rt_prio)
 {
-    spinlock_acquire(&run_queue.lock);
+    irq_key_t run_queue_lock_key = spinlock_acquire(&run_queue.lock);
 
     bool was_on_rq = p->proc_on_rq;
     if (was_on_rq) /* 从旧队列中删除 */
@@ -722,5 +752,5 @@ void sched_setscheduler(pcb_t *p, int policy, uint8_t rt_prio)
         sched_enqueue(p);
     }
 
-    spinlock_release(&run_queue.lock);
+    spinlock_release(&run_queue.lock, run_queue_lock_key);
 }

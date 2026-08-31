@@ -33,19 +33,20 @@ static volatile int wq_stage;     /* 0=未开始 1=已到 prepare 前（即将�
 static void *wq_waiter(void *arg)
 {
     (void)arg;
-    spinlock_acquire(&wq_lock);
+    irq_key_t wq_lock_key = spinlock_acquire(&wq_lock);
     while (!wq_condition)
     {
         wq_stage = 1;
         waitq_prepare(&wq_single);
-        spinlock_release(&wq_lock);
+        spinlock_release(&wq_lock, wq_lock_key);
         /* 被 waitq_wake_all 唤醒后从这里继续，回到循环开头重新检查条件——
          * 不能想当然直接成功，这正是 waitq_prepare 文档要求的用法 */
         sched_schedule();
-        spinlock_acquire(&wq_lock);
+        /* 重新取锁：赋值给循环外的 key，不能再声明一个同名局部把它遮蔽掉 */
+        wq_lock_key = spinlock_acquire(&wq_lock);
     }
     wq_stage = 2;
-    spinlock_release(&wq_lock);
+    spinlock_release(&wq_lock, wq_lock_key);
     return NULL;
 }
 
@@ -68,10 +69,10 @@ void waitq_single_wakeup_test(void)
     }
     sched_test_check("waiter reached waitq_prepare and blocked", wq_stage == 1);
 
-    spinlock_acquire(&wq_lock);
+    irq_key_t wq_lock_key = spinlock_acquire(&wq_lock);
     wq_condition = 1;
     waitq_wake_all(&wq_single);
-    spinlock_release(&wq_lock);
+    spinlock_release(&wq_lock, wq_lock_key);
 
     int status = 0;
     int16_t c = do_wait(-1, &status);
@@ -91,16 +92,17 @@ static volatile int wqb_woken_count; /* 已越过 waitq_prepare 循环的 worker
 static void *wqb_waiter(void *arg)
 {
     (void)arg;
-    spinlock_acquire(&wqb_lock);
+    irq_key_t wqb_lock_key = spinlock_acquire(&wqb_lock);
     while (!wqb_condition)
     {
         waitq_prepare(&wqb);
-        spinlock_release(&wqb_lock);
+        spinlock_release(&wqb_lock, wqb_lock_key);
         sched_schedule();
-        spinlock_acquire(&wqb_lock);
+        /* 重新取锁：赋值给循环外的 key，不能再声明一个同名局部把它遮蔽掉 */
+        wqb_lock_key = spinlock_acquire(&wqb_lock);
     }
     wqb_woken_count += 1;
-    spinlock_release(&wqb_lock);
+    spinlock_release(&wqb_lock, wqb_lock_key);
     return NULL;
 }
 
@@ -124,14 +126,14 @@ void waitq_broadcast_test(void)
     for (int spin = 0; spin < WAITQ_YIELD_SPINS; spin++)
     {
         sched_schedule();
-        spinlock_acquire(&wqb_lock);
+        irq_key_t wqb_lock_key = spinlock_acquire(&wqb_lock);
         queued = 0;
         struct list_head *pos;
         list_for_each(pos, &(wqb.task_list))
         {
             queued++;
         }
-        spinlock_release(&wqb_lock);
+        spinlock_release(&wqb_lock, wqb_lock_key);
         if (queued == WQ_BROADCAST_N)
         {
             break;
@@ -139,10 +141,10 @@ void waitq_broadcast_test(void)
     }
     sched_test_check("all 3 waiters queued on waitq", queued == WQ_BROADCAST_N);
 
-    spinlock_acquire(&wqb_lock);
+    irq_key_t wqb_lock_key = spinlock_acquire(&wqb_lock);
     wqb_condition = 1;
     waitq_wake_all(&wqb);
-    spinlock_release(&wqb_lock);
+    spinlock_release(&wqb_lock, wqb_lock_key);
 
     int reaped = sched_test_reap_all();
     sched_test_check("reaped all 3 broadcast workers", reaped == WQ_BROADCAST_N);

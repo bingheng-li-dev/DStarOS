@@ -4,48 +4,43 @@
 #include "proc.h"
 #include "containerof.h"
 
-void irq_disable_nesting_increment(void)
-{
-    bool intr_flag;
-    __local_intr_save(intr_flag);
-    cpu_t *cpu = cpu_get_current();
-    if (cpu->irq_disable_nesting == 0)
-    {
-        cpu->intr_disable_state = intr_flag;
-    }
-    cpu->irq_disable_nesting += 1;
-}
-
-void irq_disable_nesting_decrement(void)
-{
-    cpu_t *cpu = cpu_get_current();
-    dassert(cpu->irq_disable_nesting >= 1);
-    cpu->irq_disable_nesting -= 1;
-    /* 当"cpu->intr_disable_state"且"cpu->irq_disable_nesting"等于0时重新打开中断。 */
-    if (cpu->irq_disable_nesting == 0)
-    {
-        __local_intr_restore(cpu->intr_disable_state);
-    }
-}
+/* 中断状态由调用者持有，不再有 per-CPU 的嵌套计数器 + 状态槽。
+ *
+ * 【为什么改】原先的写法是 xv6/ucore 那一路：`cpu->irq_disable_nesting` 计数，
+ * 计数 0→1 时把"进来之前中断是开是关"存进 `cpu->intr_disable_state`，1→0 时照它恢复。
+ * 问题在于 acquire 与 release **不保证由同一条执行流完成**——`sched_schedule()` 的
+ * run_queue.lock 就是接力的：一条流 acquire、switch_to 之后由被换上的那条流 release，
+ * 而任务再次被换上时可能已经在另一个 hart。状态存在"CPU"上，配对关系就与执行流脱钩了。
+ * 2026-08-31 实测到过 `nesting == 0` 但 `sstatus.SIE == 0`：没人持锁，中断却永久关着，
+ * 时钟随之停摆、睡眠任务再也醒不来，表现为整机静默卡死。
+ *
+ * 【怎么改】跟 Linux 的 `spin_lock_irqsave(lock, flags)` 与 Zephyr 的
+ * `k_spin_lock()` 返回 key 一致：**把状态交还给调用者**。局部变量在内核栈上，
+ * 内核栈随任务走，任务迁移到别的 hart 也不会配错；调度器那条接力路径则把 key
+ * 存进 pcb（`proc_rq_key`），同样是"随任务走"。
+ *
+ * 嵌套计数器也一并删掉了：内层 acquire 拿到的 key 就是"进来时已经关着"（false），
+ * 它的 release 什么都不做，中断只在最外层那次 release 时才真正打开——
+ * 计数的效果由 key 的取值天然表达，不需要额外的计数器。 */
 
 void spinlock_init(osslock_t *lock)
 {
     ((spinlock_t *)lock)->lock = 0;
 }
 
-/* 自旋锁即申请即用，这里不做额外的死锁预防和处理
- * 申请spinlock并且保存irq状况。 */
-void spinlock_acquire(osslock_t *lock)
+/* 自旋锁即申请即用，这里不做额外的死锁预防和处理。 */
+irq_key_t spinlock_acquire(osslock_t *lock)
 {
-    irq_disable_nesting_increment();
+    irq_key_t key;
+    __local_intr_save(key);
     spinlock_lock((spinlock_t *)lock);
+    return key;
 }
 
-/* 释放spinlock并且还原irq状况。 */
-void spinlock_release(osslock_t *lock)
+void spinlock_release(osslock_t *lock, irq_key_t key)
 {
     spinlock_unlock((spinlock_t *)lock);
-    irq_disable_nesting_decrement();
+    __local_intr_restore(key);
 }
 
 void sem_init(ossem_t *sem, int value)
@@ -61,7 +56,7 @@ void sem_down(ossem_t *sem)
     pcb_t *tsk = proc_get_current();
     bool waited = false; /* 是否真的阻塞过；用来让 sem->waiting 的 +1/-1 严格成对 */
 
-    spinlock_acquire(&(sem->lock));
+    irq_key_t key = spinlock_acquire(&(sem->lock));
     while (sem->count < 1)
     {
         if (!waited)
@@ -82,11 +77,13 @@ void sem_down(ossem_t *sem)
          * 先置状态则相反：wakeup 会把它改回 RUNNING，下面 sched_schedule() 看到
          * curr 仍是 RUNNING 就会把它重新入队并继续跑，不会睡死。 */
         tsk->proc_state = UNINTERRUPTIBLE;
-        spinlock_release(&(sem->lock));
+        spinlock_release(&(sem->lock), key);
         /* 被 sem_up 唤醒后从这里继续，回到循环开头重新检查条件——可能被虚假唤醒
          * 或被别的任务抢先拿走了信号量，所以不能想当然直接成功 */
         sched_schedule();
-        spinlock_acquire(&(sem->lock));
+        /* 重新取锁：赋值给外层的 key，不能再声明一个同名局部把它遮蔽掉——
+         * 那样循环退出后 release 用的会是进入循环前那次 acquire 的陈旧 key。 */
+        key = spinlock_acquire(&(sem->lock));
     }
 
     sem->count -= 1; /* count 最小为 0，不会变负，因为上面 while 保证进这里时 count >= 1 */
@@ -94,13 +91,13 @@ void sem_down(ossem_t *sem)
     {
         atomic_add(&(sem->waiting), -1);
     }
-    spinlock_release(&(sem->lock));
+    spinlock_release(&(sem->lock), key);
     tsk->proc_state = RUNNING;
 }
 
 void sem_up(ossem_t *sem)
 {
-    spinlock_acquire(&(sem->lock));
+    irq_key_t key = spinlock_acquire(&(sem->lock));
     sem->count += 1;
     if (!list_empty(&(sem->wait_list)))
     {
@@ -110,7 +107,7 @@ void sem_up(ossem_t *sem)
         list_del(&(proc->proc_wait_linker));
         wakeup(proc);
     }
-    spinlock_release(&(sem->lock));
+    spinlock_release(&(sem->lock), key);
 }
 
 void waitq_init(waitq_t *wq)

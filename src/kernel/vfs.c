@@ -596,7 +596,7 @@ int16_t register_filesystem(file_system_type_t *fs_type)
         return ENO4_BUSY;
     }
 
-    spinlock_acquire(&vfs_fs_lock);
+    irq_key_t vfs_fs_lock_key = spinlock_acquire(&vfs_fs_lock);
 
     int nlen = (int)strlen(fs_type->name);
     fs_type_ptr = find_filesystem_by_name(fs_type->name, nlen);
@@ -610,7 +610,7 @@ int16_t register_filesystem(file_system_type_t *fs_type)
         *fs_type_ptr = fs_type;
     }
 
-    spinlock_release(&vfs_fs_lock);
+    spinlock_release(&vfs_fs_lock, vfs_fs_lock_key);
 
     return ret;
 }
@@ -630,7 +630,7 @@ int16_t unregister_filesystem(file_system_type_t *fs_type)
         return ENO8_NULL_POINTER;
     }
 
-    spinlock_acquire(&vfs_fs_lock);
+    irq_key_t vfs_fs_lock_key = spinlock_acquire(&vfs_fs_lock);
 
     while (*fs_type_ptr)
     {
@@ -638,13 +638,13 @@ int16_t unregister_filesystem(file_system_type_t *fs_type)
         {
             *fs_type_ptr = fs_type->next;
             fs_type->next = NULL;
-            spinlock_release(&vfs_fs_lock);
+            spinlock_release(&vfs_fs_lock, vfs_fs_lock_key);
             return ENO0_NO_ERROR;
         }
         fs_type_ptr = &(*fs_type_ptr)->next;
     }
 
-    spinlock_release(&vfs_fs_lock);
+    spinlock_release(&vfs_fs_lock, vfs_fs_lock_key);
 
     return ENO5_NOSUCH_ENTRY;
 }
@@ -662,9 +662,9 @@ static file_system_type_t *get_fs_type_by_name(const char *name)
     }
 
     int nlen = (int)strlen(name);
-    spinlock_acquire(&vfs_fs_lock);
+    irq_key_t vfs_fs_lock_key = spinlock_acquire(&vfs_fs_lock);
     file_system_type_t *fs = *find_filesystem_by_name(name, nlen);
-    spinlock_release(&vfs_fs_lock);
+    spinlock_release(&vfs_fs_lock, vfs_fs_lock_key);
 
     return fs;
 }
@@ -1049,12 +1049,12 @@ dentry_t *vfs_lookup(const char *path)
             {
                 /* 在挂载点链表中找到对应的 vfsmount，取宿主目录项的父节点 */
                 vfsmount_t *mnt = NULL;
-                spinlock_acquire(&vfs_fs_lock);
+                irq_key_t vfs_fs_lock_key = spinlock_acquire(&vfs_fs_lock);
                 if (cur->d_inode && cur->d_inode->i_sb)
                 {
                     mnt = find_mount_by_sb(cur->d_inode->i_sb);
                 }
-                spinlock_release(&vfs_fs_lock);
+                spinlock_release(&vfs_fs_lock, vfs_fs_lock_key);
 
                 if (mnt && mnt->mnt_host_dentry && mnt->mnt_host_dentry->d_parent)
                 {
@@ -1215,9 +1215,9 @@ int vfs_mount(const char *path, const char *fs_type, void *data)
         mnt->mnt_sb->s_mount = mnt;
     }
 
-    spinlock_acquire(&vfs_fs_lock);
+    irq_key_t vfs_fs_lock_key = spinlock_acquire(&vfs_fs_lock);
     list_add(&mnt->mnt_list_linker, &vfs_mount_list);
-    spinlock_release(&vfs_fs_lock);
+    spinlock_release(&vfs_fs_lock, vfs_fs_lock_key);
 
     return ENO0_NO_ERROR;
 }
@@ -1245,7 +1245,7 @@ int vfs_unmount(const char *path)
 
     /* 在挂载点链表中查找 */
     vfsmount_t *target = NULL;
-    spinlock_acquire(&vfs_fs_lock);
+    irq_key_t vfs_fs_lock_key = spinlock_acquire(&vfs_fs_lock);
     struct list_head *pos;
     list_for_each(pos, &vfs_mount_list)
     {
@@ -1256,7 +1256,7 @@ int vfs_unmount(const char *path)
             break;
         }
     }
-    spinlock_release(&vfs_fs_lock);
+    spinlock_release(&vfs_fs_lock, vfs_fs_lock_key);
 
     if (!target)
     {
@@ -1299,9 +1299,9 @@ int vfs_unmount(const char *path)
     }
 
     /* 从链表中摘除并释放 vfsmount */
-    spinlock_acquire(&vfs_fs_lock);
+    vfs_fs_lock_key = spinlock_acquire(&vfs_fs_lock);
     list_del(&target->mnt_list_linker);
-    spinlock_release(&vfs_fs_lock);
+    spinlock_release(&vfs_fs_lock, vfs_fs_lock_key);
 
     kfree(target->mnt_path);
     kfree(target);

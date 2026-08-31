@@ -93,7 +93,7 @@ kmem_cache_t *slab_cache_create(const char *name, uint32_t size)
     size = (size + 7u) & ~7u;
 
     kmem_cache_t *cache = NULL;
-    spinlock_acquire(&cache_table_lock);
+    irq_key_t cache_table_lock_key = spinlock_acquire(&cache_table_lock);
     for (uint32_t i = 0; i < SLAB_MAX_CACHES; i++)
     {
         if (!cache_table[i].valid)
@@ -104,7 +104,7 @@ kmem_cache_t *slab_cache_create(const char *name, uint32_t size)
     }
     if (cache == NULL)
     {
-        spinlock_release(&cache_table_lock);
+        spinlock_release(&cache_table_lock, cache_table_lock_key);
         panic("slab: cache table exhausted\n");
     }
 
@@ -121,7 +121,7 @@ kmem_cache_t *slab_cache_create(const char *name, uint32_t size)
     INIT_LIST_HEAD(&cache->full);
     spinlock_init(&cache->lock);
     cache->valid = true;
-    spinlock_release(&cache_table_lock);
+    spinlock_release(&cache_table_lock, cache_table_lock_key);
     return cache;
 }
 
@@ -160,7 +160,7 @@ void *slab_cache_alloc(kmem_cache_t *cache)
         return NULL;
     }
 
-    spinlock_acquire(&cache->lock);
+    irq_key_t cache_lock_key = spinlock_acquire(&cache->lock);
     for (;;)
     {
         frame = slab_pick_partial(cache);
@@ -176,12 +176,12 @@ void *slab_cache_alloc(kmem_cache_t *cache)
             break;
         }
 
-        spinlock_release(&cache->lock);
+        spinlock_release(&cache->lock, cache_lock_key);
         pframe_t *fresh = alloc_page();
-        spinlock_acquire(&cache->lock);
+        irq_key_t cache_lock_key = spinlock_acquire(&cache->lock);
         if (fresh == NULL)
         {
-            spinlock_release(&cache->lock);
+            spinlock_release(&cache->lock, cache_lock_key);
             return NULL;
         }
         if (cache->reserve == NULL)
@@ -192,9 +192,10 @@ void *slab_cache_alloc(kmem_cache_t *cache)
         }
         else
         {
-            spinlock_release(&cache->lock);
+            spinlock_release(&cache->lock, cache_lock_key);
             dealloc(fresh);
-            spinlock_acquire(&cache->lock);
+            /* 重新取锁：赋值给循环外的 key，不能再声明一个同名局部把它遮蔽掉 */
+            cache_lock_key = spinlock_acquire(&cache->lock);
         }
     }
 
@@ -203,7 +204,7 @@ void *slab_cache_alloc(kmem_cache_t *cache)
     frame->slab_inuse++;
     cache->nr_inuse++;
     slab_requeue(cache, frame);
-    spinlock_release(&cache->lock);
+    spinlock_release(&cache->lock, cache_lock_key);
 
     memset(obj, 0, cache->obj_size);
     return obj;
@@ -218,7 +219,7 @@ void *slab_cache_alloc(kmem_cache_t *cache)
  */
 void slab_cache_free(kmem_cache_t *cache, pframe_t *frame, void *obj)
 {
-    spinlock_acquire(&cache->lock);
+    irq_key_t cache_lock_key = spinlock_acquire(&cache->lock);
 
     *(void **)obj = frame->slab_freelist;
     frame->slab_freelist = obj;
@@ -237,7 +238,7 @@ void slab_cache_free(kmem_cache_t *cache, pframe_t *frame, void *obj)
             frame->slab_cache = NULL;
             frame->slab_freelist = NULL;
             cache->nr_slabs--;
-            spinlock_release(&cache->lock);
+            spinlock_release(&cache->lock, cache_lock_key);
             dealloc(frame);
             return;
         }
@@ -247,7 +248,7 @@ void slab_cache_free(kmem_cache_t *cache, pframe_t *frame, void *obj)
         slab_requeue(cache, frame);
     }
 
-    spinlock_release(&cache->lock);
+    spinlock_release(&cache->lock, cache_lock_key);
 }
 
 /**
@@ -267,7 +268,7 @@ void slab_reclaim_all(void)
         for (;;)
         {
             pframe_t *victim = NULL;
-            spinlock_acquire(&cache->lock);
+            irq_key_t cache_lock_key = spinlock_acquire(&cache->lock);
             if (cache->reserve != NULL)
             {
                 victim = cache->reserve;
@@ -293,7 +294,7 @@ void slab_reclaim_all(void)
                 victim->slab_freelist = NULL;
                 cache->nr_slabs--;
             }
-            spinlock_release(&cache->lock);
+            spinlock_release(&cache->lock, cache_lock_key);
             if (victim == NULL)
             {
                 break;
@@ -324,12 +325,12 @@ void slab_dump_stats(void)
         {
             continue;
         }
-        spinlock_acquire(&cache->lock);
+        irq_key_t cache_lock_key = spinlock_acquire(&cache->lock);
         uint32_t nr_slabs = cache->nr_slabs;
         uint32_t nr_inuse = cache->nr_inuse;
         uint32_t objs = cache->objs_per_slab;
         uint32_t osz = cache->obj_size;
-        spinlock_release(&cache->lock);
+        spinlock_release(&cache->lock, cache_lock_key);
         if (nr_slabs == 0 && nr_inuse == 0)
         {
             continue;

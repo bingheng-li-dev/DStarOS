@@ -101,6 +101,12 @@ struct proc_control_block
     /* ==================== CFS调度相关 ==================== */
     int proc_nice;               /* nice 值 [-20, 19]，默认 0 */
     uint32_t proc_weight;        /* 由 nice 派生的权重，nice=0 时为 SCHED_NICE_0_WEIGHT */
+    /* sched_schedule() 里 acquire run_queue.lock 拿到的中断 key。这把锁是**接力**释放的
+     * （见 sched_finish_switch），acquire 与 release 由不同执行流完成、任务还可能换到
+     * 另一个 hart 上才被换回，所以 key 绝不能存在 per-CPU 的槽里——存进 pcb 让它随任务
+     * 走才配得上对。新建任务要初始化成 true（"之前中断是开的"），它第一次被换上时
+     * fork_out 里的 sched_finish_switch 靠这个值把中断打开。 */
+    bool     proc_rq_key;
     uint64_t proc_vruntime;      /* 加权虚拟运行时间，单位同 sched_now() */
     uint32_t proc_vruntime_rem;  /* 上次换算 vruntime 时除不尽的余数，见 fair_update_curr()
                                   * 里的说明；恒 < proc_weight，改 nice 时清零 */
