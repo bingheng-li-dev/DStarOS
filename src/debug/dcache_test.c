@@ -2,8 +2,8 @@
  * @file dcache_test.c
  * @brief 目录项缓存（LRU dcache）内核态自检
  * @details 由 proc_init()（proc.c）在 DEBUG_DCACHE_TEST 打开时调用 run_dcache_tests()，
- *   跑完直接关机。覆盖六组：基本命中、LRU 复活、父引用与祖先链、删除逐出、
- *   重命名后子树仍可用、水位线与内存归还。
+ *   跑完直接关机。覆盖七组：基本命中、LRU 复活、父引用与祖先链、删除逐出、
+ *   重命名后子树仍可用、水位线与内存归还、进程退出归还 cwd 引用。
  *
  *   SMP 并发那一组不在这里——两个 hart 同时 open/close 同一批路径由
  *   DEBUG_FILE_TEST（user/filetest.c 的双子进程阶段）在 -smp 2 下覆盖，
@@ -21,10 +21,12 @@
 #include "console.h"
 #include "stringops.h"
 #include "errorcode.h"
+#include "proc.h"
 
 #define DCACHE_TEST_DIR   "/dctest"
 #define DCACHE_TEST_SUB   "/dctest/sub"
 #define DCACHE_TEST_DEEP  "/dctest/sub/deep.txt"
+#define DCACHE_TEST_CWD   "/dccwd"
 #define DCACHE_TEST_FLOOD 150   /* 水位线用例造的条目数，需明显大于 DCACHE_MAX_UNUSED */
 
 static int dcache_pass;
@@ -354,6 +356,62 @@ static void test_watermark(void)
            free_before, free_peak, free_after);
 }
 
+/* ============================================================
+ * 组 7：进程退出归还 cwd 引用
+ *
+ * 这一组必须跑在大锁之外：worker 自己要 vfs_lock()，它退出时 do_exit 里
+ * 归还 cwd 也要，握着锁 fork 会当场死锁。
+ * ============================================================ */
+
+static void *cwd_worker(void *arg)
+{
+    (void)arg;
+    vfs_lock();
+    vfs_chdir(DCACHE_TEST_CWD);
+    vfs_unlock();
+    return NULL; /* 落到 kernel_thread_entry 里的 do_exit */
+}
+
+/* 取 DCACHE_TEST_CWD 的引用计数：lookup 拿到的那一个 + 子目录项数 */
+static int cwd_dir_ref(void)
+{
+    vfs_lock();
+    dentry_t *d = vfs_lookup(DCACHE_TEST_CWD);
+    int ref = (d != NULL) ? d->d_ref : -1;
+    dentry_put_pub(d);
+    vfs_unlock();
+    return ref;
+}
+
+static void test_exit_releases_cwd(void)
+{
+    vfs_lock();
+    vfs_mkdir(DCACHE_TEST_CWD, 0755);
+    vfs_unlock();
+
+    int ref_before = cwd_dir_ref();
+    expect(ref_before > 0, "cwd dir resolvable before the fork");
+
+    int16_t pid = create_kernel_thread_by_fork(cwd_worker, NULL, 0);
+    expect(pid > 0, "forked the chdir worker");
+    if (pid > 0)
+    {
+        int status = 0;
+        expect(do_wait(-1, &status) == pid, "reaped the chdir worker");
+    }
+
+    int ref_after = cwd_dir_ref();
+    expect(ref_after == ref_before, "exiting process gives its cwd reference back");
+    if (ref_after != ref_before)
+    {
+        printf("[dcachetest] cwd d_ref: before=%d after=%d\n", ref_before, ref_after);
+    }
+
+    vfs_lock();
+    vfs_rmdir(DCACHE_TEST_CWD);
+    vfs_unlock();
+}
+
 static void setup(void)
 {
     vfs_mkdir(DCACHE_TEST_DIR, 0755);
@@ -377,6 +435,8 @@ void run_dcache_tests(void)
     test_watermark();
     vfs_dcache_stats();
     vfs_unlock();
+
+    test_exit_releases_cwd();
 
     printf("=== dcachetest done: %d pass  %d fail ===\n", dcache_pass, dcache_fail);
 }

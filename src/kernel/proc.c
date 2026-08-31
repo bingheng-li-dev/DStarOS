@@ -126,6 +126,18 @@ void do_exit(int16_t error_code)
 
     proc_fd_close_all(curr);
 
+    /* 归还工作目录的引用。只在真的 chdir 过时才取大锁，理由同 proc_fd_close_all()：
+     * 内核线程的 proc_cwd 绝大多数是 NULL，不值得为此在退出路径上白添一个睡眠点。
+     * 必须赶在置 ZOMBIE 之前做完——父进程一被唤醒就可能把这个 pcb 收割掉。 */
+    if (curr->proc_cwd)
+    {
+        dentry_t *cwd = curr->proc_cwd;
+        curr->proc_cwd = NULL;
+        vfs_lock();
+        dentry_put_pub(cwd);
+        vfs_unlock();
+    }
+
     /* 孤儿过继给 init（pid 恒为 1：系统里第一个 do_fork 出来的进程）；
      * 有孤儿就唤醒 init，让它有机会发现并收割这些可能已经是 ZOMBIE 的孤儿 */
     pcb_t *init_proc = find_proc_by_pid(1);
