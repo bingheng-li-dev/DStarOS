@@ -10,7 +10,6 @@
 #include "console.h"
 #include "proc.h"
 #include "sched.h"
-#include "sync.h"
 #include "cpu.h"
 #include "atomic.h"
 
@@ -156,20 +155,24 @@ void rt_preempt_cfs_test(void)
 
 static volatile int rr_seq[RR_SLOTS];
 static volatile int rr_n;
-static ossem_t rr_gate; /* count=0：worker 一上台就睡在这里，等 init 放行 */
 
 static void *rr_worker(void *arg)
 {
     int id = (int)(intptr_t)arg;
 
-    /* 开跑前先睡在门闩上，等 init 把所有 worker 都设成同优先级 RR 之后再放行。
+    /* 开跑前先阻塞在门闩上，等 init 把所有 worker 都设成同优先级 RR 之后再放行。
      * 有 IPI 之后 hart1 会在 worker 刚被 fork 出来时立刻调度它，没有门闩的话它会
      * 以 CFS 身份一口气把 8 轮跑完，序列里只剩"一个跑到底再换下一个"，看不到轮转。
      *
-     * 门闩必须是"睡着等"（信号量）而不是"自旋等"：init 稍后会把这些 worker 设成
-     * SCHED_RR，RT 任务只要可运行就永远压过 CFS 身份的 init，自旋等会让 init
-     * 再也拿不到 CPU 去放行，直接活锁。 */
-    sem_down(&rr_gate);
+     * 门闩有两条硬要求，都在 sched_test_gate_* 上方有详细说明：
+     *   ① 必须"阻塞等"而不是"自旋等"——init 稍后会把这些 worker 设成 SCHED_RR，
+     *      RT 任务只要可运行就永远压过 CFS 身份的 init，自旋等会让 init 再也拿不到
+     *      CPU 去放行，直接活锁；
+     *   ② 放行必须是一次广播。这里原先用信号量、init 连调 RR_WORKERS 次 sem_up，
+     *      而第一个被唤醒的 RR worker 就是 RT 任务，立刻把 init 顶下 CPU——剩下的
+     *      sem_up 要等到某个 worker 退出才做得成，最后一个 worker 迟到加入，轮转
+     *      被测到的只剩后半段。waitq_wake_all 在持锁状态下一次唤醒全部，没有这个窗口。 */
+    sched_test_gate_wait();
 
     for (int k = 0; k < RR_ITERS; k++)
     {
@@ -189,7 +192,7 @@ void rt_rr_rotation_test(void)
     printf("\n-- RT SCHED_RR round-robin --\n");
 
     rr_n = 0;
-    sem_init(&rr_gate, 0);
+    sched_test_gate_init();
 
     int16_t pid[RR_WORKERS];
     for (int i = 0; i < RR_WORKERS; i++)
@@ -214,12 +217,9 @@ void rt_rr_rotation_test(void)
     }
     sched_test_check("found all RR worker pcbs", found_all);
 
-    /* 全部设完 RR 之后再一次性放行，这样它们是"同时"变成可运行的同优先级 RT 任务，
+    /* 全部设完 RR 之后一次广播放行，这样它们是"同时"变成可运行的同优先级 RT 任务，
      * 谁也没有抢跑的机会，轮转才是被真正测到的 */
-    for (int i = 0; i < RR_WORKERS; i++)
-    {
-        sem_up(&rr_gate);
-    }
+    sched_test_gate_release();
 
     sched_test_reap_all();
 
