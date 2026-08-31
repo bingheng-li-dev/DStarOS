@@ -120,7 +120,15 @@ struct inode
  * 关键字段语义：
  *   d_subdirs：作为链表"头"，所有子目录项通过各自的 d_child 节点挂入此链表
  *   d_child：  作为链表"节点"，挂入父目录项的 d_subdirs 链表
- *   d_ref：    引用计数；降为 0 时释放内存
+ *   d_ref：    引用计数 = 外部持有者数量 + 子目录项数量
+ *   d_lru：    降为 0 时不立即释放，而是挂到全局 LRU 上等待复用或回收
+ *
+ * 引用状态与缓存状态是正交的两件事（与 Linux 一致）：
+ *   d_ref > 0  —— 正在被使用，一定不在 LRU 上
+ *   d_ref == 0 —— 未被使用，挂在 LRU 上，但对象仍然活着、仍挂在父目录的
+ *                 d_subdirs 里、仍能被 dentry_lookup 命中并"复活"
+ * 由此可推出一条被反复用到的不变式：**LRU 上的目录项一定是叶子**——它没有子项
+ * （否则子项会给它贡献引用），也没有外部持有者。
  * ============================================================ */
 struct dentry
 {
@@ -129,8 +137,10 @@ struct dentry
     dentry_t           *d_parent;   /* 父目录项（根目录的 d_parent 指向自身）*/
     struct list_head    d_subdirs;  /* 子目录项链表头——所有子项通过各自的 d_child 挂入 */
     struct list_head    d_child;    /* 此目录项在父目录 d_subdirs 链表中的节点 */
+    struct list_head    d_lru;      /* 此目录项在全局 dcache LRU 链表中的节点；
+                                     * 孤立（list_empty 为真）表示不在 LRU 上 */
     dentry_operations_t *d_op;      /* 目录项操作函数指针（可为 NULL）*/
-    int                 d_ref;      /* 引用计数；归零时释放内存 */
+    int                 d_ref;      /* 引用计数；归零时进入 LRU 或被直接回收 */
     vfsmount_t         *d_mounted;  /* 若此目录是某文件系统的挂载点，指向对应 vfsmount；
                                      * 否则为 NULL */
 };
@@ -269,7 +279,32 @@ extern vfsmount_t *vfs_root_mount;
  * 引用计数导出接口（供 proc.c、fatfs_vfs.c 等使用）
  * ============================================================ */
 void dentry_get_pub(dentry_t *d);   /* 引用计数 +1 */
-void dentry_put_pub(dentry_t *d);   /* 引用计数 -1，归零时释放 */
+void dentry_put_pub(dentry_t *d);   /* 引用计数 -1，归零时进入 LRU 或回收 */
+
+/* ============================================================
+ * 目录项缓存（dcache）：可观测性与内存压力接口
+ * ============================================================ */
+
+/* LRU 上允许驻留的未使用目录项数量。单条目成本约
+ * dentry(80) + d_name(~16) + inode(64) + fatfs 私有数据(256) ≈ 420 字节，
+ * 128 条约 54 KB——占 6 MB 物理内存的 0.9%。超过 MAX 时在 dentry_put 里
+ * 顺手回收到 LOW（批量回收，避免"超一个收一个"的抖动）。 */
+#define DCACHE_MAX_UNUSED   128
+#define DCACHE_LOW_WATER     96
+
+typedef struct dcache_stats
+{
+    uint64_t hits;       /* dentry_lookup 命中（含在 LRU 上被复活的）*/
+    uint64_t misses;     /* dentry_lookup 未命中，落到 i_op->lookup */
+    uint64_t revives;    /* 从 LRU 上复活的次数 */
+    uint64_t evicts;     /* 真正释放（kfree）的次数 */
+    uint32_t nr_unused;  /* 当前 LRU 上的条目数 */
+} dcache_stats_t;
+
+void vfs_dcache_stats(void);                        /* 打印统计 */
+void vfs_dcache_get_stats(dcache_stats_t *out);     /* 取统计快照（自检用）*/
+void vfs_dcache_shrink(uint32_t nr);                /* 回收至多 nr 条（须持 vfs 大锁）*/
+void vfs_dcache_reclaim(void);                      /* kmalloc 重试路径的回收回调 */
 
 /* ============================================================
  * VFS 对外接口函数声明

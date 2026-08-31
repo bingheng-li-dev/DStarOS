@@ -7,7 +7,7 @@
  *   VFS 抽象          FatFS 对应           实现方式
  *   ─────────────────────────────────────────────────────
  *   super_block_t  ←→  FATFS 对象          FATFS* 存入 sb->s_private
- *   inode_t        ←→  路径字符串          VFS 绝对路径存入 inode->i_private
+ *   inode_t        ←→  路径字符串          由 fatfs_build_path() 沿 dentry 链现推（不缓存）
  *   dentry_t       ←→  路径分量            由 VFS dentry_create 管理
  *   file_t         ←→  FIL 对象            FIL* 存入 file->f_private
  *
@@ -29,15 +29,16 @@
  * 私有数据结构
  * ============================================================ */
 
-/**
- * fatfs_inode_priv_t - inode 私有数据
- * 存储该文件/目录在 VFS 中的绝对路径（不含 "0:" 前缀）。
- * 根目录的路径为空字符串 ""。
- */
-typedef struct
-{
-    char path[VFS_PATH_MAX];  /* VFS 绝对路径，如 "/dir/file.txt" */
-} fatfs_inode_priv_t;
+/* inode 不再持有私有数据（i_private 恒为 NULL）。
+ *
+ * 曾经这里放的是 fatfs_inode_priv_t，用一个 char path[VFS_PATH_MAX] 缓存该文件在
+ * 卷内的绝对路径。那是一份**冗余状态**——同样的信息 dentry 树里已经有了，而且
+ * 一旦路径变化就必须逐个同步：`f_rename` 之后只有被重命名的那个 inode 的路径被
+ * 更新，它整棵子树里的后代全部指向旧路径，`rename("/a/b","/a/d")` 之后
+ * `open("/a/d/c.txt")` 会拿 "/a/b/c.txt" 去问 FatFS。
+ *
+ * 现在改为需要时用 fatfs_build_path() 沿 d_parent 现推。少一份要同步的状态，
+ * 顺带每个 inode 省下 256 字节——这是目录项缓存单条目成本的大头。 */
 
 /* 合成阶段机的取值：FatFS 的 f_readdir 会跳过 FAT 目录里真实存在的 "." / ".." 项
  * （ff.c 的 dir_read 在 _FS_RPATH=0 时过滤掉所有以 '.' 开头的条目），而
@@ -203,6 +204,76 @@ static void fatfs_make_child_path(const char *parent_path,
     }
 }
 
+/**
+ * @brief 沿 d_parent 上溯，拼出目录项在本卷内的绝对路径
+ * @param[in]  d     目标目录项
+ * @param[out] buf   输出缓冲区
+ * @param[in]  bufsz 缓冲区大小
+ * @retval ENO0_NO_ERROR     成功；卷根本身得到空字符串 ""（与 vfs_to_fatfs_path 的约定一致）
+ * @retval ENO5_NOSUCH_ENTRY 这条链上有目录项已被 unlink/rmdir 脱链，路径无意义
+ * @retval ENO11_NAME_TOO_LONG 拼出来超过 bufsz
+ * @details 倒着往缓冲区尾部写再整体前移，免掉一个用来反转分量顺序的辅助栈——
+ *   内核栈只有一页，递归或变长数组都不合适。
+ * @note 终点必须是本文件系统的根 inode。脱链的目录项同样以"d_parent 指向自身"
+ *   标记，光看循环退出条件区分不了，不检查的话会把一条张冠李戴的路径交给 FatFS。
+ */
+static int fatfs_build_path(const dentry_t *d, char *buf, int bufsz)
+{
+    if (d == NULL || bufsz < 1)
+    {
+        return ENO8_NULL_POINTER;
+    }
+
+    int pos = bufsz;
+    buf[--pos] = '\0';
+
+    while (d->d_parent != d)
+    {
+        int nlen = (int)strlen(d->d_name);
+        if (pos < nlen + 1)
+        {
+            return ENO11_NAME_TOO_LONG;
+        }
+        pos -= nlen;
+        memcpy(buf + pos, d->d_name, nlen);
+        buf[--pos] = '/';
+        d = d->d_parent;
+    }
+
+    if (d->d_inode == NULL || d->d_inode->i_sb == NULL ||
+        d->d_inode->i_sb->s_root_inode != d->d_inode)
+    {
+        return ENO5_NOSUCH_ENTRY;
+    }
+
+    memmove(buf, buf + pos, bufsz - pos);
+    return ENO0_NO_ERROR;
+}
+
+/**
+ * @brief 拼出 inode 对应的 FatFS 卷路径（"0:/dir/f"）
+ * @param[in]  inode 目标 inode
+ * @param[out] buf   输出缓冲区，容量需 >= VFS_PATH_MAX + 4
+ * @param[in]  bufsz 缓冲区大小
+ * @return ENO0_NO_ERROR 或 fatfs_build_path 的错误码
+ */
+static int fatfs_inode_fatfs_path(const inode_t *inode, char *buf, int bufsz)
+{
+    char vfs_path[VFS_PATH_MAX];
+
+    if (inode == NULL)
+    {
+        return ENO8_NULL_POINTER;
+    }
+    int ret = fatfs_build_path(inode->i_dentry, vfs_path, sizeof(vfs_path));
+    if (ret != ENO0_NO_ERROR)
+    {
+        return ret;
+    }
+    vfs_to_fatfs_path(vfs_path, buf, bufsz);
+    return ENO0_NO_ERROR;
+}
+
 /* ============================================================
  * FRESULT → VFS 错误码转换
  * ============================================================ */
@@ -243,16 +314,7 @@ static inode_t *fatfs_alloc_inode_internal(super_block_t *sb)
         return NULL;
     }
 
-    fatfs_inode_priv_t *priv =
-        (fatfs_inode_priv_t *)kmalloc(sizeof(fatfs_inode_priv_t));
-    if (!priv)
-    {
-        kfree(inode);
-        return NULL;
-    }
-
-    priv->path[0] = '\0';
-    inode->i_private = priv;
+    inode->i_private = NULL;   /* 路径由 fatfs_build_path 现推，无需私有数据 */
     inode->i_sb      = sb;
     inode->i_op      = &fatfs_inode_ops;
     inode->i_fop     = &fatfs_file_ops;
@@ -279,11 +341,7 @@ static void fatfs_destroy_inode_cb(inode_t *inode)
     {
         return;
     }
-    if (inode->i_private)
-    {
-        kfree(inode->i_private);
-    }
-    kfree(inode);
+    kfree(inode);   /* fatfs 的 inode 不带私有数据，i_private 恒为 NULL */
 }
 
 static int fatfs_sync_fs_cb(super_block_t *sb)
@@ -382,7 +440,7 @@ static dentry_t *fatfs_mount_cb(file_system_type_t *fst,
     }
     root_inode->i_mode = S_IFDIR | 0755;
     root_inode->i_size = 0;
-    /* i_private->path 已由 alloc 初始化为 "" */
+    /* 卷根的路径是空字符串，由 fatfs_build_path 在循环一次不跑时自然得到 */
 
     /* 5. 创建根 dentry（parent=NULL 表示文件系统局部根，d_parent 指向自身）*/
     dentry_t *root_dentry = dentry_create("", root_inode, NULL, NULL);
@@ -413,12 +471,15 @@ static dentry_t *fatfs_mount_cb(file_system_type_t *fst,
  */
 static dentry_t *fatfs_lookup_cb(inode_t *dir, const char *name)
 {
-    fatfs_inode_priv_t *dir_priv = (fatfs_inode_priv_t *)dir->i_private;
-
     /* 构造子条目的 VFS 路径和 FatFS 路径 */
+    char dir_vfs[VFS_PATH_MAX];
     char child_vfs[VFS_PATH_MAX];
     char child_fatfs[VFS_PATH_MAX + 4];
-    fatfs_make_child_path(dir_priv->path, name, child_vfs, VFS_PATH_MAX);
+    if (fatfs_build_path(dir->i_dentry, dir_vfs, sizeof(dir_vfs)) != ENO0_NO_ERROR)
+    {
+        return NULL;
+    }
+    fatfs_make_child_path(dir_vfs, name, child_vfs, VFS_PATH_MAX);
     vfs_to_fatfs_path(child_vfs, child_fatfs, sizeof(child_fatfs));
 
     /* 查询文件/目录是否存在。_USE_LFN 开启后 FILINFO 多出 lfname/lfsize 两个字段，
@@ -438,13 +499,6 @@ static dentry_t *fatfs_lookup_cb(inode_t *dir, const char *name)
     if (!inode)
     {
         return NULL;
-    }
-
-    fatfs_inode_priv_t *priv = (fatfs_inode_priv_t *)inode->i_private;
-    int clen = (int)strlen(child_vfs);
-    if (clen < VFS_PATH_MAX)
-    {
-        memcpy(priv->path, child_vfs, clen + 1);
     }
 
     inode->i_size = (uint64_t)finfo.fsize;
@@ -478,11 +532,15 @@ static dentry_t *fatfs_lookup_cb(inode_t *dir, const char *name)
 static int fatfs_create_cb(inode_t *dir, dentry_t *dentry, mode_t mode)
 {
     (void)mode;
-    fatfs_inode_priv_t *dir_priv = (fatfs_inode_priv_t *)dir->i_private;
 
+    /* dentry 此刻已由 dentry_create 挂进 dir 的子链表，直接从它上溯即可 */
     char child_vfs[VFS_PATH_MAX];
     char child_fatfs[VFS_PATH_MAX + 4];
-    fatfs_make_child_path(dir_priv->path, dentry->d_name, child_vfs, VFS_PATH_MAX);
+    int pret = fatfs_build_path(dentry, child_vfs, sizeof(child_vfs));
+    if (pret != ENO0_NO_ERROR)
+    {
+        return pret;
+    }
     vfs_to_fatfs_path(child_vfs, child_fatfs, sizeof(child_fatfs));
 
     /* 在磁盘上创建文件 */
@@ -499,13 +557,6 @@ static int fatfs_create_cb(inode_t *dir, dentry_t *dentry, mode_t mode)
     if (!inode)
     {
         return ENO1_NOMORE_MEM;
-    }
-
-    fatfs_inode_priv_t *priv = (fatfs_inode_priv_t *)inode->i_private;
-    int clen = (int)strlen(child_vfs);
-    if (clen < VFS_PATH_MAX)
-    {
-        memcpy(priv->path, child_vfs, clen + 1);
     }
 
     /* 统一给可执行位——见 fatfs_lookup_cb 里同样改动的注释（ash 靠 st_mode & 0111
@@ -530,11 +581,14 @@ static int fatfs_create_cb(inode_t *dir, dentry_t *dentry, mode_t mode)
 static int fatfs_mkdir_cb(inode_t *dir, dentry_t *dentry, mode_t mode)
 {
     (void)mode;
-    fatfs_inode_priv_t *dir_priv = (fatfs_inode_priv_t *)dir->i_private;
 
     char child_vfs[VFS_PATH_MAX];
     char child_fatfs[VFS_PATH_MAX + 4];
-    fatfs_make_child_path(dir_priv->path, dentry->d_name, child_vfs, VFS_PATH_MAX);
+    int pret = fatfs_build_path(dentry, child_vfs, sizeof(child_vfs));
+    if (pret != ENO0_NO_ERROR)
+    {
+        return pret;
+    }
     vfs_to_fatfs_path(child_vfs, child_fatfs, sizeof(child_fatfs));
 
     FRESULT fr = f_mkdir(child_fatfs);
@@ -547,13 +601,6 @@ static int fatfs_mkdir_cb(inode_t *dir, dentry_t *dentry, mode_t mode)
     if (!inode)
     {
         return ENO1_NOMORE_MEM;
-    }
-
-    fatfs_inode_priv_t *priv = (fatfs_inode_priv_t *)inode->i_private;
-    int clen = (int)strlen(child_vfs);
-    if (clen < VFS_PATH_MAX)
-    {
-        memcpy(priv->path, child_vfs, clen + 1);
     }
 
     inode->i_mode   = S_IFDIR | 0755;
@@ -574,10 +621,15 @@ static int fatfs_mkdir_cb(inode_t *dir, dentry_t *dentry, mode_t mode)
 static int fatfs_unlink_cb(inode_t *dir, dentry_t *dentry)
 {
     (void)dir;
-    fatfs_inode_priv_t *priv = (fatfs_inode_priv_t *)dentry->d_inode->i_private;
 
+    char vfs_path[VFS_PATH_MAX];
     char fatfs_path[VFS_PATH_MAX + 4];
-    vfs_to_fatfs_path(priv->path, fatfs_path, sizeof(fatfs_path));
+    int pret = fatfs_build_path(dentry, vfs_path, sizeof(vfs_path));
+    if (pret != ENO0_NO_ERROR)
+    {
+        return pret;
+    }
+    vfs_to_fatfs_path(vfs_path, fatfs_path, sizeof(fatfs_path));
 
     return fresult_to_vfs(f_unlink(fatfs_path));
 }
@@ -605,24 +657,26 @@ static int fatfs_rename_cb(inode_t *old_dir, dentry_t *old_dentry,
                             inode_t *new_dir, dentry_t *new_dentry)
 {
     (void)old_dir;
+    (void)new_dir;
 
-    /* 目标文件所在路径，old_dentry->d_inode才是目标文件/目录的inode本体 */
-    fatfs_inode_priv_t *old_priv =
-        (fatfs_inode_priv_t *)old_dentry->d_inode->i_private;
-    /* 新目录所在路径 */
-    fatfs_inode_priv_t *new_dir_priv =
-        (fatfs_inode_priv_t *)new_dir->i_private;
-
-    /* 构造源路径和目标路径 */
+    /* 两条路径都从各自的 dentry 上溯得到：old_dentry 还挂在原父目录下，
+     * new_dentry 是 vfs_rename 预先挂到新父目录下的负目录项。 */
+    char old_vfs[VFS_PATH_MAX];
     char new_vfs[VFS_PATH_MAX];
     char old_fatfs[VFS_PATH_MAX + 4];
     char new_fatfs[VFS_PATH_MAX + 4];
 
-    /* 目标路径（新文件所在目录的路径 + 新文件名（可能）*/
-    fatfs_make_child_path(new_dir_priv->path, new_dentry->d_name,
-                          new_vfs, VFS_PATH_MAX);
-    /* 旧路径 */
-    vfs_to_fatfs_path(old_priv->path, old_fatfs, sizeof(old_fatfs));
+    int pret = fatfs_build_path(old_dentry, old_vfs, sizeof(old_vfs));
+    if (pret != ENO0_NO_ERROR)
+    {
+        return pret;
+    }
+    pret = fatfs_build_path(new_dentry, new_vfs, sizeof(new_vfs));
+    if (pret != ENO0_NO_ERROR)
+    {
+        return pret;
+    }
+    vfs_to_fatfs_path(old_vfs, old_fatfs, sizeof(old_fatfs));
     vfs_to_fatfs_path(new_vfs, new_fatfs, sizeof(new_fatfs));
 
     FRESULT fr = f_rename(old_fatfs, new_fatfs);
@@ -631,13 +685,8 @@ static int fatfs_rename_cb(inode_t *old_dir, dentry_t *old_dentry,
         return fresult_to_vfs(fr);
     }
 
-    /* 更新 inode 中存储的 VFS 路径（与 vfs.c 中的 dentry 树更新（由VFS维护）保持一致）*/
-    int nlen = (int)strlen(new_vfs);
-    if (nlen < VFS_PATH_MAX)
-    {
-        memcpy(old_priv->path, new_vfs, nlen + 1);
-    }
-
+    /* 不需要再回头改任何 inode 里存的路径：路径不再被缓存，vfs_rename 把 dentry
+     * 挂到新父目录之后，整棵子树的路径自然全部跟着变。 */
     return ENO0_NO_ERROR;
 }
 
@@ -651,10 +700,12 @@ static int fatfs_rename_cb(inode_t *old_dir, dentry_t *old_dentry,
  */
 static int fatfs_truncate_cb(inode_t *inode, uint64_t size)
 {
-    fatfs_inode_priv_t *priv = (fatfs_inode_priv_t *)inode->i_private;
-
     char fatfs_path[VFS_PATH_MAX + 4];
-    vfs_to_fatfs_path(priv->path, fatfs_path, sizeof(fatfs_path));
+    int pret = fatfs_inode_fatfs_path(inode, fatfs_path, sizeof(fatfs_path));
+    if (pret != ENO0_NO_ERROR)
+    {
+        return pret;
+    }
 
     FIL fil;
     FRESULT fr = f_open(&fil, fatfs_path, FA_WRITE | FA_OPEN_EXISTING);
@@ -708,10 +759,12 @@ static inode_operations_t fatfs_inode_ops = {
  */
 static int fatfs_open_cb(inode_t *inode, file_t *file, int mode)
 {
-    fatfs_inode_priv_t *priv = (fatfs_inode_priv_t *)inode->i_private;
-
     char fatfs_path[VFS_PATH_MAX + 4];
-    vfs_to_fatfs_path(priv->path, fatfs_path, sizeof(fatfs_path));
+    int pret = fatfs_inode_fatfs_path(inode, fatfs_path, sizeof(fatfs_path));
+    if (pret != ENO0_NO_ERROR)
+    {
+        return pret;
+    }
 
     if (S_ISDIR(inode->i_mode))
     {

@@ -844,6 +844,15 @@ static int16_t init(void)
     }
 #endif
 
+#if DEBUG_DCACHE_TEST
+    /* 目录项缓存自检：跑完直接关机，不启动用户程序。测试代码在 src/debug/dcache_test.c。 */
+    {
+        extern void run_dcache_tests(void);
+        run_dcache_tests();
+        sbi_shutdown();
+    }
+#endif
+
 #if DEBUG_SCHED_TEST
     /* 调度器/同步回归测试：以 init（正规调度任务）为驱动，fork 若干 worker 并收割，
      * 端到端触发 CFS/RT/idle 三类、sched_schedule、sleep/wakeup、信号量、do_fork/exit/wait。
@@ -913,6 +922,7 @@ static int16_t init(void)
 #if DEBUG_MEM_TEST || DEBUG_FILE_TEST
             /* 压力用例跑完之后核对各 cache 的 nr_inuse 是否回到基线（vma_cache 尤其）*/
             slab_dump_stats();
+            vfs_dcache_stats();
             printf("[init] FreeList.fnsize=%d\n", FreeList.fnsize);
 #endif
             sbi_shutdown();

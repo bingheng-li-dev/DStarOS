@@ -22,6 +22,7 @@
 #include "stringops.h"
 #include "proc.h"
 #include "cpu.h"
+#include "console.h"
 
 /* ============================================================
  * 全局 VFS 状态
@@ -45,9 +46,34 @@ osslock_t vfs_fs_lock;
  * 自旋锁会整段关中断，破坏调度。 */
 static ossem_t vfs_big_lock;
 
+/* 当前持有 vfs_big_lock 的进程，NULL 表示无人持有。只用于让内存压力回调
+ * （vfs_dcache_reclaim）判断"此刻碰 dentry 树安不安全"——ossem_t 没有 trydown，
+ * 从任意分配失败点直接 sem_down 会在已持锁的进程里自锁死。 */
+static pcb_t *vfs_lock_owner = NULL;
+
 /* VFS 全局根目录项与根挂载点（由 vfs_mount("/", ...) 设置）*/
 dentry_t   *vfs_root_dentry = NULL;
 vfsmount_t *vfs_root_mount  = NULL;
+
+/* ============================================================
+ * 目录项缓存（dcache）全局状态
+ *
+ * 引用归零的目录项不再立即释放，而是挂到这条 LRU 上：对象仍然活着、仍挂在
+ * 父目录的 d_subdirs 里，下一次 dentry_lookup 能直接命中并"复活"，省掉一整趟
+ * i_op->lookup（在 FatFS 上就是一次 f_stat，上板后是一次真实 SPI 扇区传输）。
+ *
+ * 保护：沿用 vfs_big_lock，不引入新锁——所有增删都发生在 dentry_get/dentry_put
+ * 里，而这两个函数只被 vfs.c 内部以及 proc.c 的 fork 路径调用，全部在大锁之内。
+ * ============================================================ */
+
+/* LRU 链表（哨兵头）：头部最近使用，尾部最久未使用，从尾部回收 */
+static struct list_head dcache_lru;
+
+static uint64_t dcache_hits;
+static uint64_t dcache_misses;
+static uint64_t dcache_revives;
+static uint64_t dcache_evicts;
+static uint32_t dcache_nr_unused;
 
 /* ============================================================
  * 内部工具函数：路径字符串操作
@@ -175,43 +201,58 @@ static int split_path(const char *path,
  * ============================================================ */
 
 /**
- * @brief 增加目录项引用计数（内部使用）
+ * @brief 把目录项从 LRU 上摘下来（若它在 LRU 上）
  * @param[in] d 目录项指针
+ * @retval true  确实摘掉了一个 LRU 条目
+ * @retval false 它本来就不在 LRU 上
  */
-static void dentry_get(dentry_t *d)
+static bool dcache_lru_del(dentry_t *d)
 {
-    if (d)
+    if (list_empty(&d->d_lru))
     {
-        d->d_ref++;
+        return false;
     }
+    list_del_init(&d->d_lru);
+    dcache_nr_unused--;
+    return true;
 }
 
 /**
- * @brief 减少目录项引用计数，归零时销毁（内部使用）
- * @param[in] d 目录项指针
- * @details 引用归零时依次：调用 d_release 回调、从父目录子链表摘除、
- *   销毁所属 inode、释放名称与描述符本身，最后**释放它对父目录持有的那个引用**
- *   （见 dentry_create()）。父目录因此可能连锁归零，所以这里写成沿 d_parent
- *   向上的循环而不是递归——内核栈只有 KERNEL_STACKPSIZE 页，深路径递归会踩爆。
- * @note d_ref 的含义是"外部持有者数量 + 子目录项数量"。外部持有者包括
- *   vfs_lookup() 返回给调用者的那一个、proc_cwd、file_t.f_dentry、
- *   以及挂载点的 vfsmount.mnt_host_dentry。
+ * @brief 判断一个目录项是否值得放进 LRU 缓存
+ * @param[in] d 引用刚归零的目录项
+ * @details 两类不值得：
+ *   -# **已脱链**（d_parent 指向自身）——unlink/rmdir 过的目录项永远不可能再被
+ *      dentry_lookup 命中，缓存它纯属浪费；文件系统局部根同样满足这个条件，
+ *      但它的引用被 vfs_root_dentry/挂载点钉着，正常情况下走不到这里。
+ *   -# **负目录项**（d_inode == NULL）——只在 create/mkdir/rename 途中临时存在，
+ *      缓存"不存在"这件事需要一整套逐出规则（见开发计划的 D4），本版不做。
  */
-static void dentry_put(dentry_t *d)
+static bool dcache_should_cache(dentry_t *d)
+{
+    return d->d_parent != d && d->d_inode != NULL;
+}
+
+/**
+ * @brief 真正销毁一个引用已归零的目录项，并沿 d_parent 向上归还父引用
+ * @param[in] d 待销毁的目录项，调用者保证 d->d_ref == 0
+ * @details 依次：从 LRU 摘除、调 d_release 回调、从父目录子链表脱链、销毁 inode、
+ *   释放名称与描述符本身，最后归还它对父目录持有的那个引用（见 dentry_create()）。
+ *   父目录可能因此归零：若值得缓存就进 LRU 并到此为止，否则继续向上销毁。
+ *
+ *   写成沿 d_parent 向上的循环而不是递归——内核栈只有 KERNEL_STACKPSIZE 页，
+ *   深路径递归会踩爆。
+ * @note 这里是**唯一**归还父引用的地方；dentry_put 引用归零转入 LRU 时不归还
+ *   （否则父目录会在子项还缓存着的时候被提前释放）。
+ * @note 由"LRU 上的目录项一定是叶子"可知：本函数除了可能往 LRU 头部**插入**
+ *   一个父目录之外，绝不会释放链表上的其它条目——dcache_shrink_to 和
+ *   dcache_prune_subtree 的遍历安全性都建立在这条性质上。
+ */
+static void dcache_evict(dentry_t *d)
 {
     while (d != NULL)
     {
-        if (d->d_ref == 0)
-        {
-            return; /* 防御：引用已归零的目录项不应再被释放 */
-        }
-        d->d_ref--;
-        if (d->d_ref > 0)
-        {
-            return;
-        }
+        dcache_lru_del(d);
 
-        /* 引用归零：调用释放回调 */
         if (d->d_op && d->d_op->d_release)
         {
             d->d_op->d_release(d);
@@ -234,8 +275,169 @@ static void dentry_put(dentry_t *d)
 
         kfree(d->d_name);
         kfree(d);
+        dcache_evicts++;
 
-        d = parent;
+        d = NULL;
+        if (parent != NULL && parent->d_ref > 0)
+        {
+            parent->d_ref--;
+            if (parent->d_ref == 0)
+            {
+                if (dcache_should_cache(parent))
+                {
+                    list_add(&parent->d_lru, &dcache_lru);
+                    dcache_nr_unused++;
+                }
+                else
+                {
+                    d = parent;
+                }
+            }
+        }
+    }
+}
+
+/**
+ * @brief 从 LRU 尾部批量回收，直到条目数降到 target
+ * @param[in] target 目标驻留条目数
+ * @details 每轮取尾部（最久未使用）的一条真正释放。dcache_evict 归还父引用时可能
+ *   把刚变成叶子的父目录插到 LRU 头部，于是 nr_unused 在循环中途是会回升的——
+ *   但循环仍然一定收敛：每一轮至少 kfree 掉一个目录项，而缓存中活着的目录项
+ *   数量有限且严格递减，被插进来的父目录本身也已经是叶子、迟早轮到它。
+ */
+static void dcache_shrink_to(uint32_t target)
+{
+    while (dcache_nr_unused > target && !list_empty(&dcache_lru))
+    {
+        dentry_t *victim = list_entry(dcache_lru.prev, dentry_t, d_lru);
+        dcache_lru_del(victim);
+        dcache_evict(victim);
+    }
+}
+
+/**
+ * @brief 判断 d 是否为 ancestor 的后代
+ * @param[in] d        待判断的目录项
+ * @param[in] ancestor 祖先目录项
+ * @note guard 只是防御 d_parent 意外成环，正常目录树走不满。
+ */
+static bool dcache_is_descendant(dentry_t *d, dentry_t *ancestor)
+{
+    int guard = VFS_PATH_MAX;
+
+    while (d != NULL && d->d_parent != d && guard-- > 0)
+    {
+        d = d->d_parent;
+        if (d == ancestor)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * @brief 把 ancestor 子树下所有仍在 LRU 上的目录项真正释放（ancestor 本身不动）
+ * @param[in] ancestor 子树根，调用者必须持有它的一个引用
+ * @details **unmount 这一处是非用不可的**：LRU 上的目录项持有指向该文件系统 inode
+ *   的指针，而 inode 又指向马上要被 destroy_super_block 销毁的超级块。不清干净
+ *   就是一批悬空引用。正在被使用的（d_ref > 0）动不了，那是卸载忙碌文件系统本身
+ *   的问题，不在本处理范围。
+ *
+ *   rmdir 那一处是防御性的：缓存里只会有磁盘上真实存在的条目，所以判空看到子项
+ *   就是真非空，本身并不会误判；剪一遍是为了让 list_empty(&d_subdirs) 的语义
+ *   收窄成"还有人在用的子项"，日后真加了负目录项缓存（D4）不至于悄悄变成误报。
+ *
+ *   rename **不需要**剪：路径不再被 inode 缓存（fatfs 适配层改成沿 dentry 链现推），
+ *   把目录项挂到新父目录之后整棵子树的路径自然全部跟着变，缓存继续有效。
+ *
+ *   用"反复扫 LRU"而不是递归下降——内核栈只有一页，目录深度不可控。每一轮至多
+ *   释放掉当前这层的叶子，它们的父目录归零后进入 LRU，下一轮再被扫到，
+ *   轮数不超过子树深度。
+ */
+static void dcache_prune_subtree(dentry_t *ancestor)
+{
+    bool progress = true;
+
+    while (progress)
+    {
+        struct list_head *pos, *tmp;
+
+        progress = false;
+        list_for_each_safe(pos, tmp, &dcache_lru)
+        {
+            dentry_t *d = list_entry(pos, dentry_t, d_lru);
+            if (!dcache_is_descendant(d, ancestor))
+            {
+                continue;
+            }
+            dcache_lru_del(d);
+            dcache_evict(d);
+            progress = true;
+        }
+    }
+}
+
+/**
+ * @brief 增加目录项引用计数（内部使用）
+ * @param[in] d 目录项指针
+ * @note 引用从 0 提到 1 时必须把它从 LRU 摘掉，否则一个正在被使用的目录项还挂在
+ *   回收链上，下一次 shrink 会把它释放掉。这里与 dentry_put 的入队严格成对——
+ *   放在 dentry_get 而不是只放在 dentry_lookup 里，是为了让配对关系是结构性的：
+ *   ".." 上溯、跨挂载点、fork 复制 cwd 等路径都各自调 dentry_get，逐个记得加
+ *   一句"复活"迟早会漏。
+ */
+static void dentry_get(dentry_t *d)
+{
+    if (d)
+    {
+        if (d->d_ref == 0 && dcache_lru_del(d))
+        {
+            dcache_revives++;
+        }
+        d->d_ref++;
+    }
+}
+
+/**
+ * @brief 减少目录项引用计数，归零时转入 LRU 缓存（内部使用）
+ * @param[in] d 目录项指针
+ * @details 引用归零**不等于**释放：值得缓存的目录项挂到 dcache_lru 头部就返回，
+ *   对象继续活着、继续挂在父目录的 d_subdirs 里、继续能被 dentry_lookup 命中，
+ *   下一次访问同一路径就省掉一趟 i_op->lookup。真正的释放推迟到水位线触发的
+ *   dcache_shrink_to()，或 dcache_prune_subtree()。不值得缓存的（已脱链、
+ *   负目录项）直接走 dcache_evict()。
+ * @note d_ref 的含义是"外部持有者数量 + 子目录项数量"。外部持有者包括
+ *   vfs_lookup() 返回给调用者的那一个、proc_cwd、file_t.f_dentry、
+ *   以及挂载点的 vfsmount.mnt_host_dentry。
+ * @note 转入 LRU 时**不**归还对父目录的引用——缓存一个叶子会顺带把它整条祖先链
+ *   钉在内存里，这正是想要的（祖先目录本来就最该缓存），也保证了 LRU 上的目录项
+ *   永远不会有一个已被释放的 d_parent。归还统一由 dcache_evict() 负责。
+ */
+static void dentry_put(dentry_t *d)
+{
+    if (d == NULL || d->d_ref == 0)
+    {
+        return; /* 防御：引用已归零的目录项不应再被释放 */
+    }
+
+    d->d_ref--;
+    if (d->d_ref > 0)
+    {
+        return;
+    }
+
+    if (!dcache_should_cache(d))
+    {
+        dcache_evict(d);
+        return;
+    }
+
+    list_add(&d->d_lru, &dcache_lru);   /* 头插 = 最近使用 */
+    dcache_nr_unused++;
+    if (dcache_nr_unused > DCACHE_MAX_UNUSED)
+    {
+        dcache_shrink_to(DCACHE_LOW_WATER);
     }
 }
 
@@ -274,6 +476,69 @@ void dentry_get_pub(dentry_t *d)
 void dentry_put_pub(dentry_t *d)
 {
     dentry_put(d);
+}
+
+/**
+ * @brief 回收至多 nr 条缓存目录项，供内存压力路径调用
+ * @param[in] nr 期望回收的条目数
+ * @note 缓存目录项是**真正可以丢弃**的数据，比 slab 的空闲页更该先吐出来，
+ *   所以内存不足重试路径应当先调本函数、再调 slab_reclaim_all()。
+ * @note 调用者必须已持有 vfs 大锁（vfs_lock）——本函数会改动 dentry 树。
+ */
+void vfs_dcache_shrink(uint32_t nr)
+{
+    uint32_t target = (dcache_nr_unused > nr) ? (dcache_nr_unused - nr) : 0;
+    dcache_shrink_to(target);
+}
+
+/**
+ * @brief 内存不足时的目录项缓存回收回调，由 kmalloc 的重试路径调用
+ * @details 缓存目录项是真正可以丢弃的数据，比 slab 的空闲页更该先吐出来，
+ *   所以 kmalloc 重试时先调本函数、再调 slab_reclaim_all()。压力来临时不留情面，
+ *   直接清空整条 LRU。
+ * @note **只在调用者恰好是 vfs_big_lock 的持有者时才真的干活**。dentry 树由大锁
+ *   保护，而 kmalloc 可能在任何上下文（含持自旋锁、含根本没进过 VFS 的路径）里
+ *   失败；ossem_t 没有 trydown，就地 sem_down 要么自锁死要么在关中断状态下睡眠。
+ *   好在最需要它的场合恰好满足这个条件——正是在 VFS 调用内部创建 dentry/inode
+ *   时把内存耗光的那一次。其余场合退化成空操作，交给 slab_reclaim_all()。
+ */
+void vfs_dcache_reclaim(void)
+{
+    if (vfs_lock_owner == NULL || vfs_lock_owner != proc_get_current())
+    {
+        return;
+    }
+    dcache_shrink_to(0);
+}
+
+/**
+ * @brief 取目录项缓存统计快照
+ * @param[out] out 接收统计值的结构体
+ */
+void vfs_dcache_get_stats(dcache_stats_t *out)
+{
+    if (!out)
+    {
+        return;
+    }
+    out->hits      = dcache_hits;
+    out->misses    = dcache_misses;
+    out->revives   = dcache_revives;
+    out->evicts    = dcache_evicts;
+    out->nr_unused = dcache_nr_unused;
+}
+
+/**
+ * @brief 打印目录项缓存统计
+ */
+void vfs_dcache_stats(void)
+{
+    uint64_t total = dcache_hits + dcache_misses;
+    uint64_t rate  = total ? (dcache_hits * 100 / total) : 0;
+
+    printf("dcache: hit=%ld miss=%ld (%ld%%) revive=%ld evict=%ld unused=%d/%d\n",
+           dcache_hits, dcache_misses, rate, dcache_revives, dcache_evicts,
+           dcache_nr_unused, DCACHE_MAX_UNUSED);
 }
 
 /* ============================================================
@@ -535,6 +800,8 @@ dentry_t *dentry_create(const char *name, inode_t *inode,
 
     /* 初始化子目录链表头（空子目录列表）*/
     INIT_LIST_HEAD(&d->d_subdirs);
+    /* 孤立的 d_lru 节点表示"不在 LRU 上"，d_ref 从 1 起步本来就不该在 LRU 上 */
+    INIT_LIST_HEAD(&d->d_lru);
 
     if (!parent) /* 没有父目录 → 这是文件系统根目录 */
     {
@@ -576,10 +843,12 @@ dentry_t *dentry_lookup(dentry_t *parent, const char *name)
         child = list_entry(pos, dentry_t, d_child);
         if (strncmp(child->d_name, name, VFS_NAME_MAX) == 0)
         {
-            dentry_get(child);
+            dentry_get(child);   /* 命中的若在 LRU 上，由 dentry_get 负责复活 */
+            dcache_hits++;
             return child;
         }
     }
+    dcache_misses++;
     return NULL;
 }
 
@@ -614,6 +883,12 @@ void vfs_init(void)
 {
     INIT_LIST_HEAD(&super_block_list);
     INIT_LIST_HEAD(&vfs_mount_list);
+    INIT_LIST_HEAD(&dcache_lru);
+    dcache_hits      = 0;
+    dcache_misses    = 0;
+    dcache_revives   = 0;
+    dcache_evicts    = 0;
+    dcache_nr_unused = 0;
     spinlock_init(&vfs_fs_lock);
     sem_init(&vfs_big_lock, 1);
     file_system_types = NULL;
@@ -630,6 +905,7 @@ void vfs_init(void)
 void vfs_lock(void)
 {
     sem_down(&vfs_big_lock);
+    vfs_lock_owner = proc_get_current();
 }
 
 /**
@@ -637,6 +913,7 @@ void vfs_lock(void)
  */
 void vfs_unlock(void)
 {
+    vfs_lock_owner = NULL;
     sem_up(&vfs_big_lock);
 }
 
@@ -984,6 +1261,15 @@ int vfs_unmount(const char *path)
     if (!target)
     {
         return ENO5_NOSUCH_ENTRY;
+    }
+
+    /* 先把这个文件系统里纯缓存的目录项清干净：它们的 inode 指向马上要被销毁的
+     * 超级块，留在 LRU 上就是一批悬空引用。正在被使用的（d_ref > 0）动不了，
+     * 那是卸载忙碌文件系统本身的问题，不在本处理范围。 */
+    if (target->mnt_sb && target->mnt_sb->s_root_inode &&
+        target->mnt_sb->s_root_inode->i_dentry)
+    {
+        dcache_prune_subtree(target->mnt_sb->s_root_inode->i_dentry);
     }
 
     /* 同步并卸载底层文件系统 */
@@ -1535,6 +1821,9 @@ int vfs_rmdir(const char *path)
         dentry_put(d);
         return ENO9_NOT_DIR;
     }
+
+    /* 判空之前先剪掉子树里纯缓存的目录项，让下面这一步看到的是"还有人在用的子项" */
+    dcache_prune_subtree(d);
 
     /* 目录非空：不允许删除 */
     if (!list_empty(&d->d_subdirs))

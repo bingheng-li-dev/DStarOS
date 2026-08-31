@@ -49,6 +49,12 @@
  * 串口应看到 "=== slabtest done: N pass  0 fail ==="。 */
 #define DEBUG_SLAB_TEST 0
 
+/* 目录项缓存（LRU dcache）内核态自检：置 1 时 init 改为运行 run_dcache_tests()
+ * （src/debug/dcache_test.c）再关机，不启动用户程序。覆盖基本命中、LRU 复活与入队
+ * 出队配对、缓存叶子对祖先链的钉住效果、unlink 逐出、目录改名后子树仍可用、
+ * 水位线压制与内存归还。串口应看到 "=== dcachetest done: N pass  0 fail ==="。 */
+#define DEBUG_DCACHE_TEST 0
+
 /* VFS/FatFS 回归测试：置 1 时 init 进程改为运行 vfs_test()（src/debug/vfs_fatfs_test.c）
  * 再关机，不启动用户程序。覆盖 open/read/write/stat/mkdir/truncate/rename/unlink/rmdir
  * 以及目录读取通路（getdents64 后端：'.'/'..' 合成、d_reclen 对齐、pending 暂存、

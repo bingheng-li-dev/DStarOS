@@ -3,6 +3,7 @@
 #include "memtype.h"
 #include "slab.h"
 #include "sync.h"
+#include "vfs.h"
 
 /* 只尝试一次，不做回收重试；重试由 kmalloc 在不持任何锁的层面上做。 */
 static void *kmalloc_once(uint64_t size)
@@ -35,6 +36,9 @@ void *kmalloc(uint64_t size)
     {
         return ptr;
     }
+    /* 先吐目录项缓存再吐 slab 空闲页：dcache 里放的是真正可以丢弃的数据，
+     * 丢了最多下次多解析一遍路径；slab 的空闲页则只是碎片的副产物。 */
+    vfs_dcache_reclaim();
     slab_reclaim_all();
     return kmalloc_once(size);
 }
