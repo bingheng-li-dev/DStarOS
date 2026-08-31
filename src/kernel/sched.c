@@ -110,9 +110,12 @@ static void fair_update_curr(pcb_t *curr)
     /* 比较rbtree最左节点进程vruntime和当前进程vruntime，
      * 选择更小的那个与旧的min_vruntime比较，择其大者 */
     uint64_t min_vruntime = curr->proc_vruntime;
-    if (run_queue.cfs.nr_running > 0)
+    /* 判空只能看树本身，不能看 nr_running——测一个、用另一个，两者一旦不同步
+     * 就会把 rb_first() 的 NULL 当成有效节点。fair_pick_next 一直是这么写的。 */
+    struct rb_node *first = rb_first(&run_queue.cfs.tasks);
+    if (first != NULL)
     {
-        pcb_t *leftmost = rb_entry(rb_first(&run_queue.cfs.tasks), pcb_t, proc_rbtree_node);
+        pcb_t *leftmost = rb_entry(first, pcb_t, proc_rbtree_node);
         if (leftmost->proc_vruntime < curr->proc_vruntime)
         {
             min_vruntime = leftmost->proc_vruntime;
@@ -183,9 +186,10 @@ static void fair_task_tick(pcb_t *curr)
 {
     fair_update_curr(curr);
 
-    if (run_queue.cfs.nr_running > 0)
+    struct rb_node *first = rb_first(&run_queue.cfs.tasks);
+    if (first != NULL)
     {
-        pcb_t *leftmost = rb_entry(rb_first(&run_queue.cfs.tasks), pcb_t, proc_rbtree_node);
+        pcb_t *leftmost = rb_entry(first, pcb_t, proc_rbtree_node);
         if (curr->proc_vruntime >= leftmost->proc_vruntime + SCHED_WAKEUP_GRANULARITY)
         {
             curr->need_resched = true;
@@ -614,7 +618,16 @@ void sched_task_tick(void)
     {
         return;
     }
+
+    /* task_tick 会读就绪队列（CFS 要取最左节点算抢占），必须与另一个 hart 上的
+     * sched_enqueue/sched_dequeue 互斥。不加锁时曾稳定复现：本 hart 读到
+     * cfs.nr_running > 0，随即另一个 hart 在锁内做完 rb_erase 把树清空，
+     * 这里的 rb_first() 就返回 NULL，rb_entry(NULL, ...) 得到一个负地址，
+     * 内核态访问它直接 segfault（va=0xffffffffffffffe0）。
+     * 锁序：本函数由 tick_int_handler 在释放 tick_lock 之后调用，不嵌套在 tick_lock 内。 */
+    spinlock_acquire(&run_queue.lock);
     curr->proc_sched_class->task_tick(curr);
+    spinlock_release(&run_queue.lock);
 }
 
 void sched_set_nice(pcb_t *p, int nice)

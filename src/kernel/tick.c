@@ -55,11 +55,12 @@ void tick_int_handler(void)
         printf("core %ld : %ld ticks\n", cpu_get_current()->tick);
     }
 #endif
-    sched_task_tick();
     spinlock_release(&tick_lock);
-    /* 必须在 tick_lock 释放之后：tty_poll_input 会抢 tty_lock 并可能触发
-     * waitq_wake_all -> sched_wakeup -> 就绪队列锁，在 tick_lock 内部做
-     * 会多叠一层锁序，没有必要。 */
+    /* 以下几步都必须在 tick_lock 释放之后，它们各自要抢别的锁，叠在 tick_lock
+     * 里面只会多一层没必要的锁序：
+     *   sched_task_tick 要抢 run_queue.lock（它读就绪队列，必须与 enqueue/dequeue 互斥）；
+     *   tty_poll_input 会抢 tty_lock 并可能触发 waitq_wake_all -> sched_wakeup -> 就绪队列锁。 */
+    sched_task_tick();
     tty_poll_input();
     sched_check_timers();
     tick_set_next_int(timebase);
