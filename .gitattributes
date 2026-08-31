@@ -1,0 +1,15 @@
+# 会被直接"执行"的文件必须以 LF 检出。
+#
+# 本仓库在 Windows 宿主上开发、在 Linux 容器里构建运行，且 core.autocrlf=true——
+# 提交时归一化成 LF，检出时又转回 CRLF。对 .c/.h 无所谓（gcc 不在乎），
+# 但脚本会当场坏掉：
+#   bash: syntax error near unexpected token $'\r'   （regress.sh）
+#   -M: command not found                            （run.sh，反斜杠续行被 \r 打断）
+# 后果是 git clone 或 git worktree 检出之后，仓库自带的启动脚本与回归运行器
+# 全部不可用——2026-08-31 在临时 worktree 里验证提交时撞到过。
+#
+# 只钉这几类，不写 "* text=auto"：那会把全部 .c/.h 重新归一化，产生一次
+# 与内容无关的巨大 diff。
+*.sh      text eol=lf
+makefile  text eol=lf
+Makefile  text eol=lf
