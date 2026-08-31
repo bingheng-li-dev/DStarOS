@@ -49,11 +49,12 @@
  * 串口应看到 "=== slabtest done: N pass  0 fail ==="。 */
 #define DEBUG_SLAB_TEST 0
 
-/* VFS/FatFS 回归测试：置 1 时在 main() 里跑 vfs_test()（src/debug/vfs_fatfs_test.c），
- * 覆盖 open/read/write/stat/mkdir/truncate/rename/unlink/rmdir 以及目录读取通路
- * （getdents64 后端：'.'/'..' 合成、d_reclen 对齐、pending 暂存、LFN 长文件名）。
- * 只在 hart0 上跑一次——两个 hart 同时跑会并发操作同一批测试文件互相干扰。
- * 必须在 proc_init() 之后调用：vfs_lock() 内部的 sem_down() 需要一个有效的当前 pcb。 */
+/* VFS/FatFS 回归测试：置 1 时 init 进程改为运行 vfs_test()（src/debug/vfs_fatfs_test.c）
+ * 再关机，不启动用户程序。覆盖 open/read/write/stat/mkdir/truncate/rename/unlink/rmdir
+ * 以及目录读取通路（getdents64 后端：'.'/'..' 合成、d_reclen 对齐、pending 暂存、
+ * LFN 长文件名）。串口应看到一串 [PASS]，末尾无 [FAIL]。
+ * 必须在 proc_init() 里调用：vfs_lock() 内部的 sem_down() 需要一个有效的当前 pcb，
+ * 而且只能有一个执行流在跑——两边同时跑会并发操作同一批测试文件互相干扰。 */
 #define DEBUG_VFS_TEST 0
 
 /* U 态 fork/wait4 syscall 验证：置 1 时 init 额外 fork 一个 user/fork_wait.c 编译出的
