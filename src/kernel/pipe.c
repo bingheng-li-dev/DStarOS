@@ -5,6 +5,8 @@
 #include "errorcode.h"
 #include "stringops.h"
 #include "kmalloc.h"
+#include "signal.h"
+#include "proc.h"
 
 ssize_t pipe_read(file_t *file, void *buf, size_t len)
 {
@@ -23,13 +25,36 @@ ssize_t pipe_read(file_t *file, void *buf, size_t len)
             spinlock_release(&p->lock, p_lock_key);
             return -EAGAIN;
         }
-        waitq_prepare(&p->wq_read);
+        /* 可中断睡眠：不这样的话卡在空管道上的进程 kill 不动，
+         * 要等到真有人写管道才会醒 */
+        waitq_prepare_interruptible(&p->wq_read);
+        /* **这次检查夹在"置 INTERRUPTIBLE"和"睡下去"之间，不能省，也不能挪到
+         * sched_schedule() 后面**：signal_send 的顺序是"置 pending → 读 proc_state"，
+         * 本侧的顺序是"置 proc_state → 读 pending"，两者交叉才能保证至少有一方
+         * 看见对方。只在睡醒之后查的话，发信号方可能在本任务写 INTERRUPTIBLE
+         * 之前读到 RUNNING 而跳过 wakeup，本任务随即睡死，kill 不再生效。 */
+        if (signal_pending(proc_get_current()))
+        {
+            waitq_remove(&p->wq_read, proc_get_current());
+            proc_get_current()->proc_state = RUNNING; /* prepare 置过 INTERRUPTIBLE，得改回来 */
+            spinlock_release(&p->lock, p_lock_key);
+            return ENO24_RESTARTSYS;
+        }
         spinlock_release(&p->lock, p_lock_key);
         /* 被 pipe_write 或 pipe_release（写端）唤醒后从这里继续，回到循环开头
          * 重新检查条件——可能被虚假唤醒或被别的读者抢先取走，不能想当然直接成功 */
         sched_schedule();
         /* 重新取锁：赋值给循环外的 key，不能再声明一个同名局部把它遮蔽掉 */
         p_lock_key = spinlock_acquire(&p->lock);
+
+        /* 是信号把我们唤醒的：**必须先摘链**再走，否则这个节点会一直挂在
+         * wq_read 上（见 sync.h waitq_prepare_interruptible 的说明） */
+        if (signal_pending(proc_get_current()))
+        {
+            waitq_remove(&p->wq_read, proc_get_current());
+            spinlock_release(&p->lock, p_lock_key);
+            return ENO24_RESTARTSYS;
+        }
     }
 
     size_t n = len;
@@ -67,7 +92,10 @@ ssize_t pipe_write(file_t *file, const void *buf, size_t len)
     if (p->readers == 0)
     {
         spinlock_release(&p->lock, p_lock_key);
-        return ENO22_BROKEN_PIPE; /* TODO：信号机制落地后同时投 SIGPIPE */
+        /* POSIX：读端全关时除了返回 EPIPE 还要投 SIGPIPE（默认动作终止）。
+         * 放锁之后再发，免得在 pipe->lock 里面再套一层 sighand->lock */
+        signal_send(proc_get_current(), SIGPIPE);
+        return ENO22_BROKEN_PIPE;
     }
 
     /* <= PIPE_BUF 的写要原子：等够整块所需空间再一次性写入；
@@ -83,6 +111,7 @@ ssize_t pipe_write(file_t *file, const void *buf, size_t len)
         if (p->readers == 0)
         {
             spinlock_release(&p->lock, p_lock_key);
+            signal_send(proc_get_current(), SIGPIPE);
             return ENO22_BROKEN_PIPE;
         }
         if (file->f_mode & O_NONBLOCK)
@@ -90,13 +119,28 @@ ssize_t pipe_write(file_t *file, const void *buf, size_t len)
             spinlock_release(&p->lock, p_lock_key);
             return -EAGAIN;
         }
-        waitq_prepare(&p->wq_write);
+        waitq_prepare_interruptible(&p->wq_write);
+        /* 同 pipe_read：这次检查必须夹在"置 INTERRUPTIBLE"和"睡下去"之间 */
+        if (signal_pending(proc_get_current()))
+        {
+            waitq_remove(&p->wq_write, proc_get_current());
+            proc_get_current()->proc_state = RUNNING;
+            spinlock_release(&p->lock, p_lock_key);
+            return ENO24_RESTARTSYS;
+        }
         spinlock_release(&p->lock, p_lock_key);
         /* 被 pipe_read 或 pipe_release（读端）唤醒后从这里继续，回到循环开头
          * 重新检查条件——可能被虚假唤醒或被别的写者抢先占用了腾出的空间 */
         sched_schedule();
         /* 重新取锁：赋值给循环外的 key，不能再声明一个同名局部把它遮蔽掉 */
         p_lock_key = spinlock_acquire(&p->lock);
+
+        if (signal_pending(proc_get_current()))
+        {
+            waitq_remove(&p->wq_write, proc_get_current());
+            spinlock_release(&p->lock, p_lock_key);
+            return ENO24_RESTARTSYS;
+        }
     }
 
     /* 从 head 拷入 need 字节，可能跨越缓冲区末端，分两段 */

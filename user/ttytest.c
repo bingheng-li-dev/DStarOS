@@ -23,6 +23,8 @@
 #define __NR_write    64
 #define __NR_fstat    80
 #define __NR_exit     93
+#define __NR_setpgid 154
+#define __NR_getpid  172
 #define __NR_clone   220
 #define __NR_wait4   260
 
@@ -50,7 +52,10 @@
 /* termios/ioctl（asm-generic，与 linux_abi.h 完全一致，字段偏移不可重排）*/
 #define TCGETS      0x5401
 #define TCSETS      0x5402
+#define TIOCSPGRP   0x5410
 #define TIOCGWINSZ  0x5413
+
+#define SIGINT_NR 2
 
 #define ICANON  0x0002
 
@@ -125,6 +130,11 @@ static long sys_openat(int dirfd, const char *path, int flags, int mode)
     return syscall4(__NR_openat, dirfd, (long)path, flags, mode);
 }
 static long sys_close(int fd) { return syscall4(__NR_close, fd, 0, 0, 0); }
+static long sys_getpid(void) { return syscall4(__NR_getpid, 0, 0, 0, 0); }
+static long sys_setpgid(long pid, long pgid)
+{
+    return syscall4(__NR_setpgid, pid, pgid, 0, 0);
+}
 static long sys_lseek(int fd, long off, int whence)
 {
     return syscall4(__NR_lseek, fd, off, whence, 0);
@@ -563,6 +573,43 @@ static void test_fork_read(void)
              (cst >> 8) & 0xff, 0);
 }
 
+/* ============================================================
+ * 用例 25：^C → SIGINT 打给前台进程组
+ *
+ * 这是唯一能验证"信号从中断上下文产生"这条路径的用例：字符由 tick 中断里的
+ * tty_poll_input 收下，signal_send_group 在**持着 tty->lock 的中断上下文**里
+ * 只置位 + 唤醒，真正的投递发生在目标自己返回 U 态那一刻。
+ *
+ * 先把子进程挪进它自己的进程组并设为 tty 前台组，^C 才只打子进程——否则连本
+ * 测试进程一起被杀，汇总行都打不出来。子进程带兜底循环，^C 没打中也不会挂死。
+ * ============================================================ */
+static void test_ctrl_c_kills_foreground(void)
+{
+    long cpid = sys_clone();
+    if (cpid == 0)
+    {
+        char buf[8];
+        /* 阻塞读 stdin，等 ^C 把自己杀掉；打不中时兜底退出，不让测试挂死 */
+        for (int i = 0; i < 20; i++)
+        {
+            sys_read(0, buf, 1);
+        }
+        sys_exit(9);
+    }
+
+    sys_setpgid(cpid, cpid); /* 子进程自成一组 */
+    int pg = (int)cpid;
+    sys_ioctl(0, TIOCSPGRP, &pg);
+
+    int cst = 0;
+    sys_wait4(cpid, &cst);
+    check_eq("ctrl-C: foreground child killed by SIGINT", cst & 0x7f, SIGINT_NR);
+
+    /* 前台组还回本进程，免得后续（若有）用例受影响 */
+    int self = (int)sys_getpid();
+    sys_ioctl(0, TIOCSPGRP, &self);
+}
+
 void _start(void)
 {
     puts_fd(1, "\n=== ttytest: TTY line discipline + termios/ioctl ===\n");
@@ -591,6 +638,7 @@ void _start(void)
     test_overflow_no_crash();
     test_dup_read();
     test_fork_read();
+    test_ctrl_c_kills_foreground();
 
     puts_fd(1, "=== ttytest done: ");
     put_long(pass_count);

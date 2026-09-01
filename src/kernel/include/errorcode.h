@@ -6,6 +6,8 @@
  * musl/BusyBox 靠这个判断具体错误原因，数值不可自定义。 */
 #define EPERM         1
 #define ENOENT        2
+#define ESRCH         3
+#define EINTR         4
 #define EBADF         9
 #define ECHILD        10
 #define EAGAIN        11
@@ -61,5 +63,15 @@
 #define ENO21_ILLEGAL_SEEK (-ESPIPE) /* 对不支持 seek 的 file（管道/设备）做 lseek */
 #define ENO22_BROKEN_PIPE  (-EPIPE)  /* 向读端已全部关闭的管道写入 */
 #define ENO23_NOT_TTY      (-ENOTTY) /* 对非 TTY 的 fd 调 ioctl(TCGETS/...) */
+
+#define ENO25_NO_SUCH_PROC (-ESRCH)  /* kill 的目标 pid / 进程组不存在 */
+#define ENO26_INTERRUPTED  (-EINTR)  /* 阻塞的 syscall 被信号打断且不重启 */
+
+/* 内核内部专用：阻塞循环被信号打断时返回它，由 signal_handle_pending() 统一翻译成
+ * "重启该 syscall"或 ENO26_INTERRUPTED。**它永远不会出现在 syscall 的返回值里**，
+ * 数值取 Linux 的 ERESTARTSYS(512)，落在合法 errno 区间 [-4095,-1] 之外正是为了
+ * 让"不小心漏翻译"变成一眼可见的错误。 */
+#define ERESTARTSYS        512
+#define ENO24_RESTARTSYS   (-ERESTARTSYS)
 
 #endif

@@ -6,6 +6,8 @@
 #include "sbi.h"
 #include "vmm.h"
 #include "syscall.h"
+#include "signal.h"
+#include "proc.h"
 
 extern void trap_init_asm(void);
 
@@ -83,7 +85,13 @@ static bool get_local_intr(void)
     return (read_csr(sstatus) & SSTATUS_SIE) != 0;
 }
 
-void trap_handler(intstkf_t *sp)
+/**
+ * @brief trap 的实际分发逻辑
+ * @details 从 trap_handler() 里拆出来，只是为了给"返回 U 态之前投递信号"找一个
+ *   兜得住的位置：本函数里散布着多条 return（缺页、ecall 各一条），在每条 return
+ *   前面各加一次检查迟早会漏，包一层最省事。
+ */
+static void trap_dispatch(intstkf_t *sp)
 {
     int cause = sp->scause & CAUSE_SUPERVISOR_IRQ_REASON_MASK;
 
@@ -175,6 +183,9 @@ void trap_handler(intstkf_t *sp)
              * sret 返回时 PC ← sepc，如果不加 4，返回后会再次执行 ecall，无限重入
              */
             sp->sepc += 4;
+            /* a0 马上会被返回值覆盖，而 SA_RESTART 重启该 syscall 时要原样还给它；
+             * a7（调用号）在帧里原封不动，不用另存 */
+            proc_get_current()->proc_syscall_orig_a0 = sp->x10_a0;
             sp->x10_a0 = (uint64_t)syscall_dispatch(sp);
             return;
         case CAUSE_SUPERVISOR_ECALL:
@@ -209,6 +220,24 @@ void trap_handler(intstkf_t *sp)
             break;
         }
         panic("Not pageFaultHander or Ecall Exception!!");
+    }
+}
+
+/**
+ * @brief trap 总入口（由 cpua.S 的 trap_entry 调用）
+ * @details 分发完之后，若这次 trap 来自 U 态（sstatus.SPP == 0，即马上就要 sret
+ *   回用户程序），就在这里投递挂起的信号——这是整个内核里唯一一个"手里有 trap 帧
+ *   且下一步就是 sret"的位置，信号投递要改 sepc/sp/a0，只能在这里做。
+ *   来自 S 态的 trap（内核自己缺页、时钟中断打断内核代码）一律跳过：那时 sret
+ *   回的是内核代码，往用户栈上压帧没有意义。
+ */
+void trap_handler(intstkf_t *sp)
+{
+    trap_dispatch(sp);
+
+    if ((sp->sstatus & SSTATUS_SPP) == 0)
+    {
+        signal_handle_pending(sp);
     }
 }
 

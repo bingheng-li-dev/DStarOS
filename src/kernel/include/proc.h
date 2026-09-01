@@ -11,6 +11,7 @@
 #include "memtype.h"
 #include "trap.h"
 #include "vmm.h"
+#include "signal.h"
 
 struct dentry;
 typedef struct dentry dentry_t;
@@ -85,6 +86,14 @@ struct proc_control_block
     file_t *proc_fds[NOFILE];            /* 文件描述符fd表 */
     uint8_t proc_fd_flags[NOFILE];       /* 每个 fd 的标志位 */
 
+    /* ==================== 信号相关 ==================== */
+    sighand_t *proc_sighand;             /* 信号处理表；NULL = 内核线程，不接收信号 */
+    sigset_t proc_sig_pending;           /* 挂起集，位 n-1 对应信号 n */
+    sigset_t proc_sig_mask;              /* 屏蔽集 */
+    uint64_t proc_syscall_orig_a0;       /* 本次 syscall 进来时的 a0，SA_RESTART 重启时要还原 */
+    uint8_t proc_exit_sig;               /* 非 0 = 被该信号杀死，do_wait 据此编码 wait status */
+    int16_t proc_pgid;                   /* 进程组，fork 继承、exec 不变；^C 打给前台进程组 */
+
     const struct sched_class *proc_sched_class; /* 本任务归属的调度类 */
     int proc_policy;                            /* SCHED_NORMAL / SCHED_FIFO / SCHED_RR */
     /* 是否在就绪队列中。enqueue/dequeue 据此做幂等保护：
@@ -140,11 +149,23 @@ char *set_proc_name(pcb_t *proc, const char *name);
 char *get_proc_name(pcb_t *proc);
 int16_t do_fork(uint32_t clone_flags, uintptr_t stack, intstkf_t *regs);
 void do_exit(int16_t error_code) __attribute__((noreturn));
+/* 被信号杀死的退出路径：wait status 的低 7 位是信号号，而不是 (code<<8) */
+void do_exit_signal(int sig) __attribute__((noreturn));
 int16_t do_wait(int16_t pid, int *status);
 int do_exec(intstkf_t *sp, const char *path);
 int16_t create_kernel_thread_by_fork(void *func(void *), void *args, uint32_t clone_flags);
-/* 按 pid 查找 pcb（find_proc_by_pid 的公开包装）；未找到返回 NULL。 */
+/* 按 pid 查找 pcb（find_proc_by_pid 的公开包装）；未找到返回 NULL。
+ * @note 内部自取 proc_list_lock，**调用者不得已经持有它**（自旋锁不可重入）。 */
 pcb_t *proc_find_by_pid(int16_t pid);
+
+/* 在 proc_list_lock 保护下按 pid / pgid 找到进程并**立刻**对它调用 fn。
+ * kill 这类"查到就要动手"的场景必须用它，而不是先 proc_find_by_pid 再动手——
+ * 后者在两步之间有目标被 do_wait 收割（list_del + kfree）的窗口。
+ * 锁序：tty->lock → proc_list_lock → sighand->lock → run_queue.lock，单向；
+ * 因此 fn 里可以发信号、可以 wakeup，但不得睡眠、不得取 VFS 大锁。 */
+bool proc_apply_by_pid(int16_t pid, void (*fn)(pcb_t *p, int arg), int arg);
+/* 返回被应用到的进程个数（0 表示该进程组不存在） */
+int proc_apply_by_pgid(int16_t pgid, void (*fn)(pcb_t *p, int arg), int arg);
 void proc_init(void);
 pcb_t *proc_get_current(void);
 

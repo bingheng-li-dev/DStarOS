@@ -6,6 +6,8 @@
 #include "list.h"
 #include "cpu.h"
 
+struct proc_control_block;
+
 typedef struct os_spinlock osslock_t;
 typedef struct os_semaphore ossem_t;
 
@@ -64,6 +66,14 @@ void waitq_init(waitq_t *wq);
  * 条件锁保护下调用；返回后应立即释放条件锁并 sched_schedule()，被唤醒后重新
  * 抢锁、**循环重检条件**（被唤醒不代表条件仍然成立）。 */
 void waitq_prepare(waitq_t *wq);
+/* 同 waitq_prepare，但置 INTERRUPTIBLE：等待期间可以被信号唤醒。
+ * **被唤醒后如果决定放弃等待（返回 -ERESTARTSYS），必须先 waitq_remove()**——
+ * 否则任务带着一个仍挂在 wq 上的 proc_wait_linker 返回用户态，下一次挂入别的
+ * 等待结构就会让同一个节点出现在两条链上（proc.h 明令禁止），而它退出后
+ * PCB 被回收，wq 上还留着指向已释放内存的节点。 */
+void waitq_prepare_interruptible(waitq_t *wq);
+/* 把 p 从 wq 上摘下来（若它还在）。调用者须持有条件锁；重复调用是安全的空操作。 */
+void waitq_remove(waitq_t *wq, struct proc_control_block *p);
 /* 唤醒 wq 上挂着的全部任务并清空队列。调用者须持有条件锁。 */
 void waitq_wake_all(waitq_t *wq);
 

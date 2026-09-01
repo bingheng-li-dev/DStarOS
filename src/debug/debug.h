@@ -106,7 +106,16 @@
  * MAP_PRIVATE 的 fork COW 语义，以及 mmap/munmap 交错 200 轮的压力用例。
  * 串口应看到 "=== memtest done: N pass  0 fail ==="。
  * 置 1 时不跑 exectest/filetest/pipetest/ttytest/默认用户程序。 */
-#define DEBUG_MEM_TEST 1
+#define DEBUG_MEM_TEST 0
+
+/* 信号验证：置 1 时 init fork 一个 user/sigtest.c 编译出的用户程序，端到端触发
+ * rt_sigaction/rt_sigprocmask/rt_sigpending/kill/tkill/rt_sigreturn/setpgid，
+ * 覆盖默认动作（终止/忽略）、用户 handler 与自动屏蔽、SA_RESETHAND、
+ * 阻塞读被打断的 -EINTR 与 SA_RESTART 重启、SIGPIPE、SIGCHLD、进程组群发、
+ * 以及非法访问触发 SIGSEGV（此时内核必须不 panic）。
+ * 串口应看到 "=== sigtest done: N pass  0 fail ==="。
+ * 置 1 时不跑 exectest/filetest/pipetest/ttytest/memtest/默认用户程序。 */
+#define DEBUG_SIGNAL_TEST 1
 
 /* PTE A/D 位实测探针：置 1 时在 hart0 初始化阶段（trap_init 之后）跑
  * vmm_probe_pte_ad()，判定本平台是硬件自动置位 A/D 还是软件管理。

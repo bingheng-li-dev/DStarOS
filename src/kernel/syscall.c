@@ -12,6 +12,7 @@
 #include "pipe.h"
 #include "tty.h"
 #include "vmm.h"
+#include "signal.h"
 
 /* read/write 的中转缓冲大小：一页，kmalloc 分配——内核栈只有 1 页 4KB
  * （KERNEL_STACKPSIZE 1），FatFS 调用链本来就深，不能在栈上开这么大的缓冲。 */
@@ -877,6 +878,32 @@ static long sys_ioctl(int fd, unsigned long cmd, unsigned long arg)
     case TIOCSWINSZ:
         /* 串口没有真实窗口尺寸，收下即可 */
         return 0;
+    case TIOCGPGRP:
+    {
+        /* 用户态的 pid_t 是 32 位，tty 里存的是 int16_t，出参前先展开 */
+        int32_t pg = tty->foreground_pgid;
+        if (copy_to_user((void *)arg, &pg, sizeof(pg)) != 0)
+        {
+            return ENO8_NULL_POINTER;
+        }
+        return 0;
+    }
+    case TIOCSPGRP:
+    {
+        int32_t pg;
+        if (copy_from_user(&pg, (const void *)arg, sizeof(pg)) != 0)
+        {
+            return ENO8_NULL_POINTER;
+        }
+        if (pg <= 0)
+        {
+            return ENO6_INVAL_PARAM;
+        }
+        irq_key_t tty_lock_key = spinlock_acquire(&tty->lock);
+        tty->foreground_pgid = (int16_t)pg;
+        spinlock_release(&tty->lock, tty_lock_key);
+        return 0;
+    }
     default:
         return ENO23_NOT_TTY;
     }
@@ -930,6 +957,184 @@ static long sys_getppid(void)
 static long sys_clone(intstkf_t *sp)
 {
     return do_fork(0, sp->x2_sp, sp);
+}
+
+/* ============================================================
+ * 信号
+ * ============================================================ */
+
+/**
+ * @name sys_rt_sigaction
+ * @brief 装/取一个信号的处理动作
+ * @param[in]  sig         信号号
+ * @param[in]  uact        用户空间的新动作，NULL 表示只查询
+ * @param[out] uoact       用户空间的出参，NULL 表示不关心
+ * @param[in]  sigsetsize  sigset_t 的字节数，必须是 8
+ * @note struct sigaction 用的是**内核 ABI 的 24 字节布局**（handler/flags/mask），
+ *   sa_mask 在最后，没有 sa_restorer——riscv64 未定义 SA_RESTORER。
+ */
+static long sys_rt_sigaction(int sig, const void *uact, void *uoact, uint64_t sigsetsize)
+{
+    if (sigsetsize != SIGSET_SIZE)
+    {
+        return ENO6_INVAL_PARAM;
+    }
+
+    struct linux_sigaction kact;
+    struct linux_sigaction koact;
+    if (uact != NULL && copy_from_user(&kact, uact, sizeof(kact)) != 0)
+    {
+        return ENO8_NULL_POINTER;
+    }
+
+    int ret = signal_action_set(sig, uact ? &kact : NULL, uoact ? &koact : NULL);
+    if (ret != ENO0_NO_ERROR)
+    {
+        return ret;
+    }
+    if (uoact != NULL && copy_to_user(uoact, &koact, sizeof(koact)) != 0)
+    {
+        return ENO8_NULL_POINTER;
+    }
+    return ENO0_NO_ERROR;
+}
+
+static long sys_rt_sigprocmask(int how, const void *uset, void *uoset, uint64_t sigsetsize)
+{
+    if (sigsetsize != SIGSET_SIZE)
+    {
+        return ENO6_INVAL_PARAM;
+    }
+
+    sigset_t kset;
+    sigset_t koset;
+    if (uset != NULL && copy_from_user(&kset, uset, sizeof(kset)) != 0)
+    {
+        return ENO8_NULL_POINTER;
+    }
+
+    int ret = signal_mask_set(how, uset ? &kset : NULL, uoset ? &koset : NULL);
+    if (ret != ENO0_NO_ERROR)
+    {
+        return ret;
+    }
+    if (uoset != NULL && copy_to_user(uoset, &koset, sizeof(koset)) != 0)
+    {
+        return ENO8_NULL_POINTER;
+    }
+    return ENO0_NO_ERROR;
+}
+
+static long sys_rt_sigpending(void *uset, uint64_t sigsetsize)
+{
+    if (sigsetsize != SIGSET_SIZE)
+    {
+        return ENO6_INVAL_PARAM;
+    }
+    sigset_t pending = signal_pending_set();
+    if (copy_to_user(uset, &pending, sizeof(pending)) != 0)
+    {
+        return ENO8_NULL_POINTER;
+    }
+    return ENO0_NO_ERROR;
+}
+
+/**
+ * @name sys_kill
+ * @brief 给一个进程或一个进程组发信号
+ * @param[in] pid >0 单个进程；==0 调用者所在的进程组；<-1 进程组 -pid；
+ *                ==-1 本阶段不支持（广播很容易在测试里把 init 打死）
+ * @param[in] sig 信号号；0 只做存在性检查（POSIX 的 kill -0）
+ */
+static long sys_kill(int pid, int sig)
+{
+    if (sig < 0 || sig >= NSIG)
+    {
+        return ENO6_INVAL_PARAM;
+    }
+    if (pid > 0)
+    {
+        return signal_send_pid((int16_t)pid, sig);
+    }
+    if (pid == 0)
+    {
+        return signal_send_group(proc_get_current()->proc_pgid, sig);
+    }
+    if (pid < -1)
+    {
+        return signal_send_group((int16_t)(-pid), sig);
+    }
+    return ENO6_INVAL_PARAM; /* pid == -1：广播，不做 */
+}
+
+/* 没有线程组，tid 就是 pid */
+static long sys_tkill(int tid, int sig)
+{
+    if (tid <= 0 || sig < 0 || sig >= NSIG)
+    {
+        return ENO6_INVAL_PARAM;
+    }
+    return signal_send_pid((int16_t)tid, sig);
+}
+
+static long sys_rt_sigreturn(intstkf_t *sp)
+{
+    return signal_do_sigreturn(sp);
+}
+
+/* ============================================================
+ * 进程组
+ * ============================================================ */
+
+/* 回调：把目标进程的 pgid 改成 arg。调用时 proc_list_lock 在手。 */
+static void set_pgid_cb(pcb_t *p, int pgid)
+{
+    p->proc_pgid = (int16_t)pgid;
+}
+
+/* proc_apply_by_pid 的回调没有出参，借一个文件作用域变量把 pgid 带出来。
+ * 回调是在 proc_list_lock 里执行的，那把锁同时也是这个变量的保护者 */
+static int16_t pgid_result;
+
+static void get_pgid_cb(pcb_t *p, int arg)
+{
+    (void)arg;
+    pgid_result = p->proc_pgid;
+}
+
+static long sys_setpgid(int pid, int pgid)
+{
+    pcb_t *cur = proc_get_current();
+    if (pid < 0 || pgid < 0)
+    {
+        return ENO6_INVAL_PARAM;
+    }
+    int16_t target = (pid == 0) ? cur->proc_pid : (int16_t)pid;
+    int16_t newpg = (pgid == 0) ? target : (int16_t)pgid;
+
+    if (!proc_apply_by_pid(target, set_pgid_cb, newpg))
+    {
+        return ENO25_NO_SUCH_PROC;
+    }
+    return ENO0_NO_ERROR;
+}
+
+static long sys_getpgid(int pid)
+{
+    pcb_t *cur = proc_get_current();
+    if (pid < 0)
+    {
+        return ENO6_INVAL_PARAM;
+    }
+    if (pid == 0)
+    {
+        return cur->proc_pgid;
+    }
+    if (!proc_apply_by_pid((int16_t)pid, get_pgid_cb, 0))
+    {
+        return ENO25_NO_SUCH_PROC;
+    }
+    return pgid_result;
 }
 
 /* a0=path, a1=argv, a2=envp（本阶段忽略 argv/envp）。成功后 sp 已被改写为进入新程序的帧，
@@ -1240,6 +1445,24 @@ long syscall_dispatch(intstkf_t *sp)
         return sys_getpid();
     case __NR_getppid:
         return sys_getppid();
+    case __NR_rt_sigaction:
+        return sys_rt_sigaction((int)sp->x10_a0, (const void *)sp->x11_a1,
+                                (void *)sp->x12_a2, (uint64_t)sp->x13_a3);
+    case __NR_rt_sigprocmask:
+        return sys_rt_sigprocmask((int)sp->x10_a0, (const void *)sp->x11_a1,
+                                  (void *)sp->x12_a2, (uint64_t)sp->x13_a3);
+    case __NR_rt_sigpending:
+        return sys_rt_sigpending((void *)sp->x10_a0, (uint64_t)sp->x11_a1);
+    case __NR_rt_sigreturn:
+        return sys_rt_sigreturn(sp);
+    case __NR_kill:
+        return sys_kill((int)sp->x10_a0, (int)sp->x11_a1);
+    case __NR_tkill:
+        return sys_tkill((int)sp->x10_a0, (int)sp->x11_a1);
+    case __NR_setpgid:
+        return sys_setpgid((int)sp->x10_a0, (int)sp->x11_a1);
+    case __NR_getpgid:
+        return sys_getpgid((int)sp->x10_a0);
     case __NR_clone:
         return sys_clone(sp);
     case __NR_execve:

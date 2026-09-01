@@ -1,4 +1,6 @@
 #include "tty.h"
+#include "signal.h"
+#include "proc.h"
 #include "slab.h"
 #include "stringops.h"
 #include "sbi.h"
@@ -41,9 +43,14 @@ void tty_init(void)
     g_tty.tio.c_cc[VEOF]   = 4;   /* ^D */
     g_tty.tio.c_cc[VTIME]  = 0;
     g_tty.tio.c_cc[VMIN]   = 1;
+
     g_tty.tio.c_cc[VSTART] = 17;  /* ^Q，IXON 未开启，当前不生效 */
     g_tty.tio.c_cc[VSTOP]  = 19;  /* ^S，同上 */
     g_tty.tio.c_cc[VSUSP]  = 26;  /* ^Z，无 job control，当前不生效 */
+
+    /* 前台进程组初值取 init 的 pid；第一个用户进程建好时由 run_user_program 覆盖成
+     * 它自己的组，再往后由 ioctl(TIOCSPGRP) 接管 */
+    g_tty.foreground_pgid = 1;
 
     g_tty.ws.ws_row = 24;
     g_tty.ws.ws_col = 80;
@@ -104,12 +111,18 @@ void tty_input_push(char c)
         return;
     }
 
-    /* 3. VINTR（^C），仅当 ISIG 打开：丢弃整个未提交半行 */
-    if ((g_tty.tio.c_lflag & ISIG) && c == (char)g_tty.tio.c_cc[VINTR])
+    /* 3. VINTR（^C）与 VQUIT（^\），仅当 ISIG 打开：丢弃整个未提交半行，
+     * 并给前台进程组发信号。**这里是中断上下文、手里还攥着 tty->lock**，所以只能走
+     * signal_send_group 这条"置位 + 唤醒"的路径；真正的投递发生在目标自己返回 U 态
+     * 那一刻（最迟一个 tick 之后）。锁序 tty->lock → proc_list_lock → sighand->lock
+     * → run_queue.lock 单向成立：信号侧全程不碰 tty。 */
+    if ((g_tty.tio.c_lflag & ISIG) &&
+        (c == (char)g_tty.tio.c_cc[VINTR] || c == (char)g_tty.tio.c_cc[VQUIT]))
     {
+        bool is_intr = (c == (char)g_tty.tio.c_cc[VINTR]);
         g_tty.edit_pos = g_tty.line_pos;
-        tty_echo_str("^C\n");
-        /* 此处是投递 SIGINT 给前台进程组的钩子；当前没有信号机制，只做行丢弃 */
+        tty_echo_str(is_intr ? "^C\n" : "^\\\n");
+        signal_send_group(g_tty.foreground_pgid, is_intr ? SIGINT : SIGQUIT);
         waitq_wake_all(&g_tty.wq_read);
         spinlock_release(&g_tty.lock, g_tty_lock_key);
         return;
@@ -208,13 +221,31 @@ ssize_t tty_read(file_t *file, void *buf, size_t len)
             spinlock_release(&tty->lock, tty_lock_key);
             return -EAGAIN;
         }
-        waitq_prepare(&tty->wq_read);
+        waitq_prepare_interruptible(&tty->wq_read);
+        /* 同 pipe_read：这次检查必须夹在"置 INTERRUPTIBLE"和"睡下去"之间，
+         * 否则 ^C 的 SIGINT 有一个窗口会丢掉唤醒，读者就此睡死 */
+        if (signal_pending(proc_get_current()))
+        {
+            waitq_remove(&tty->wq_read, proc_get_current());
+            proc_get_current()->proc_state = RUNNING;
+            spinlock_release(&tty->lock, tty_lock_key);
+            return ENO24_RESTARTSYS;
+        }
         spinlock_release(&tty->lock, tty_lock_key);
         /* 被 tty_input_push 唤醒后从这里继续，回到循环开头重新检查条件——
          * 可能被虚假唤醒，或数据已被抢先取走，不能想当然直接成功 */
         sched_schedule();
         /* 重新取锁：赋值给循环外的 key，不能再声明一个同名局部把它遮蔽掉 */
         tty_lock_key = spinlock_acquire(&tty->lock);
+
+        /* ^C 打进来的 SIGINT 走的正是这条路：既要把睡在这里的读者唤醒，
+         * 也要让它带着 -ERESTARTSYS 退出去，交给投递点处理 */
+        if (signal_pending(proc_get_current()))
+        {
+            waitq_remove(&tty->wq_read, proc_get_current());
+            spinlock_release(&tty->lock, tty_lock_key);
+            return ENO24_RESTARTSYS;
+        }
     }
 
     /* 用 read_pos == eof_queue[0]（而不是 read_pos == line_pos）判断 EOF 是否该在此刻
@@ -350,6 +381,13 @@ tty_t *tty_from_file(file_t *f)
         return NULL;
     }
     return (tty_t *)f->f_private;
+}
+
+void tty_set_foreground_pgid(int16_t pgid)
+{
+    irq_key_t key = spinlock_acquire(&g_tty.lock);
+    g_tty.foreground_pgid = pgid;
+    spinlock_release(&g_tty.lock, key);
 }
 
 void tty_poll_input(void)

@@ -421,6 +421,34 @@ int vmm_map_vma(mm_t *mm, vma_t *vma)
 }
 
 /**
+ * @brief 把一个**已存在**的物理帧映到用户地址空间的固定虚拟地址上
+ * @param[in] mm   目标地址空间
+ * @param[in] va   目标虚拟地址（必须页对齐）
+ * @param[in] ppn  要映射的物理页帧号
+ * @param[in] prot VMP_R/W/X 组合，转成 PTE 标志时始终带 PTE_U
+ * @retval ENO0_NO_ERROR   成功
+ * @retval ENO1_NOMORE_MEM 建中间页表时物理内存不足
+ * @note 与 vmm_map_vma() 的区别是**不分配新帧**，用于把内核准备好的共享页
+ *   （目前只有 sigpage）塞进每个用户地址空间。
+ * @note 与 vmm_map_vma() 一样**每建立一次映射就 reference++**：拆除侧
+ *   （vmm_unmap_range）是按映射逐一递减、归零即 dealloc() 的，这里不加就会出现
+ *   "映射了 N 份、只记了 1 份"，第一个进程退出就把这页还给 PMM，其余进程的
+ *   PTE 当场变成指向一页随时会被别人拿走的内存。
+ */
+int vmm_map_fixed_page(mm_t *mm, virAddr_t va, ppn_t ppn, pgprot_t prot)
+{
+    pte_t *ptep = get_pte(mm->pgd_ppn, va, true, true);
+    if (!ptep)
+    {
+        return ENO1_NOMORE_MEM;
+    }
+    convert_ppn2pframe(ppn)->reference++;
+    *ptep = pte_create(ppn, vma_prot_to_pte_flags(prot));
+    tlb_flush_va(va);
+    return ENO0_NO_ERROR;
+}
+
+/**
  * @brief 解除 VMA 描述的整个虚拟地址区间的物理页映射并归还物理帧
  * @param[in] mm  所属进程地址空间描述符
  * @param[in] vma 要解映射的 VMA
@@ -528,7 +556,9 @@ static void vmm_segfault(virAddr_t badva, const char *why)
     if ((read_csr(sstatus) & SSTATUS_SPP) == 0)
     {
         printf("vmm: killing pid=%d\n", curr->proc_pid);
-        do_exit(139);
+        /* 走信号的退出路径，父进程 wait 到的 status 低 7 位才会是 SIGSEGV(11)；
+         * 从前写死的 do_exit(139) 是"退出码 139"，WIFSIGNALED 判不出来 */
+        do_exit_signal(SIGSEGV);
     }
     panic("segfault");
 }

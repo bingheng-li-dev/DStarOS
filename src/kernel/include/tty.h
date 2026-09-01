@@ -48,6 +48,8 @@ typedef struct tty
     waitq_t   wq_read;            /* 等一整行（或 raw 模式下等至少一个字节）的读者 */
     struct linux_termios tio;     /* 当前 termios 设置 */
     struct winsize       ws;      /* 固定 24x80 */
+    int16_t   foreground_pgid;    /* 前台进程组：^C / ^\ 打给它。初值 1（init 的 pgid），
+                                   * ash 起来之后由 TIOCSPGRP 改写 */
 } tty_t;
 
 /* 初始化全局 TTY 单例：自旋锁 + 等待队列 + termios 默认值。
@@ -63,6 +65,10 @@ void tty_input_push(char c);
 /* 从 SBI 轮询串口输入，把读到的字符逐个喂给 tty_input_push()。中断上下文安全；
  * 由 tick_int_handler() 在释放 tick_lock 之后调用，只在 hart0 上执行。 */
 void tty_poll_input(void);
+
+/* 设置前台进程组（^C / ^反斜杠 打给它）。由 run_user_program 在第一个用户进程建好时
+ * 调用一次，之后由 ioctl(TIOCSPGRP) 接管。 */
+void tty_set_foreground_pgid(int16_t pgid);
 
 /* TTY 读端：阻塞直到有一整行可读（raw 模式下至少一个字节）。
  * file->f_private 指向全局 tty 单例。 */

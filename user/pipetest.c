@@ -27,6 +27,7 @@
 #define __NR_write   64
 #define __NR_fstat   80
 #define __NR_exit    93
+#define __NR_rt_sigaction 134
 #define __NR_clone  220
 #define __NR_wait4  260
 
@@ -670,9 +671,34 @@ static void test_smp_stress(void)
     sys_close(c2p[1]);
 }
 
+/* 内核 ABI 的 struct sigaction（24 字节，sa_mask 在最后，无 sa_restorer）。
+ * 这里只用来把 SIGPIPE 设成 SIG_IGN——阶段 7 给 pipe_write 补上 SIGPIPE 之后，
+ * 向读端已关闭的管道写会先把本进程杀掉，测试根本走不到检查 -EPIPE 那一行。
+ * 真实程序（含 BusyBox）想拿到 EPIPE 返回值也必须先忽略 SIGPIPE，写法一致。 */
+struct k_sigaction
+{
+    unsigned long sa_handler;
+    unsigned long sa_flags;
+    unsigned long sa_mask;
+};
+
+#define SIGPIPE_NR  13
+#define SIG_IGN_VAL 1UL
+
+static void ignore_sigpipe(void)
+{
+    struct k_sigaction sa;
+    sa.sa_handler = SIG_IGN_VAL;
+    sa.sa_flags = 0;
+    sa.sa_mask = 0;
+    syscall4(__NR_rt_sigaction, SIGPIPE_NR, (long)&sa, 0, 8);
+}
+
 void _start(void)
 {
     puts_fd(1, "\n=== pipetest: pipe syscalls ===\n");
+
+    ignore_sigpipe();
 
     test_pipe2_basic();
     test_write_read_roundtrip();

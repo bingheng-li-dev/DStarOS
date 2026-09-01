@@ -59,6 +59,7 @@ void   vmm_vma_destroy(vma_t *vma);
 vma_t *vmm_vma_get(mm_t *mm, virAddr_t va);
 void   vmm_vma_insert(mm_t *mm, vma_t *vma);
 int    vmm_map_vma(mm_t *mm, vma_t *vma);
+int    vmm_map_fixed_page(mm_t *mm, virAddr_t va, ppn_t ppn, pgprot_t prot);
 void   vmm_unmap_vma(mm_t *mm, vma_t *vma);
 void   vmm_unmap_range(mm_t *mm, virAddr_t start, virAddr_t end);
 virAddr_t vmm_mmap_find_free_area(mm_t *mm, uint64_t len);

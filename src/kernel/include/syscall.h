@@ -27,6 +27,14 @@
 #define __NR_fstat       80
 #define __NR_exit        93
 #define __NR_exit_group  94
+#define __NR_kill       129
+#define __NR_tkill      130
+#define __NR_rt_sigaction   134
+#define __NR_rt_sigprocmask 135
+#define __NR_rt_sigpending  136
+#define __NR_rt_sigreturn   139
+#define __NR_setpgid    154
+#define __NR_getpgid    155
 #define __NR_getpid     172
 #define __NR_getppid    173
 #define __NR_brk        214

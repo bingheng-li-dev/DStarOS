@@ -127,6 +127,25 @@ void waitq_prepare(waitq_t *wq)
     tsk->proc_state = UNINTERRUPTIBLE;
 }
 
+void waitq_prepare_interruptible(waitq_t *wq)
+{
+    pcb_t *tsk = proc_get_current();
+
+    list_add_tail(&(tsk->proc_wait_linker), &(wq->task_list));
+    tsk->proc_state = INTERRUPTIBLE;
+}
+
+void waitq_remove(waitq_t *wq, pcb_t *p)
+{
+    (void)wq;
+    /* 用 list_del_init 而不是 list_del：本函数的调用者是"因为收到信号而放弃等待"
+     * 的任务，而它同时也可能刚被 waitq_wake_all() 摘走过——那边已经把节点从链上
+     * 取下，这里再 del 一次就是操作一对已经指向别处的指针。
+     * waitq_prepare/waitq_wake_all 两侧都保证节点要么在链上、要么是自环，
+     * 于是重复调用本函数是安全的空操作。 */
+    list_del_init(&(p->proc_wait_linker));
+}
+
 void waitq_wake_all(waitq_t *wq)
 {
     /* 先整体摘链到本地临时头，再逐个唤醒：wakeup() 之后任务可能立刻在另一个
@@ -142,7 +161,9 @@ void waitq_wake_all(waitq_t *wq)
     {
         struct list_head *node = tmp.next;
         pcb_t *proc = getContainer(node, pcb_t, proc_wait_linker);
-        list_del(node);
+        /* 摘成自环而不是留下悬空指针：被信号打断的任务会用 waitq_remove()
+         * 自己再摘一次，那次必须是安全的空操作 */
+        list_del_init(node);
         wakeup(proc);
     }
 }

@@ -6,6 +6,7 @@
 #include "sched.h"
 #include "console.h"
 #include "vfs.h"
+#include "tty.h"
 #include "cpu.h"
 #include "vmm.h"
 #include "elf.h"
@@ -15,6 +16,11 @@
 
 /* List of all processes. */
 struct list_head proc_list;
+/* 保护 proc_list 的插入/删除/遍历。sys_kill 要遍历它找目标，而 do_wait 收割 ZOMBIE 时
+ * 会 list_del + kfree(pcb)，两者并发就是必现的 use-after-free（slab 会立刻把那块内存
+ * 交给别人）。锁序：tty->lock → proc_list_lock → sighand->lock → run_queue.lock，
+ * 单向；持有本锁期间不得睡眠、不得取 VFS 大锁。 */
+static osslock_t proc_list_lock;
 /* Stack of all dealloced pids.In order to alloc these pids again. */
 struct list_head pid_stack;
 /* Amount of processes. */
@@ -81,6 +87,23 @@ int16_t do_fork(uint32_t clone_flags, uintptr_t stack, intstkf_t *regs)
         goto f2;
     }
 
+    /* 信号：继承屏蔽字与全部 handler，但 **挂起集清零**——父进程还没处理完的信号
+     * 不该让子进程再收一遍（POSIX）。父进程是内核线程（proc_sighand == NULL）时
+     * 子进程也是内核线程，什么都不用做。
+     * 放在 copy_proc_mm 之前是为了让失败路径只需要还内核栈与 PCB——一旦建了新
+     * 地址空间再失败，回滚要复杂得多。 */
+    new_proc->proc_pgid = proc_get_current()->proc_pgid;
+    if (proc_get_current()->proc_sighand != NULL)
+    {
+        new_proc->proc_sighand = signal_hand_copy(proc_get_current()->proc_sighand);
+        if (new_proc->proc_sighand == NULL)
+        {
+            goto f3;
+        }
+        new_proc->proc_sig_mask = proc_get_current()->proc_sig_mask;
+        new_proc->proc_sig_pending = 0;
+    }
+
     copy_proc_mm(clone_flags, new_proc);
     copy_proc_stk(new_proc, stack, regs);
 
@@ -95,6 +118,7 @@ int16_t do_fork(uint32_t clone_flags, uintptr_t stack, intstkf_t *regs)
     /* 子进程继承父进程的 fd 表：浅拷贝指针 + 每个 file_t 的 f_count++（父子共享打开文件与偏移）*/
     proc_fd_copy(new_proc, proc_get_current());
 
+
     int16_t pid = ENO3_NOFREE_PID;
     pid = alloc_pid_map();
     new_proc->proc_pid = pid;
@@ -103,8 +127,10 @@ int16_t do_fork(uint32_t clone_flags, uintptr_t stack, intstkf_t *regs)
     printf("do_fork::pid:%d\n", pid);
 #endif
 
+    irq_key_t plist_key = spinlock_acquire(&proc_list_lock);
     list_add(&(new_proc->proc_list_linker), &(proc_list));
     task_count = task_count + 1;
+    spinlock_release(&proc_list_lock, plist_key);
 
     new_proc->proc_parent = proc_get_current();
     list_add_tail(&(new_proc->proc_sibling_linker), &(proc_get_current()->proc_children));
@@ -118,9 +144,31 @@ f1:
 f2:
     kfree(new_proc);
     return ENO1_NOMORE_MEM;
+f3:
+    kfree((void *)(new_proc->kernel_stack));
+    kfree(new_proc);
+    return ENO1_NOMORE_MEM;
 }
 
+/**
+ * @brief do_exit / do_exit_signal 共用的退出流程
+ * @param[in] error_code 正常退出时的退出码（被信号杀死时无意义，传 0）
+ * @param[in] sig        非 0 表示被该信号杀死，do_wait 据此编码 wait status
+ * @note noreturn：末尾 sched_schedule() 换走之后再也不会被换回来。
+ */
+static void exit_common(int16_t error_code, uint8_t sig) __attribute__((noreturn));
+
 void do_exit(int16_t error_code)
+{
+    exit_common(error_code, 0);
+}
+
+void do_exit_signal(int sig)
+{
+    exit_common(0, (uint8_t)sig);
+}
+
+static void exit_common(int16_t error_code, uint8_t sig)
 {
     pcb_t *curr = proc_get_current();
 
@@ -166,12 +214,16 @@ void do_exit(int16_t error_code)
         curr->proc_mm = NULL;
     }
     curr->proc_exit_code = error_code;
+    curr->proc_exit_sig = sig;
     curr->proc_state = ZOMBIE;
     /* pid 不在这里回收——ZOMBIE 期间 pid 必须继续"占用"，
      * 否则两次退出之间创建的新进程可能撞上同一个 pid。
      * 真正的回收在 do_wait() 收割时才做 */
     if (curr->proc_parent)
     {
+        /* SIGCHLD 默认动作是忽略，signal_send 的忽略优化会把它直接丢掉，
+         * 所以对没装 handler 的父进程这一句等于零成本 */
+        signal_send(curr->proc_parent, SIGCHLD);
         wakeup(curr->proc_parent);
     }
     
@@ -223,17 +275,28 @@ int16_t do_wait(int16_t pid, int *status)
                 int16_t cpid = child->proc_pid;
                 if (status)
                 {
-                    *status = (child->proc_exit_code & 0xff) << 8;
+                    /* POSIX wait status：低 7 位是把它杀死的信号号，为 0 才表示正常
+                     * 退出（此时高 8 位是退出码）。ash 的 $? = 128 + signo 靠这个算 */
+                    *status = child->proc_exit_sig != 0
+                                  ? (child->proc_exit_sig & 0x7f)
+                                  : ((child->proc_exit_code & 0xff) << 8);
                 }
 
                 /* 收割：从父的 children、全局 proc_list 摘掉，释放它自己没法释放的
                  * 内核栈与 PCB（还站在上面跑的时候不能自己拆），回收 PID */
                 list_del(&child->proc_sibling_linker);
+                irq_key_t plist_key = spinlock_acquire(&proc_list_lock);
                 list_del(&child->proc_list_linker);
+                task_count -= 1;
+                spinlock_release(&proc_list_lock, plist_key);
+                if (child->proc_sighand)
+                {
+                    kfree(child->proc_sighand);
+                    child->proc_sighand = NULL;
+                }
                 dealloc_kernel_stack(child);
                 dealloc_pid_map(cpid);
                 kfree(child);
-                task_count -= 1;
 
                 return cpid;
             }
@@ -243,6 +306,15 @@ int16_t do_wait(int16_t pid, int *status)
         {
             cur->proc_state = RUNNING;
             return ENO17_NO_CHILD;
+        }
+
+        /* 有信号待处理就别睡了：把状态改回 RUNNING（不然就带着 INTERRUPTIBLE
+         * 返回用户态了）并退回 -ERESTARTSYS，由投递点决定重启还是给 -EINTR。
+         * do_wait 不用等待队列、只是置状态 + sched_schedule，所以不需要摘链。 */
+        if (signal_pending(cur))
+        {
+            cur->proc_state = RUNNING;
+            return ENO24_RESTARTSYS;
         }
 
         sched_schedule();
@@ -345,6 +417,10 @@ int do_exec(intstkf_t *sp, const char *path)
      *    此时才能安全关闭带 FD_CLOEXEC 的 fd（理由见函数级注释） */
     vmm_mm_destroy(old_mm);
     proc_fd_close_on_exec(cur);
+    /* 信号：被捕获的动作回到 SIG_DFL（旧 handler 地址属于刚被销毁的地址空间），
+     * SIG_IGN / SIG_DFL 与屏蔽字 proc_sig_mask 原样保留。位置与
+     * proc_fd_close_on_exec 相同，理由也相同：exec 失败必须等价于没发生过 */
+    signal_hand_reset_on_exec(cur);
 
     /* 6) 全新用户栈 VMA（懒分配）；fd 表其余部分原样保留 */
     vma_t *stk = vmm_vma_create(USER_STACK_TOP - USER_STACK_LEN, USER_STACK_TOP, VMP_R | VMP_W);
@@ -381,6 +457,7 @@ void proc_init(void)
     /* 每个 hart 各自的 idle 任务则必须每 hart 都建 */
     if (cpu_get_core_id() == 0)
     {
+        spinlock_init(&proc_list_lock);
         INIT_LIST_HEAD(&proc_list);
         INIT_LIST_HEAD(&pid_stack);
     }
@@ -440,6 +517,15 @@ static pcb_t *alloc_new_proc(void)
 
         memset(pcb->proc_fds, 0, sizeof(pcb->proc_fds));
         memset(pcb->proc_fd_flags, 0, sizeof(pcb->proc_fd_flags));
+
+        /* 信号：默认是内核线程的形状（不接收信号）。用户进程的 sighand 由
+         * do_fork（继承父进程）或 proc_signal_init_user（第一个用户进程）补上 */
+        pcb->proc_sighand = NULL;
+        pcb->proc_sig_pending = 0;
+        pcb->proc_sig_mask = 0;
+        pcb->proc_syscall_orig_a0 = 0;
+        pcb->proc_exit_sig = 0;
+        pcb->proc_pgid = 0;
 
         pcb->proc_sched_class = &fair_sched_class;
         pcb->proc_policy = SCHED_NORMAL;
@@ -565,12 +651,14 @@ static pcb_t *create_first_proc_idle(void)
     return idle;
 }
 
+/* @note 调用者不得持有 proc_list_lock（自旋锁不可重入）。 */
 static pcb_t *find_proc_by_pid(int16_t pid)
 {
     if (0 < pid && pid <= PID_MAX_VALUE)
     {
         struct list_head *currentProc;
         pcb_t *currentPcb;
+        irq_key_t plist_key = spinlock_acquire(&proc_list_lock);
         list_for_each(currentProc, &proc_list)
         {
             currentPcb = list_entry(currentProc, pcb_t, proc_list_linker);
@@ -579,9 +667,11 @@ static pcb_t *find_proc_by_pid(int16_t pid)
 #if DEBUG_PROC_findProcByPid
                 printf("find_proc_by_pid::currentPcb->proc_pid:%d,currentPcb->proc_pname:%s\n", currentPcb->proc_pid, currentPcb->proc_pname);
 #endif
+                spinlock_release(&proc_list_lock, plist_key);
                 return currentPcb;
             }
         }
+        spinlock_release(&proc_list_lock, plist_key);
     }
     return NULL;
 }
@@ -590,6 +680,43 @@ static pcb_t *find_proc_by_pid(int16_t pid)
 pcb_t *proc_find_by_pid(int16_t pid)
 {
     return find_proc_by_pid(pid);
+}
+
+bool proc_apply_by_pid(int16_t pid, void (*fn)(pcb_t *p, int arg), int arg)
+{
+    bool found = false;
+    irq_key_t plist_key = spinlock_acquire(&proc_list_lock);
+    struct list_head *pos;
+    list_for_each(pos, &proc_list)
+    {
+        pcb_t *p = list_entry(pos, pcb_t, proc_list_linker);
+        if (p->proc_pid == pid)
+        {
+            found = true;
+            fn(p, arg);
+            break;
+        }
+    }
+    spinlock_release(&proc_list_lock, plist_key);
+    return found;
+}
+
+int proc_apply_by_pgid(int16_t pgid, void (*fn)(pcb_t *p, int arg), int arg)
+{
+    int count = 0;
+    irq_key_t plist_key = spinlock_acquire(&proc_list_lock);
+    struct list_head *pos;
+    list_for_each(pos, &proc_list)
+    {
+        pcb_t *p = list_entry(pos, pcb_t, proc_list_linker);
+        if (p->proc_pgid == pgid)
+        {
+            count++;
+            fn(p, arg);
+        }
+    }
+    spinlock_release(&proc_list_lock, plist_key);
+    return count;
 }
 
 static int16_t alloc_pid_map(void)
@@ -693,7 +820,35 @@ static mm_t *create_user_mm(void)
     memcpy((void *)pa_to_kva(convert_ppn2pa(mm->pgd_ppn)) + sizeof(pte_t) * 256,
            (void *)pa_to_kva(convert_ppn2pa(vmm_kernel_pgd_ppn)) + sizeof(pte_t) * 256,
            sizeof(pte_t) * 256);
+
+    /* 每个用户地址空间都要有 sigpage，否则装了 handler 的进程一从 handler 返回
+     * 就是取指缺页。放在这里而不是各调用点，exec 与首个用户程序两条路径自动都有 */
+    if (signal_map_sigpage(mm) != ENO0_NO_ERROR)
+    {
+        return NULL; /* OOM 极端边界：同上，不回收半成品 mm */
+    }
     return mm;
+}
+
+/**
+ * @brief 让一个内核线程变成"能接收信号的用户进程"
+ * @details init 是 create_kernel_thread_by_fork 造出来的，proc_sighand 为 NULL；
+ *   它 run_user_program 变身用户进程之后必须补上，否则整棵进程树都收不到信号。
+ *   进程组初值取自己的 pid——它就是前台进程组的组长。
+ */
+static void proc_signal_init_user(pcb_t *p)
+{
+    if (p->proc_sighand == NULL)
+    {
+        p->proc_sighand = signal_hand_create();
+        if (p->proc_sighand == NULL)
+        {
+            panic("proc_signal_init_user: cannot allocate sighand");
+        }
+    }
+    p->proc_sig_pending = 0;
+    p->proc_sig_mask = 0;
+    p->proc_pgid = p->proc_pid;
 }
 
 /**
@@ -735,11 +890,18 @@ static void run_user_program(const unsigned char *elf, unsigned long elf_len)
     /* 5) 装 stdin/stdout/stderr（fd 0/1/2）；fork 出的子进程由 do_fork 的 proc_fd_copy 继承 */
     proc_install_stdio();
 
-    /* 6) 进入 U 态 */
+    /* 6) 信号处理表：init 变身用户进程之后才需要，fork 出的子进程由 do_fork 继承。
+     * 顺带把它设成 TTY 的前台进程组——否则 ^C 打给的还是初值 1（init 的 pgid），
+     * 而 init 是内核线程，收不到信号，按下去什么也不会发生。真实系统里这一步由
+     * shell 的 tcsetpgrp 接管，在那之前"第一个用户进程就是前台作业"是对的。 */
+    proc_signal_init_user(cur);
+    tty_set_foreground_pgid(cur->proc_pgid);
+
+    /* 7) 进入 U 态 */
     enter_user_mode(entry, USER_STACK_TOP);
 }
 
-#if !DEBUG_EXEC_TEST && !DEBUG_FILE_TEST && !DEBUG_PIPE_TEST && !DEBUG_TTY_TEST && !DEBUG_MEM_TEST
+#if !DEBUG_EXEC_TEST && !DEBUG_FILE_TEST && !DEBUG_PIPE_TEST && !DEBUG_TTY_TEST && !DEBUG_MEM_TEST && !DEBUG_SIGNAL_TEST
 static void run_first_user_program(void)
 {
     run_user_program(user_elf, user_elf_len);
@@ -815,6 +977,15 @@ static void run_memtest_program(void)
     extern const unsigned char user_memtest_elf[];
     extern const unsigned long user_memtest_elf_len;
     run_user_program(user_memtest_elf, user_memtest_elf_len);
+}
+#endif
+
+#if DEBUG_SIGNAL_TEST
+static void run_sigtest_program(void)
+{
+    extern const unsigned char user_sigtest_elf[];
+    extern const unsigned long user_sigtest_elf_len;
+    run_user_program(user_sigtest_elf, user_sigtest_elf_len);
 }
 #endif
 
@@ -912,6 +1083,10 @@ static int16_t init(void)
     /* 验证内存管理 syscall：memtest 不依赖 /hello，不需要 seed_exec_target，
      * 直接跑（不跑 exectest/filetest/pipetest/ttytest/默认用户程序）*/
     int16_t pid = create_kernel_thread_by_fork((void *)run_memtest_program, NULL, 0);
+#elif DEBUG_SIGNAL_TEST
+    /* 验证信号：sigtest 不依赖 /hello，不需要 seed_exec_target，
+     * 直接跑（不跑 exectest/filetest/pipetest/ttytest/memtest/默认用户程序）*/
+    int16_t pid = create_kernel_thread_by_fork((void *)run_sigtest_program, NULL, 0);
 #else
     int16_t pid = create_kernel_thread_by_fork((void *)run_first_user_program, NULL, 0);
 #endif
@@ -925,6 +1100,12 @@ static int16_t init(void)
     {
         int status;
         int16_t cpid = do_wait(-1, &status);
+        if (cpid == ENO24_RESTARTSYS)
+        {
+            /* init 是内核线程（proc_sighand == NULL），走不到这里；留一手防止
+             * 以后 init 变成用户进程时"被信号打断"被误判成"没有子进程了"而关机 */
+            continue;
+        }
         if (cpid > 0)
         {
             printf("[init] reaped pid=%d status=%d\n", cpid, (status >> 8) & 0xff);
