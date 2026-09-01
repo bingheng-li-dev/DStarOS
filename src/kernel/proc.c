@@ -452,16 +452,23 @@ int16_t create_kernel_thread_by_fork(void *func(void *), void *args, uint32_t cl
     return do_fork((clone_flags | CLONE_VM), 0, &regs);
 }
 
+/**
+ * @brief 进程子系统的全局结构初始化，只由 hart0 调用一次
+ * @note **必须在启动 hart1 之前调用**。从 proc_init() 里拆出来的理由：hart1 一上电就会
+ *   跑自己的 proc_init()，那里会碰 task_count（受 proc_list_lock 保护）。若把
+ *   spinlock_init 留在 proc_init() 里，就成了"hart1 可能先拿锁、hart0 随后把这把锁
+ *   重新初始化"——正持有的锁被清零，之后谁都进不去。
+ */
+void proc_early_init(void)
+{
+    spinlock_init(&proc_list_lock);
+    INIT_LIST_HEAD(&proc_list);
+    INIT_LIST_HEAD(&pid_stack);
+}
+
 void proc_init(void)
 {
     /* 每个 hart 各自的 idle 任务则必须每 hart 都建 */
-    if (cpu_get_core_id() == 0)
-    {
-        spinlock_init(&proc_list_lock);
-        INIT_LIST_HEAD(&proc_list);
-        INIT_LIST_HEAD(&pid_stack);
-    }
-
     pcb_t *idle = create_first_proc_idle();
     if (idle == NULL)
     {
@@ -643,7 +650,10 @@ static pcb_t *create_first_proc_idle(void)
         idle->proc_cwd = NULL;  /* idle 进程使用 VFS 根目录 */
         const char *name = "idle";
         set_proc_name(idle, name);
+        /* 两个 hart 会并发建各自的 idle，task_count 的自增必须串行化 */
+        irq_key_t plist_key = spinlock_acquire(&proc_list_lock);
         task_count = task_count + 1;
+        spinlock_release(&proc_list_lock, plist_key);
     }
 #if DEBUG_PROC_createFirstProcIdle
     printf("create_first_proc_idle::idle->need_resched:%d\n", idle->need_resched);

@@ -166,6 +166,8 @@ pcb_t *proc_find_by_pid(int16_t pid);
 bool proc_apply_by_pid(int16_t pid, void (*fn)(pcb_t *p, int arg), int arg);
 /* 返回被应用到的进程个数（0 表示该进程组不存在） */
 int proc_apply_by_pgid(int16_t pgid, void (*fn)(pcb_t *p, int arg), int arg);
+/* 进程子系统的全局结构初始化，hart0 专用且必须早于 cpu_start_secondary_hart()。 */
+void proc_early_init(void);
 void proc_init(void);
 pcb_t *proc_get_current(void);
 
