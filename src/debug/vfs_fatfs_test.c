@@ -7,6 +7,7 @@
 #include "errorcode.h"
 #include "stringops.h"
 #include "linux_abi.h"
+#include "slab.h"
 
 static int vfs_pass = 0;
 static int vfs_fail = 0;
@@ -183,6 +184,105 @@ static void vfs_dir_test(void)
     kfree(buf);
 }
 
+/* ============================================================
+ * 挂载 / 卸载：根 dentry 与根 inode 必须被回收
+ *
+ * 用一个自带的最小文件系统来测，而不是 fatfs 或 devfs：fatfs 只有一个 ramdisk 卷，
+ * 重复挂载会跟已挂上的根打架；devfs 没有 i_op->lookup，只能靠创建时的引用把四个
+ * 设备条目钉住不让逐出，根目录项的引用数因此恒 > 1，永远走的是"忙碌"分支。
+ * nullfs 的根目录下什么都没有，卸载路径的两步（忙碌判定、归还根引用）才走得干净。
+ * ============================================================ */
+
+static int nullfs_inodes_destroyed;
+
+static void nullfs_destroy_inode_cb(inode_t *inode)
+{
+    nullfs_inodes_destroyed += 1;
+    kfree(inode);
+}
+
+static super_block_operations_t nullfs_sb_ops = {
+    .alloc_inode   = NULL,
+    .destory_inode = nullfs_destroy_inode_cb,
+    .sync_fs       = NULL,
+    .unmount       = NULL,
+};
+
+static dentry_t *nullfs_mount_cb(file_system_type_t *fst, const char *source, void *data)
+{
+    (void)fst;
+    (void)source;
+    (void)data;
+
+    super_block_t *sb = alloc_super_block("nullfs", 0, 0, &nullfs_sb_ops, NULL);
+    if (!sb)
+    {
+        return NULL;
+    }
+    inode_t *root_inode = (inode_t *)slab_cache_alloc(inode_cache);
+    if (!root_inode)
+    {
+        destroy_super_block(sb);
+        return NULL;
+    }
+    memset(root_inode, 0, sizeof(inode_t));
+    root_inode->i_sb   = sb;
+    root_inode->i_mode = S_IFDIR | 0755;
+
+    dentry_t *root_dentry = dentry_create("", root_inode, NULL, NULL);
+    if (!root_dentry)
+    {
+        nullfs_destroy_inode_cb(root_inode);
+        destroy_super_block(sb);
+        return NULL;
+    }
+    root_inode->i_dentry = root_dentry;
+    sb->s_root_inode     = root_inode;
+    return root_dentry;
+}
+
+static file_system_type_t nullfs_type = {
+    .name    = "nullfs",
+    .mount   = nullfs_mount_cb,
+    .kill_sb = NULL,
+    .next    = NULL,
+};
+
+static void vfs_unmount_test(void)
+{
+    check("register nullfs", register_filesystem(&nullfs_type) == ENO0_NO_ERROR);
+    check("mkdir /mnt2", vfs_mkdir("/mnt2", 0755) == ENO0_NO_ERROR);
+
+    /* 两次测量都先清空 LRU：nr_inuse 把缓存着的目录项也算在内，不清干净的话
+     * 水位线在窗口里随手一次回收就会让两边对不上。 */
+    vfs_dcache_shrink(0xffffffffu);
+    uint32_t dentry_before = dentry_cache->nr_inuse;
+    uint32_t inode_before  = inode_cache->nr_inuse;
+
+    check("mount nullfs at /mnt2", vfs_mount("/mnt2", "nullfs", NULL) == ENO0_NO_ERROR);
+
+    nullfs_inodes_destroyed = 0;
+    check("unmount /mnt2", vfs_unmount("/mnt2") == ENO0_NO_ERROR);
+    check("root inode went through destory_inode", nullfs_inodes_destroyed == 1);
+
+    vfs_dcache_shrink(0xffffffffu);
+    check("mount/unmount leaks no dentry", dentry_cache->nr_inuse == dentry_before);
+    check("mount/unmount leaks no inode", inode_cache->nr_inuse == inode_before);
+
+    /* 还有活引用的文件系统必须被拒绝，而不是把超级块从活着的 inode 脚下抽掉。
+     * devfs 的四个设备条目各持根目录项一个引用，正好是这个场景。 */
+    check("unmount a busy fs -> BUSY", vfs_unmount("/dev") == ENO4_BUSY);
+    file_t *con = vfs_open("/dev/console", O_WRONLY);
+    check("busy fs still usable after the refusal", con != NULL);
+    if (con)
+    {
+        vfs_close(con);
+    }
+
+    check("rmdir /mnt2", vfs_rmdir("/mnt2") == ENO0_NO_ERROR);
+    unregister_filesystem(&nullfs_type);
+}
+
 /**
  * @note 调用前必须确保 proc_init() 已经跑过——vfs_lock() 内部的 sem_down() 需要一个
  *   有效的当前 pcb（哪怕是 idle），在那之前调用会缺页异常（同 fs_init() 的教训）。
@@ -310,6 +410,9 @@ void vfs_test(void)
     check("rmdir /testdir", ret == ENO0_NO_ERROR);
     ret = vfs_stat("/testdir", &st);
     check("stat deleted dir -> NOSUCH", ret == ENO5_NOSUCH_ENTRY);
+
+    /* ---- 挂载 / 卸载 ---- */
+    vfs_unmount_test();
 
     vfs_unlock();
     printf("=== VFS test done: %d pass  %d fail ===\n\n", vfs_pass, vfs_fail);

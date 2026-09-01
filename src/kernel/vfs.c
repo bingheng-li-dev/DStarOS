@@ -713,7 +713,9 @@ super_block_t *alloc_super_block(
 /**
  * @brief 从全局链表摘除并释放超级块
  * @param[in] sb 要销毁的超级块指针
- * @note 调用前应先完成文件系统的卸载（unmount）。
+ * @note 只摘链 + 释放超级块本身。根 dentry / 根 inode **不在这里回收**——它们的
+ *   destory_inode 要经 inode->i_sb->s_op 分发，必须赶在本函数之前放掉，
+ *   见 vfs_unmount() 里的处理。调用前应先完成文件系统的卸载（unmount）。
  */
 void destroy_super_block(super_block_t *sb)
 {
@@ -1263,26 +1265,47 @@ int vfs_unmount(const char *path)
         return ENO5_NOSUCH_ENTRY;
     }
 
+    dentry_t *fs_root = (target->mnt_sb && target->mnt_sb->s_root_inode)
+                        ? target->mnt_sb->s_root_inode->i_dentry
+                        : NULL;
+
     /* 先把这个文件系统里纯缓存的目录项清干净：它们的 inode 指向马上要被销毁的
-     * 超级块，留在 LRU 上就是一批悬空引用。正在被使用的（d_ref > 0）动不了，
-     * 那是卸载忙碌文件系统本身的问题，不在本处理范围。 */
-    if (target->mnt_sb && target->mnt_sb->s_root_inode &&
-        target->mnt_sb->s_root_inode->i_dentry)
+     * 超级块，留在 LRU 上就是一批悬空引用。 */
+    if (fs_root)
     {
-        dcache_prune_subtree(target->mnt_sb->s_root_inode->i_dentry);
+        dcache_prune_subtree(fs_root);
     }
 
-    /* 同步并卸载底层文件系统 */
-    if (target->mnt_sb && target->mnt_sb->s_op)
+    /* 剪枝之后根目录项若还剩不止 dentry_create 那一个引用，说明这个文件系统里仍有
+     * 活着的目录项（子项各持父目录一个引用）或外部持有者（cwd、打开的文件）。
+     * 此时**必须拒绝**：超级块一销毁，那些还活着的 inode 的 i_sb 就成了悬空指针，
+     * 比泄漏严重得多。devfs 会走到这里——它没有 i_op->lookup，只能靠创建时的引用
+     * 把四个设备条目钉住不让逐出，根引用数因此恒 > 1，暂时不支持卸载。 */
+    if (fs_root && fs_root->d_ref != 1)
     {
-        if (target->mnt_sb->s_op->sync_fs)
-        {
-            target->mnt_sb->s_op->sync_fs(target->mnt_sb);
-        }
-        if (target->mnt_sb->s_op->unmount)
-        {
-            target->mnt_sb->s_op->unmount(target->mnt_sb);
-        }
+        return ENO4_BUSY;
+    }
+
+    /* 同步底层文件系统 */
+    if (target->mnt_sb && target->mnt_sb->s_op && target->mnt_sb->s_op->sync_fs)
+    {
+        target->mnt_sb->s_op->sync_fs(target->mnt_sb);
+    }
+
+    /* 归还根目录项创建时的那一个引用。文件系统局部根的 d_parent 指向自身，
+     * dcache_should_cache() 因此为假，dentry_put 会直接走 dcache_evict——连带经
+     * s_op->destory_inode 回收根 inode。两件事的先后不能反：destory_inode 要经
+     * inode->i_sb->s_op 分发，超级块必须还活着；而底层文件系统的 unmount 回调
+     * 可能拆掉 destory_inode 依赖的状态，所以也放在它后面。 */
+    if (fs_root)
+    {
+        dentry_put(fs_root);
+    }
+
+    /* 卸载底层文件系统 */
+    if (target->mnt_sb && target->mnt_sb->s_op && target->mnt_sb->s_op->unmount)
+    {
+        target->mnt_sb->s_op->unmount(target->mnt_sb);
     }
 
     /* 清除宿主目录项上的挂载标记 */
