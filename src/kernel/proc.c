@@ -695,7 +695,10 @@ int do_exec(intstkf_t *sp, const char *path, char *const *argv, char *const *env
     sp->sepc    = einfo.entry;
     sp->x2_sp   = user_sp;
     sp->x4_tp   = cpu_get_core_id();
-    sp->sstatus = (read_csr(sstatus) & ~SSTATUS_SPP) | SSTATUS_SPIE | SSTATUS_SUM;
+    /* 清 SIE 的理由同 enter_user_mode（那里有详细说明）。本函数是在真正的 syscall trap
+     * 里被调用的，`read_csr(sstatus)` 的 SIE 本来就已被硬件清掉，这一句现在是冗余的；
+     * 写出来是为了不让这条不变式依赖"调用者恰好在 trap 上下文里"这个隐含前提。 */
+    sp->sstatus = (read_csr(sstatus) & ~SSTATUS_SPP & ~SSTATUS_SIE) | SSTATUS_SPIE | SSTATUS_SUM;
 
     return ENO0_NO_ERROR;
 }
@@ -1541,8 +1544,31 @@ void enter_user_mode(virAddr_t entry, virAddr_t ustack)
     f->sepc    = entry;
     f->x2_sp   = ustack;
     f->x4_tp   = cpu_get_core_id();
-    f->sstatus = (read_csr(sstatus) & ~SSTATUS_SPP) | SSTATUS_SPIE | SSTATUS_SUM;
-    write_csr(sscratch, (uintptr_t)(cur->kernel_stack + KERNRL_STKSIZE));
+    /* **`~SSTATUS_SIE` 不能少**（2026-09-03 修掉的一个真 bug）。这个帧是软件凭空造的，
+     * `read_csr(sstatus)` 取自一个普通内核线程，此刻 SIE=1；而 `trap_return` 会在
+     * `sret` 之前几条指令处 `csrw sstatus, ra` 把它整个写回去——于是**中断在 S 态被重新
+     * 打开**，而那时 `sscratch` 已经被置成内核栈顶。`trap_entry` 全靠 `sscratch != 0`
+     * 判断 trap 来自 U 态，这一下就会把随后到来的时钟中断误判成来自 U 态、把 sp 换成
+     * 内核栈顶，新 trapframe 正好压在本帧 `f` 头上（f = 栈顶 - sizeof(intstkf_t)）。
+     * 实测症状：`vmm: segfault - no vma va=0xffffffc080213b28 sepc=同值 spp=0`
+     * ——**用户态从 `trap_return` 自己的地址开始取指**。
+     * 真正的硬件 trap 不会有这个问题：进 trap 时硬件已清 SIE，帧里存的本来就是 0。
+     * `create_kernel_thread_by_fork` 早就写了 `& ~SSTATUS_SIE`（注释说"模拟 in-trap 环境"），
+     * 只有本函数漏了。`sret` 会用 SPIE 恢复中断，所以这里清掉不影响返回 U 态后的状态。 */
+    f->sstatus = (read_csr(sstatus) & ~SSTATUS_SPP & ~SSTATUS_SIE) | SSTATUS_SPIE | SSTATUS_SUM;
+    /* **绝对不能在这里 write_csr(sscratch, 内核栈顶)**（2026-09-03 修掉的一个真 bug）。
+     * sscratch 的不变式是"S 态恒为 0"，`trap_entry` 全靠 `sscratch != 0` 判断这次 trap
+     * 来自 U 态。在这里提前写非零值，就把从此刻到 `sret` 之间的整段 S 态代码置于
+     * 违反不变式的状态——而这段代码包含 `fork_out_asm → trap_return →
+     * sched_preempt_if_needed()`，一旦那里发生调度，窗口从几条指令变成任意长。
+     * 期间来一次时钟中断，`trap_entry` 会误判成来自 U 态、把 sp 换成内核栈顶，
+     * 于是新 trapframe 正好落在 `f` 头上（f = 栈顶 - sizeof(intstkf_t)），把刚构造好的
+     * 帧整个覆盖掉；等 `sret` 时 sepc 已是垃圾，表现为**用户态执行内核地址**
+     * （实测 `vmm: segfault - no vma va=0xffffffc0802... spp=0`）随后整机崩掉。
+     * 正确做法是什么都不做：`trap_return` 在 SPP==0 分支已经算好
+     * `sscratch = sp + 35*REGBYTES`，而 f 就在 栈顶 - 35*REGBYTES 处，结果完全相同，
+     * 且赋值发生在关中断的尾段（见 cpua.S 那里的 csrci），没有窗口。
+     * fork 出来的进程走的 `fork_out()` 一直就是这么做的，本函数是唯一的例外。 */
     fork_out_asm(f);
 }
 

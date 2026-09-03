@@ -69,6 +69,12 @@ struct int_stackframe
 };
 typedef struct int_stackframe intstkf_t;
 
+/* cpua.S 的 trap_entry/trap_return 用字面量 35*REGBYTES 开这个帧、并用
+ * `sscratch = sp + 35*REGBYTES` 反算内核栈顶。字段数一改就会与汇编脱节，
+ * 而症状是"用户态从垃圾 sepc 开始执行"这种极难反推的东西，所以在这里钉死。 */
+_Static_assert(sizeof(struct int_stackframe) == 35 * 8,
+               "intstkf_t must stay 35 registers wide (cpua.S hardcodes 35*REGBYTES)");
+
 /* 保存当前中断状态并关闭中断；do{}while(0)用于保证外部操作与宏之间不会相互影响。必须与"localIntrRestore"成对使用。 */
 #define __local_intr_save(x) \
     do                     \

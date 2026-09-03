@@ -82,6 +82,13 @@ trap_entry:
 trap_return:
     # 检查是否需要发生调度
     call sched_preempt_if_needed
+    # 从这里到 sret 必须关中断。理由：下一句就要把 sscratch 置成非零的内核栈顶，
+    # 而 trap_entry 全靠 "sscratch != 0" 判断 trap 来自 U 态——这段尾巴里一旦被中断
+    # 打进来，就会被误判成来自 U 态，把新 trapframe 压在正要 sret 的这个帧头上。
+    # 真正的 trap 返回本来就是关着中断进来的（硬件进 trap 时清 SIE），这条对它是空操作；
+    # 有意义的是 fork_out_asm 直接跳进来的那两条路（fork 出的新进程、enter_user_mode），
+    # 它们是开着中断跑到这里的。sret 会用 SPIE 恢复中断，所以这里关掉不影响返回后的状态。
+    csrci sstatus, SSTATUS_SIE
     # 在恢复寄存器之前，依据将要恢复的 sstatus.SPP 设置 sscratch
     ld t0, 33*REGBYTES(sp)      # 取将恢复的 sstatus，SPP 记录进入中断之前处理器为U还是S
     andi t1, t0, SSTATUS_SPP    # t1 = t0 & SSTATUS_SPP（0x0100），按位与后t1=0x100或0x000
