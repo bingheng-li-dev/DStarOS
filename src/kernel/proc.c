@@ -55,10 +55,23 @@ static void fork_out(void);
 static void print_ctx_stk(ctx_t *ctx) __attribute__((used));
 #endif
 
+/**
+ * @brief 设置进程名，超长截断
+ * @details 原来写的是 `memcpy(..., name, sizeof(name))`——`name` 是 `const char *`，
+ *   `sizeof` 恒为 8，于是无论名字多长都只拷 8 字节：短名字会**越过字面量末尾读**
+ *   （UB，实测落在 .rodata 里没 fault，且第 5 字节恰好是结束符所以结果看着是对的），
+ *   长名字则被静默截断到 8 个字符。清零长度也少了一个字节（数组是
+ *   `[PNAME_MAX_LENGTH + 1]`，最后一格从未初始化）。两处一并改正。
+ */
 char *set_proc_name(pcb_t *proc, const char *name)
 {
-    memset(proc->proc_pname, 0, PNAME_MAX_LENGTH);
-    return memcpy(proc->proc_pname, name, sizeof(name));
+    size_t n = strlen(name);
+    if (n > PNAME_MAX_LENGTH)
+    {
+        n = PNAME_MAX_LENGTH;
+    }
+    memset(proc->proc_pname, 0, sizeof(proc->proc_pname));
+    return memcpy(proc->proc_pname, name, n);
 }
 
 /* Remember to recycle memory of name. */
@@ -779,7 +792,7 @@ static pcb_t *alloc_new_proc(void)
         pcb->proc_mm = NULL;
         pcb->proc_parent = NULL;
         pcb->proc_pid = ENO3_NOFREE_PID;
-        memset(pcb->proc_pname, 0, PNAME_MAX_LENGTH);
+        memset(pcb->proc_pname, 0, sizeof(pcb->proc_pname));
         pcb->proc_state = UNINIT;
         pcb->need_resched = false;
         pcb->proc_cwd = NULL;  /* NULL 表示当前工作目录为 VFS 根目录 */
