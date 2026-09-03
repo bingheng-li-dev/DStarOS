@@ -645,22 +645,48 @@ void vmm_page_fault_handler(virAddr_t badva, int fault_type)
         }
     }
 
-    /* 该 va 从未被映射过（第一次触碰）：懒分配一个全新清零页 */
+    /* 该 va 从未被映射过（第一次触碰）：懒分配一个全新清零页。
+     *
+     * 分配与清零放在锁外，`get_pte` 建中间级页表 + 装 PTE 放在锁内：
+     * ① `slab_alloc_page_retry()` 失败时会走 `slab_reclaim_all()`，不该把这段拖进
+     *    全局 vmm_lock；② `get_pte(..., create=true)` 会分配中间级页表，两个执行流
+     *    同时对同一 mm 缺页时必须串行，否则会各建一份中间级、后者覆盖前者。
+     *
+     * 拿到锁后**必须重新看一眼 PTE**：另一个执行流可能在我们分配那页的空档里已经
+     * 把这一页装好了。这时放掉自己那页直接用它的，否则两边各装一次、先装的那页
+     * 被覆盖后永久泄漏。
+     * @note 当前触发不到——一个 pcb_t 同一时刻只在一个 hart 上跑，而共享 mm 的只有
+     *   CLONE_VM 内核线程（proc_mm 恒为 NULL）；fork 出的用户进程各有独立 PGD，
+     *   两边各自缺页各自分配本来就是正确行为。等真出现共享 mm 的多线程用户进程
+     *   （musl 起线程）就会变成活的，所以先把它按正确的形状写好。 */
     pframe_t *frame = slab_alloc_page_retry();
     if (!frame)
     {
         panic("vmm: OOM in page fault handler");
     }
-    frame->reference++;
     memset((void *)convert_pframe2kva(frame), 0, PGSIZE);
+
+    irq_key_t vmm_lock_key = spinlock_acquire(&vmm_lock);
 
     pte_t *ptep = get_pte(mm->pgd_ppn, page_va, true, true);
     if (!ptep)
     {
+        spinlock_release(&vmm_lock, vmm_lock_key);
         dealloc(frame);
         panic("vmm: get_pte failed in page fault");
     }
+    if (pte_is_valid(*ptep))
+    {
+        spinlock_release(&vmm_lock, vmm_lock_key);
+        dealloc(frame);
+        tlb_flush_va(page_va);
+        return;
+    }
+
+    frame->reference++;
     *ptep = pte_create(convert_pframe2ppn(frame), flags);
+
+    spinlock_release(&vmm_lock, vmm_lock_key);
     tlb_flush_va(page_va);
 }
 
