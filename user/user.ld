@@ -13,7 +13,12 @@ BASE_ADDRESS = 0x10000;
 
 SECTIONS
 {
-    . = BASE_ADDRESS;
+    /* 加上 SIZEOF_HEADERS，让第一个 PT_LOAD 从文件偏移 0 起、把 ELF 头与程序头表
+     * 一起映射进来。不这么做的话第一个段从 p_offset=0x1000 开始，e_phoff(64) 落在
+     * 任何已加载段之外，elf_load 求不出程序头表的虚拟地址，AT_PHDR/AT_PHENT/AT_PHNUM
+     * 只能一起填 0——musl 的 __init_tls 就找不到 PT_TLS 段了。
+     * 真实可执行文件（含 musl 链出来的 BusyBox）都是这个布局。 */
+    . = BASE_ADDRESS + SIZEOF_HEADERS;
 
     .text : {
         *(.text.entry)

@@ -165,4 +165,114 @@ _Static_assert(sizeof(struct winsize) == 8, "winsize size must match Linux kerne
 #define MAP_FIXED      0x10
 #define MAP_ANONYMOUS  0x20
 
+/* ============================================================
+ * 时间：clock id、struct timespec / timeval（riscv64 上各 16 字节）
+ * ============================================================ */
+#define CLOCK_REALTIME           0
+#define CLOCK_MONOTONIC          1
+#define CLOCK_PROCESS_CPUTIME_ID 2
+#define CLOCK_THREAD_CPUTIME_ID  3
+#define CLOCK_MONOTONIC_RAW      4
+#define CLOCK_REALTIME_COARSE    5
+#define CLOCK_MONOTONIC_COARSE   6
+#define CLOCK_BOOTTIME           7
+
+/* clock_nanosleep 的 flags */
+#define TIMER_ABSTIME 1
+
+struct timespec
+{
+    int64_t tv_sec;
+    int64_t tv_nsec;
+};
+_Static_assert(sizeof(struct timespec) == 16, "timespec size must match Linux kernel ABI");
+
+struct timeval
+{
+    int64_t tv_sec;
+    int64_t tv_usec;
+};
+_Static_assert(sizeof(struct timeval) == 16, "timeval size must match Linux kernel ABI");
+
+/* ============================================================
+ * setitimer / getitimer
+ * ============================================================ */
+#define ITIMER_REAL    0
+#define ITIMER_VIRTUAL 1
+#define ITIMER_PROF    2
+
+struct itimerval
+{
+    struct timeval it_interval;
+    struct timeval it_value;
+};
+_Static_assert(sizeof(struct itimerval) == 32, "itimerval size must match Linux kernel ABI");
+
+/* ============================================================
+ * uname（Linux 内核 ABI 版，6 × 65 = 390 字节）
+ *
+ * domainname 是 GNU 扩展，但在内核 ABI 里真实存在——少填这一个字段会让 musl
+ * 的 uname() 读到缓冲区尾部 65 字节的栈垃圾。
+ * ============================================================ */
+#define UTSNAME_LEN 65
+
+struct utsname
+{
+    char sysname[UTSNAME_LEN];
+    char nodename[UTSNAME_LEN];
+    char release[UTSNAME_LEN];
+    char version[UTSNAME_LEN];
+    char machine[UTSNAME_LEN];
+    char domainname[UTSNAME_LEN];
+};
+_Static_assert(sizeof(struct utsname) == 390, "utsname size must match Linux kernel ABI");
+
+/* ============================================================
+ * times()
+ *
+ * 四个字段与返回值的单位都是 clock_t，即 AT_CLKTCK = 100 Hz，
+ * **不是**本内核的 200 Hz tick——直接给 tick 计数会让所有时间翻倍。
+ * ============================================================ */
+#define USER_HZ 100
+
+struct tms
+{
+    int64_t tms_utime;
+    int64_t tms_stime;
+    int64_t tms_cutime;
+    int64_t tms_cstime;
+};
+_Static_assert(sizeof(struct tms) == 32, "tms size must match Linux kernel ABI");
+
+/* ============================================================
+ * ELF auxiliary vector（初始用户栈上 argc/argv/envp 之后的那一段）
+ * ============================================================ */
+#define AT_NULL    0
+#define AT_IGNORE  1
+#define AT_EXECFD  2
+#define AT_PHDR    3
+#define AT_PHENT   4
+#define AT_PHNUM   5
+#define AT_PAGESZ  6
+#define AT_BASE    7
+#define AT_FLAGS   8
+#define AT_ENTRY   9
+#define AT_NOTELF  10
+#define AT_UID     11
+#define AT_EUID    12
+#define AT_GID     13
+#define AT_EGID    14
+#define AT_PLATFORM 15
+#define AT_HWCAP   16
+#define AT_CLKTCK  17
+#define AT_SECURE  23
+#define AT_RANDOM  25
+
+struct elf64_auxv
+{
+    uint64_t a_type;
+    uint64_t a_val;
+};
+_Static_assert(sizeof(struct elf64_auxv) == 16, "elf64_auxv size must match ELF ABI");
+
 #endif

@@ -13,6 +13,7 @@
 #include "sched.h"
 #include "tty.h"
 #include "slab.h"
+#include "ktime.h"
 
 #ifndef QEMU
 #include "sdcard.h"
@@ -53,6 +54,8 @@ void os_init_after_mmu_enable(uint64_t hartid)
         vmm_probe_pte_ad();
 #endif
         tick_init();
+        ktime_init();      /* 必须早于任何 ktime_get_ns() 调用；此处 sleeping_tasks/alarm_list 都还是空的 */
+        ktime_alarm_init();
         tty_init();      /* 全局 TTY 单例只能由 hart 0 初始化一次；必须早于 proc_init()——
                           * proc_init 会给 init 装 fd 0/1/2，届时 tty 必须已经能用 */
         signal_init();   /* sigpage 的物理页；必须早于任何 create_user_mm() */

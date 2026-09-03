@@ -5,6 +5,15 @@
 
 /* Linux风格的系统调用号，NR为Number */
 #define __NR_getcwd      17
+#define __NR_set_tid_address 96
+#define __NR_nanosleep      101
+#define __NR_getitimer      102
+#define __NR_setitimer      103
+#define __NR_clock_settime  112
+#define __NR_clock_gettime  113
+#define __NR_clock_getres   114
+#define __NR_clock_nanosleep 115
+#define __NR_sched_yield    124
 #define __NR_dup         23
 #define __NR_dup3        24
 #define __NR_fcntl       25
@@ -33,10 +42,20 @@
 #define __NR_rt_sigprocmask 135
 #define __NR_rt_sigpending  136
 #define __NR_rt_sigreturn   139
+#define __NR_times      153
 #define __NR_setpgid    154
 #define __NR_getpgid    155
+#define __NR_uname      160
+#define __NR_umask      166
+#define __NR_gettimeofday 169
+#define __NR_settimeofday 170
 #define __NR_getpid     172
 #define __NR_getppid    173
+#define __NR_getuid     174
+#define __NR_geteuid    175
+#define __NR_getgid     176
+#define __NR_getegid    177
+#define __NR_gettid     178
 #define __NR_brk        214
 #define __NR_munmap     215
 #define __NR_clone      220

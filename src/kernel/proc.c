@@ -13,6 +13,7 @@
 #include "sbi.h"
 #include "uaccess.h"
 #include "linux_abi.h"
+#include "ktime.h"
 
 /* List of all processes. */
 struct list_head proc_list;
@@ -107,6 +108,9 @@ int16_t do_fork(uint32_t clone_flags, uintptr_t stack, intstkf_t *regs)
     copy_proc_mm(clone_flags, new_proc);
     copy_proc_stk(new_proc, stack, regs);
 
+    /* umask 由 fork 继承（ITIMER_REAL 相反，POSIX 要求不继承，alloc_new_proc 已清零） */
+    new_proc->proc_umask = proc_get_current()->proc_umask;
+
     /* 子进程继承父进程的当前工作目录 */
     new_proc->proc_cwd = proc_get_current()->proc_cwd;
     if (new_proc->proc_cwd)
@@ -171,6 +175,12 @@ void do_exit_signal(int sig)
 static void exit_common(int16_t error_code, uint8_t sig)
 {
     pcb_t *curr = proc_get_current();
+
+    /* 摘掉两条定时链上可能残留的节点。当前走不到（进程只能在自己的 nanosleep
+     * 返回点之后才可能退出，那里已经摘过），但把 pcb 还给 slab 之前确保它不再
+     * 挂在任何全局链表上是零成本的保险——真出现残留就是 tick 中断里的悬空指针。 */
+    sched_timer_remove(curr);
+    ktime_alarm_cancel(curr);
 
     proc_fd_close_all(curr);
 
@@ -282,6 +292,12 @@ int16_t do_wait(int16_t pid, int *status)
                                   : ((child->proc_exit_code & 0xff) << 8);
                 }
 
+                /* times() 的 tms_cutime：把子进程（及它已收割的孙辈）的累计执行时间
+                 * 归并到父进程。**必须赶在下面 kfree(child) 之前**，顺序反了就是读
+                 * 已释放内存。 */
+                cur->proc_sum_exec_runtime_children +=
+                    child->proc_sum_exec_runtime + child->proc_sum_exec_runtime_children;
+
                 /* 收割：从父的 children、全局 proc_list 摘掉，释放它自己没法释放的
                  * 内核栈与 PCB（还站在上面跑的时候不能自己拆），回收 PID */
                 list_del(&child->proc_sibling_linker);
@@ -321,36 +337,265 @@ int16_t do_wait(int16_t pid, int *status)
     }
 }
 
+/* ============================================================
+ * 进程启动约定：argv / envp / auxv 初始栈
+ *
+ * BusyBox 靠 argv[0] 分发 applet（/bin/ls 是指向 /bin/busybox 的链接），
+ * 没有 argv 就没有 BusyBox——这不是"少一个特性"，是整个 BusyBox 阶段跑不起来。
+ * ============================================================ */
+
+#define EXEC_MAX_ARGS       64          /* argc + envc 的合计上限 */
+#define EXEC_ARG_STRLEN_MAX 256         /* 单个参数串的长度上限（含结束符） */
+#define EXEC_ARG_BUF_SIZE   PGSIZE      /* 字符串区总字节上限 */
+
+/**
+ * @brief execve 参数在内核侧的暂存区
+ * @details argv/envp 是**二级指针**：先要读指针数组、再逐个跟着指针读字符串，
+ *   两级都在旧地址空间里，所以必须赶在切 satp 之前全部拷进内核。
+ *   这里只存紧凑排列的字符串与它们的偏移，**不存指针**——暂存区里的地址与最终
+ *   要写进用户栈的地址毫无关系。
+ */
+typedef struct exec_args
+{
+    int      argc;
+    int      envc;
+    int      n;                      /* 已收进的串总数，恒等于 argc + envc */
+    char    *buf;                    /* 字符串区，argc 个串在前、envc 个在后 */
+    uint32_t used;                   /* buf 已用字节 */
+    uint32_t off[EXEC_MAX_ARGS];     /* 每个串在 buf 中的起始偏移 */
+} exec_args_t;
+
+static int exec_args_init(exec_args_t *a)
+{
+    a->argc = 0;
+    a->envc = 0;
+    a->n = 0;
+    a->used = 0;
+    a->buf = kmalloc(EXEC_ARG_BUF_SIZE);
+    return a->buf ? ENO0_NO_ERROR : ENO1_NOMORE_MEM;
+}
+
+static void exec_args_free(exec_args_t *a)
+{
+    if (a->buf)
+    {
+        kfree(a->buf);
+        a->buf = NULL;
+    }
+}
+
+/* 把一个内核字符串追加进暂存区（run_user_program 用，它没有用户态参数可读） */
+static int exec_args_push(exec_args_t *a, const char *s)
+{
+    size_t n = strlen(s) + 1;
+    if (a->n >= EXEC_MAX_ARGS || n > EXEC_ARG_STRLEN_MAX ||
+        n > EXEC_ARG_BUF_SIZE - a->used)
+    {
+        return ENO27_ARG_TOO_LONG;
+    }
+    a->off[a->n] = a->used;
+    memcpy(a->buf + a->used, s, n);
+    a->used += n;
+    a->n += 1;
+    return ENO0_NO_ERROR;
+}
+
+/**
+ * @brief 把用户空间的一个 NULL 结尾指针数组整体拷进暂存区
+ * @param[in,out] a     暂存区
+ * @param[in]     uvec  用户空间的 char *argv[] / char *envp[]；NULL 视为空数组
+ * @param[out]    count 本次收进了几个串（调用方据此填 argc 或 envc）
+ * @note 必须在切 satp 之前调用：argv 是二级指针，指针数组与它指向的字符串
+ *   都在旧地址空间里。
+ */
+static int exec_args_copy_from_user(exec_args_t *a, char *const *uvec, int *count)
+{
+    *count = 0;
+    if (uvec == NULL)
+    {
+        return ENO0_NO_ERROR;
+    }
+    while (1)
+    {
+        char *uptr = NULL;
+        if (copy_from_user(&uptr, &uvec[*count], sizeof(uptr)) != 0)
+        {
+            return ENO8_NULL_POINTER;
+        }
+        if (uptr == NULL)
+        {
+            return ENO0_NO_ERROR;
+        }
+        if (a->n >= EXEC_MAX_ARGS)
+        {
+            return ENO27_ARG_TOO_LONG;
+        }
+        uint32_t room = EXEC_ARG_BUF_SIZE - a->used;
+        if (room > EXEC_ARG_STRLEN_MAX)
+        {
+            room = EXEC_ARG_STRLEN_MAX;
+        }
+        long len = strncpy_from_user(a->buf + a->used, uptr, room);
+        if (len == ENO11_NAME_TOO_LONG)
+        {
+            return ENO27_ARG_TOO_LONG; /* 串装不下，对 execve 而言就是 E2BIG */
+        }
+        if (len < 0)
+        {
+            return (int)len;
+        }
+        a->off[a->n] = a->used;
+        a->used += (uint32_t)len + 1;
+        a->n += 1;
+        (*count)++;
+    }
+}
+
+/**
+ * @brief 在新地址空间的用户栈上铺好 argc / argv / envp / auxv
+ * @param[in]  args    内核侧暂存的参数
+ * @param[in]  info    elf_load 回吐的入口与程序头表信息
+ * @param[out] sp_out  进入 _start 时的栈指针
+ * @retval ENO0_NO_ERROR 成功
+ * @retval ENO27_ARG_TOO_LONG 需要的空间超出了 64 KB 固定用户栈
+ * @details 布局（低地址在上，即 sp 指向 argc）：
+ *
+ *   sp  -> argc
+ *          argv[0..argc-1], NULL
+ *          envp[0..envc-1], NULL
+ *          auxv 若干对 (a_type, a_val)，以 AT_NULL 收尾
+ *          ---- 填充 ----
+ *          argv/envp 的字符串区
+ *          16 字节 AT_RANDOM 种子
+ *   USER_STACK_TOP
+ *
+ *   三条硬约束，写错的症状都离现场很远：
+ *   1. **sp 必须 16 字节对齐**（riscv64 ABI）；
+ *   2. argv/envp 里存的是**指向字符串区的用户虚拟地址**，所以要先定下字符串区
+ *      的最终地址再填指针——实现上就是"先量尺寸、再填"两趟；
+ *   3. **argv[argc] 与 envp[envc] 的 NULL 都不能省**：musl 靠 envp 的 NULL
+ *      定位 auxv 的起点，少一个就是整个 auxv 错位、AT_PAGESZ 读成随机值。
+ * @note 此刻已经切到新页表，写的是懒分配的用户栈 VMA。S 态带 SUM=1 访问用户地址
+ *   触发的缺页由 vmm_page_fault_handler 正常服务，与 copy_to_user 走的是同一条路。
+ */
+static int setup_user_stack(const exec_args_t *args, const elf_info_t *info,
+                            virAddr_t *sp_out)
+{
+    struct elf64_auxv aux[16];
+    int na = 0;
+    virAddr_t rand_va  = USER_STACK_TOP - 16;
+    virAddr_t str_base = rand_va - args->used;
+
+    aux[na].a_type = AT_PHDR;    aux[na++].a_val = info->phdr_va;
+    aux[na].a_type = AT_PHENT;   aux[na++].a_val = info->phent;
+    aux[na].a_type = AT_PHNUM;   aux[na++].a_val = info->phnum;
+    aux[na].a_type = AT_PAGESZ;  aux[na++].a_val = PGSIZE;
+    aux[na].a_type = AT_BASE;    aux[na++].a_val = 0;
+    aux[na].a_type = AT_FLAGS;   aux[na++].a_val = 0;
+    aux[na].a_type = AT_ENTRY;   aux[na++].a_val = info->entry;
+    aux[na].a_type = AT_UID;     aux[na++].a_val = 0;
+    aux[na].a_type = AT_EUID;    aux[na++].a_val = 0;
+    aux[na].a_type = AT_GID;     aux[na++].a_val = 0;
+    aux[na].a_type = AT_EGID;    aux[na++].a_val = 0;
+    aux[na].a_type = AT_HWCAP;   aux[na++].a_val = 0;
+    aux[na].a_type = AT_CLKTCK;  aux[na++].a_val = USER_HZ;
+    aux[na].a_type = AT_SECURE;  aux[na++].a_val = 0;
+    aux[na].a_type = AT_RANDOM;  aux[na++].a_val = rand_va;
+    aux[na].a_type = AT_NULL;    aux[na++].a_val = 0;
+
+    uint64_t ptr_bytes = sizeof(uint64_t)                       /* argc */
+                       + (uint64_t)(args->argc + 1) * sizeof(uint64_t)
+                       + (uint64_t)(args->envc + 1) * sizeof(uint64_t)
+                       + (uint64_t)na * sizeof(struct elf64_auxv);
+    virAddr_t sp = (str_base - ptr_bytes) & ~15UL;
+
+    if (sp < USER_STACK_TOP - USER_STACK_LEN)
+    {
+        return ENO27_ARG_TOO_LONG;
+    }
+
+    /* 字符串区与 AT_RANDOM 种子。种子是弱熵（启动至今的纳秒数 + pid），
+     * 只够喂 musl 的栈保护 canary，**不可作密码学用途** */
+    memcpy((void *)str_base, args->buf, args->used);
+    uint64_t seed = ktime_get_ns() ^ ((uint64_t)proc_get_current()->proc_pid << 48);
+    ((uint64_t *)rand_va)[0] = seed;
+    ((uint64_t *)rand_va)[1] = seed * 6364136223846793005ULL + 1442695040888963407ULL;
+
+    /* 指针区：argc、argv[]、NULL、envp[]、NULL、auxv */
+    uint64_t *slot = (uint64_t *)sp;
+    *slot++ = (uint64_t)args->argc;
+    for (int i = 0; i < args->argc; i++)
+    {
+        *slot++ = str_base + args->off[i];
+    }
+    *slot++ = 0;
+    for (int i = 0; i < args->envc; i++)
+    {
+        *slot++ = str_base + args->off[args->argc + i];
+    }
+    *slot++ = 0;
+    memcpy(slot, aux, (size_t)na * sizeof(struct elf64_auxv));
+
+    /* 自检：初始栈写错是最难从用户态症状反推的一类 bug，在这里花三行确认一次很值 */
+    if (*(long *)sp != args->argc)
+    {
+        panic("setup_user_stack: argc readback mismatch (sp=%lx)", sp);
+    }
+
+    *sp_out = sp;
+    return ENO0_NO_ERROR;
+}
+
 /**
  * @brief 用 path 指向的 ELF 替换当前进程的地址空间（execve 语义：换脑不换壳）
  * @param[in,out] sp   当前 syscall 的 trap 帧；成功时被改写为"进入新程序"的帧
  * @param[in]     path 用户空间的程序路径字符串
+ * @param[in]     argv 用户空间的参数向量，NULL 视为空
+ * @param[in]     envp 用户空间的环境向量，NULL 视为空
  * @retval ENO0_NO_ERROR 成功——trap 帧已指向新程序，返回后 sret 即进入新程序，旧程序视角看不到此返回值
  * @retval <0 失败（负 ENO*）——旧地址空间原封不动，exec 失败不致命，返回值传回旧程序
  * @details 保留 PCB / PID / 父子关系 / fd 表 / cwd，只把地址空间整个换掉。顺序极其关键：
- *   1. **先**把 path 从用户空间拷进内核（切 satp 后用户指针失效）；
+ *   1. **先**把 path / argv / envp 从用户空间拷进内核（切 satp 后用户指针失效）；
  *   2. **先**把整个 ELF 读进内核堆（内核偏移映射，切 satp 后仍可达）；
  *   3. 建新 mm、切到新地址空间（旧 mm 先留着，加载失败要回滚）；
  *   4. elf_load 到新 mm；失败则切回旧 mm、销毁半成品新 mm、返回错误；
  *   5. 成功后才销毁旧 mm（此刻已不站在它的页表上），随即关闭带 FD_CLOEXEC 的 fd；
- *   6. 建全新用户栈 VMA；fd 表其余部分原样保留；
- *   7. 改写 trap 帧（sepc=入口、sp=新栈顶、清通用寄存器），走正常 syscall 返回路径进入新程序。
- * @note 不做 argv/envp（无 argc 的 _start）；未来铺 argv 时需让成功路径跳过 trap.c 对 a0 的写回。
+ *   6. 建全新用户栈 VMA 并在上面铺 argc/argv/envp/auxv；fd 表其余部分原样保留；
+ *   7. 改写 trap 帧（sepc=入口、sp=铺好的栈指针、清通用寄存器），走正常 syscall 返回路径进入新程序。
  * @note FD_CLOEXEC 的 fd 在第 5 步（销毁旧 mm 之后）才关闭，而不是一进函数就关——第 1-4 步
  *   随时可能失败并回滚到旧程序继续执行，那种情况下 fd 表必须原封不动（POSIX 语义：
  *   execve 失败等价于没发生过）；只有确认新程序已经站稳（旧 mm 已销毁、没有回头路）之后，
  *   关闭 CLOEXEC fd 才是安全的。
+ * @note 成功路径不能让 trap.c 把返回值写回 a0——第 7 步刚把整个 trap 帧清零并按新程序
+ *   构造好，a0 位置存的已经是新程序的初始寄存器值。sys_execve 用返回值区分两种情形。
  */
-int do_exec(intstkf_t *sp, const char *path)
+int do_exec(intstkf_t *sp, const char *path, char *const *argv, char *const *envp)
 {
     pcb_t *cur = proc_get_current();
 
-    /* 1) 路径来自用户空间：切 satp 前拷进内核缓冲 */
+    /* 1) 路径与参数都来自用户空间：切 satp 前全部拷进内核缓冲 */
     char kpath[VFS_PATH_MAX];
     long path_len = strncpy_from_user(kpath, path, sizeof(kpath));
     if (path_len < 0)
     {
         return (int)path_len;
+    }
+
+    exec_args_t args;
+    int ret = exec_args_init(&args);
+    if (ret != ENO0_NO_ERROR)
+    {
+        return ret;
+    }
+    ret = exec_args_copy_from_user(&args, argv, &args.argc);
+    if (ret == ENO0_NO_ERROR)
+    {
+        ret = exec_args_copy_from_user(&args, envp, &args.envc);
+    }
+    if (ret != ENO0_NO_ERROR)
+    {
+        exec_args_free(&args);
+        return ret;
     }
 
     /* 2) 打开并把整个 ELF 读进内核堆 */
@@ -359,6 +604,7 @@ int do_exec(intstkf_t *sp, const char *path)
     if (f == NULL)
     {
         vfs_unlock();
+        exec_args_free(&args);
         return ENO5_NOSUCH_ENTRY;
     }
     off_t size = vfs_lseek(f, 0, SEEK_END);
@@ -367,6 +613,7 @@ int do_exec(intstkf_t *sp, const char *path)
     {
         vfs_close(f);
         vfs_unlock();
+        exec_args_free(&args);
         return ENO6_INVAL_PARAM;
     }
     unsigned char *img = kmalloc((size_t)size);
@@ -374,6 +621,7 @@ int do_exec(intstkf_t *sp, const char *path)
     {
         vfs_close(f);
         vfs_unlock();
+        exec_args_free(&args);
         return ENO1_NOMORE_MEM;
     }
     ssize_t rd = vfs_read(f, img, (size_t)size);
@@ -382,6 +630,7 @@ int do_exec(intstkf_t *sp, const char *path)
     if (rd != (ssize_t)size)
     {
         kfree(img);
+        exec_args_free(&args);
         return ENO6_INVAL_PARAM;
     }
 
@@ -391,6 +640,7 @@ int do_exec(intstkf_t *sp, const char *path)
     if (new_mm == NULL)
     {
         kfree(img);
+        exec_args_free(&args);
         return ENO1_NOMORE_MEM; /* 旧地址空间原封不动 */
     }
     cur->proc_mm = new_mm;
@@ -399,8 +649,8 @@ int do_exec(intstkf_t *sp, const char *path)
     tlb_flush_all();
 
     /* 4) 解析 ELF 到新地址空间 */
-    virAddr_t entry;
-    int ret = elf_load(new_mm, img, (uint64_t)size, &entry);
+    elf_info_t einfo;
+    ret = elf_load(new_mm, img, (uint64_t)size, &einfo);
     kfree(img);
     if (ret != ENO0_NO_ERROR)
     {
@@ -410,6 +660,7 @@ int do_exec(intstkf_t *sp, const char *path)
         write_csr(satp, cur->proc_context.satp);
         tlb_flush_all();
         vmm_mm_destroy(new_mm);
+        exec_args_free(&args);
         return ret;
     }
 
@@ -421,15 +672,28 @@ int do_exec(intstkf_t *sp, const char *path)
      * SIG_IGN / SIG_DFL 与屏蔽字 proc_sig_mask 原样保留。位置与
      * proc_fd_close_on_exec 相同，理由也相同：exec 失败必须等价于没发生过 */
     signal_hand_reset_on_exec(cur);
+    /* ITIMER_REAL：POSIX 要求 execve 清空定时器（umask 相反，原样保留） */
+    ktime_alarm_cancel(cur);
 
-    /* 6) 全新用户栈 VMA（懒分配）；fd 表其余部分原样保留 */
+    /* 6) 全新用户栈 VMA（懒分配）并在上面铺 argc/argv/envp/auxv；fd 表其余部分原样保留 */
     vma_t *stk = vmm_vma_create(USER_STACK_TOP - USER_STACK_LEN, USER_STACK_TOP, VMP_R | VMP_W);
     vmm_vma_insert(new_mm, stk);
 
+    virAddr_t user_sp;
+    ret = setup_user_stack(&args, &einfo, &user_sp);
+    exec_args_free(&args);
+    if (ret != ENO0_NO_ERROR)
+    {
+        /* 走不到：参数总量已被 EXEC_ARG_BUF_SIZE(4KB) + EXEC_MAX_ARGS(64) 夹住，
+         * 最坏也就 5 KB 出头，远小于 64 KB 的用户栈。真到了这里也已经没有回头路
+         * ——旧 mm 已销毁，返回错误等于让旧程序拿着一个空地址空间继续跑。 */
+        panic("do_exec: setup_user_stack failed after point of no return, ret=%d", ret);
+    }
+
     /* 7) 改写当前 trap 帧：sret 直接进入新程序（复用 syscall 返回路径，不另起 enter_user_mode）*/
     memset(sp, 0, sizeof(intstkf_t));
-    sp->sepc    = entry;
-    sp->x2_sp   = USER_STACK_TOP;
+    sp->sepc    = einfo.entry;
+    sp->x2_sp   = user_sp;
     sp->x4_tp   = cpu_get_core_id();
     sp->sstatus = (read_csr(sstatus) & ~SSTATUS_SPP) | SSTATUS_SPIE | SSTATUS_SUM;
 
@@ -554,9 +818,22 @@ static pcb_t *alloc_new_proc(void)
         INIT_LIST_HEAD(&(pcb->proc_list_linker));
         INIT_LIST_HEAD(&(pcb->proc_wait_linker));
 
-        pcb->proc_wake_tick = 0;
+        pcb->proc_wake_time_ns = 0;
         INIT_LIST_HEAD(&(pcb->proc_timer_linker));
-        
+
+        /* ITIMER_REAL：POSIX 要求 fork 的子进程不继承定时器，所以这里一律清空，
+         * do_fork 也不去复制父进程的这三个字段 */
+        pcb->proc_alarm_expire_ns = 0;
+        pcb->proc_alarm_interval_ns = 0;
+        INIT_LIST_HEAD(&(pcb->proc_alarm_linker));
+
+        /* umask 相反：fork 要继承、exec 要保留，所以这里给的只是"没有父进程时"的默认值，
+         * do_fork 会用父进程的覆盖掉 */
+        pcb->proc_umask = 0022;
+        pcb->proc_clear_child_tid = 0;
+        pcb->proc_sum_exec_runtime_children = 0;
+
+
 #if DEBUG_PROC_allocNewProc
         printf("alloc_new_proc::new pcb addr:%lx,sizeof(pcb_t):%ld\n", (intptr_t)pcb, sizeof(pcb_t));
 #endif
@@ -885,17 +1162,37 @@ static void run_user_program(const unsigned char *elf, unsigned long elf_len)
     write_csr(satp, cur->proc_context.satp);
     tlb_flush_all();
 
-    /* 3) 解析 ELF：按 PT_LOAD 段建 VMA、映射、拷贝内容，得到程序入口地址 */
-    virAddr_t entry;
-    int ret = elf_load(mm, elf, elf_len, &entry);
+    /* 3) 解析 ELF：按 PT_LOAD 段建 VMA、映射、拷贝内容，得到入口与程序头表信息 */
+    elf_info_t einfo;
+    int ret = elf_load(mm, elf, elf_len, &einfo);
     if (ret != ENO0_NO_ERROR)
     {
         panic("run_user_program: elf_load failed, ret=%d", ret);
     }
 
-    /* 4) 用户栈 VMA（懒分配，首次访问由 page fault 落实） */
+    /* 4) 用户栈 VMA（懒分配，首次访问由 page fault 落实），并铺上初始栈。
+     * **建栈代码与 do_exec 共用同一份**：写成两份的话，将来真正的 /sbin/init
+     * 上来只会有一条路径被测过。 */
     vma_t *stk = vmm_vma_create(USER_STACK_TOP - USER_STACK_LEN, USER_STACK_TOP, VMP_R | VMP_W);
     vmm_vma_insert(mm, stk);
+
+    exec_args_t args;
+    if (exec_args_init(&args) != ENO0_NO_ERROR)
+    {
+        panic("run_user_program: exec_args_init failed");
+    }
+    if (exec_args_push(&args, "/init") != ENO0_NO_ERROR)
+    {
+        panic("run_user_program: exec_args_push failed");
+    }
+    args.argc = 1;
+    args.envc = 0;
+    virAddr_t user_sp;
+    if (setup_user_stack(&args, &einfo, &user_sp) != ENO0_NO_ERROR)
+    {
+        panic("run_user_program: setup_user_stack failed");
+    }
+    exec_args_free(&args);
 
     /* 5) 装 stdin/stdout/stderr（fd 0/1/2）；fork 出的子进程由 do_fork 的 proc_fd_copy 继承 */
     proc_install_stdio();
@@ -908,10 +1205,10 @@ static void run_user_program(const unsigned char *elf, unsigned long elf_len)
     tty_set_foreground_pgid(cur->proc_pgid);
 
     /* 7) 进入 U 态 */
-    enter_user_mode(entry, USER_STACK_TOP);
+    enter_user_mode(einfo.entry, user_sp);
 }
 
-#if !DEBUG_EXEC_TEST && !DEBUG_FILE_TEST && !DEBUG_PIPE_TEST && !DEBUG_TTY_TEST && !DEBUG_MEM_TEST && !DEBUG_SIGNAL_TEST
+#if !DEBUG_EXEC_TEST && !DEBUG_FILE_TEST && !DEBUG_PIPE_TEST && !DEBUG_TTY_TEST && !DEBUG_MEM_TEST && !DEBUG_SIGNAL_TEST && !DEBUG_TIME_TEST
 static void run_first_user_program(void)
 {
     run_user_program(user_elf, user_elf_len);
@@ -996,6 +1293,31 @@ static void run_sigtest_program(void)
     extern const unsigned char user_sigtest_elf[];
     extern const unsigned long user_sigtest_elf_len;
     run_user_program(user_sigtest_elf, user_sigtest_elf_len);
+}
+#endif
+
+#if DEBUG_TIME_TEST
+static void run_timetest_program(void)
+{
+    extern const unsigned char user_timetest_elf[];
+    extern const unsigned long user_timetest_elf_len;
+    run_user_program(user_timetest_elf, user_timetest_elf_len);
+}
+
+/* timetest 的 argv/envp 用例要 execve 一个真实存在的程序，把 argvtest 投进 ramdisk */
+static void seed_argvtest(void)
+{
+    extern const unsigned char user_argvtest_elf[];
+    extern const unsigned long user_argvtest_elf_len;
+    file_t *f = vfs_open("/argvtest", O_CREAT | O_WRONLY | O_TRUNC);
+    if (f == NULL)
+    {
+        printf("[init] seed /argvtest: vfs_open failed\n");
+        return;
+    }
+    ssize_t w = vfs_write(f, user_argvtest_elf, user_argvtest_elf_len);
+    vfs_close(f);
+    printf("[init] seed /argvtest: wrote %ld bytes\n", (long)w);
 }
 #endif
 
@@ -1097,6 +1419,11 @@ static int16_t init(void)
     /* 验证信号：sigtest 不依赖 /hello，不需要 seed_exec_target，
      * 直接跑（不跑 exectest/filetest/pipetest/ttytest/memtest/默认用户程序）*/
     int16_t pid = create_kernel_thread_by_fork((void *)run_sigtest_program, NULL, 0);
+#elif DEBUG_TIME_TEST
+    /* 验证时间与杂项 syscall：先把 /argvtest 塞进 ramdisk 供 execve 用例使用，
+     * 再跑 timetest（不跑其它测试程序与默认用户程序）*/
+    seed_argvtest();
+    int16_t pid = create_kernel_thread_by_fork((void *)run_timetest_program, NULL, 0);
 #else
     int16_t pid = create_kernel_thread_by_fork((void *)run_first_user_program, NULL, 0);
 #endif

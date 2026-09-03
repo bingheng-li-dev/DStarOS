@@ -8,6 +8,7 @@
 #define ENOENT        2
 #define ESRCH         3
 #define EINTR         4
+#define E2BIG         7
 #define EBADF         9
 #define ECHILD        10
 #define EAGAIN        11
@@ -66,6 +67,7 @@
 
 #define ENO25_NO_SUCH_PROC (-ESRCH)  /* kill 的目标 pid / 进程组不存在 */
 #define ENO26_INTERRUPTED  (-EINTR)  /* 阻塞的 syscall 被信号打断且不重启 */
+#define ENO27_ARG_TOO_LONG (-E2BIG)  /* execve 的 argv/envp 超出内核暂存区上限 */
 
 /* 内核内部专用：阻塞循环被信号打断时返回它，由 signal_handle_pending() 统一翻译成
  * "重启该 syscall"或 ENO26_INTERRUPTED。**它永远不会出现在 syscall 的返回值里**，

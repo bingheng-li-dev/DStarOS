@@ -6,8 +6,9 @@
 #include "dassert.h"
 #include "tick.h"
 #include "cpu.h"
+#include "ktime.h"
 
-/* 按 proc_wake_tick 升序排列的定时睡眠链表，sched_sleep_ticks()/sched_check_timers() 共用。
+/* 按 proc_wake_time_ns 升序排列的定时睡眠链表，sched_sleep_ns()/sched_check_timers() 共用。
  * 静态用 LIST_HEAD_INIT 而不是留给 sched_init() 运行时 INIT_LIST_HEAD：tick_int_handler()
  * 里 sched_check_timers() 是无条件调用的，若 timer 中断在 sched_init() 跑到这一行之前先触发
  * （200 Hz tick 下，hart0 的 fs_init() 挂载/格式化 ramdisk 耗时可能超过一个 tick 周期），
@@ -591,30 +592,36 @@ void sleep(pcb_t *proc, sta_t state)
 
 /**
  * @brief 当前任务定时睡眠，到期由 tick 中断唤醒
- * @param[in] ticks 要睡眠的 tick 数（tick_get_os_tick() 单位）
+ * @param[in] ns 要睡眠的纳秒数
  * @details 在 sleeping_tasks_lock 保护下把 proc_state 置 INTERRUPTIBLE
- *   并按 proc_wake_tick 升序插入 sleeping_tasks，随后才 sched_schedule()。
- *   状态赋值与入链在同一把锁下完成，是为了不丢唤醒——万一 ticks 极小，
+ *   并按 proc_wake_time_ns 升序插入 sleeping_tasks，随后才 sched_schedule()。
+ *   状态赋值与入链在同一把锁下完成，是为了不丢唤醒——万一 ns 极小，
  *   插入后、sched_schedule() 真正切换走前就被 sched_check_timers() 抢先
  *   唤醒（proc_state 改回 RUNNING 并入就绪队列），sched_schedule() 发现
  *   当前任务已是 RUNNING，会按"主动让出"处理而不会重复入队，不会丢事件。
+ *
+ *   返回前**无条件**摘一次链：到期那条路径 sched_check_timers() 已经摘过，
+ *   list_empty 判据会挡住第二次；被信号唤醒那条路径这里是唯一的摘链点。
+ *   "无条件摘一次 + 幂等的摘链函数"比"分两条路径各摘各的"可靠得多——阶段 7 的
+ *   waitq_remove 就是这么收的口。
  * @note 与 tick_delay() 的忙等自旋不同，本函数会真正让出 CPU。
+ * @note 到期检查点只有每个 tick 一次，实际睡眠时长向上取整到 tick 边界。
  */
-void sched_sleep_ticks(uint64_t ticks)
+void sched_sleep_ns(uint64_t ns)
 {
     pcb_t *curr = proc_get_current();
-    uint64_t wake_at = tick_get_os_tick() + ticks;
+    uint64_t wake_at = ktime_get_ns() + ns;
 
     irq_key_t sleeping_tasks_lock_key = spinlock_acquire(&sleeping_tasks_lock);
 
-    curr->proc_wake_tick = wake_at;
+    curr->proc_wake_time_ns = wake_at;
     curr->proc_state = INTERRUPTIBLE;
 
     struct list_head *pos;
     list_for_each(pos, &sleeping_tasks)
     {
         pcb_t *p = list_entry(pos, pcb_t, proc_timer_linker);
-        if (p->proc_wake_tick > wake_at)
+        if (p->proc_wake_time_ns > wake_at)
         {
             break;
         }
@@ -624,30 +631,53 @@ void sched_sleep_ticks(uint64_t ticks)
     spinlock_release(&sleeping_tasks_lock, sleeping_tasks_lock_key);
 
     sched_schedule();
+
+    sched_timer_remove(curr);
+}
+
+void sched_sleep_ticks(uint64_t ticks)
+{
+    sched_sleep_ns(ticks * (NSEC_PER_SEC / TICK_HZ));
+}
+
+/**
+ * @brief 把任务从 sleeping_tasks 上摘下来，幂等
+ * @details 判据是 list_empty(&p->proc_timer_linker)——所以入链之外的每一处
+ *   摘链都必须用 list_del_init 而不是 list_del，否则节点摘掉之后 next/prev
+ *   还指着链表，list_empty 返回假，本函数会对一个不在链上的节点再 list_del 一次。
+ */
+void sched_timer_remove(pcb_t *p)
+{
+    irq_key_t sleeping_tasks_lock_key = spinlock_acquire(&sleeping_tasks_lock);
+    if (!list_empty(&p->proc_timer_linker))
+    {
+        list_del_init(&p->proc_timer_linker);
+    }
+    spinlock_release(&sleeping_tasks_lock, sleeping_tasks_lock_key);
 }
 
 /**
  * @brief 唤醒 sleeping_tasks 中所有已到期的任务
  * @details 由 tick_int_handler() 每次 tick 调用。sleeping_tasks 按
- *   proc_wake_tick 升序排列，一旦遇到未到期的节点即可停止扫描。
+ *   proc_wake_time_ns 升序排列，一旦遇到未到期的节点即可停止扫描。
  * @note wakeup() 内部会取 run_queue.lock；本函数持有的 sleeping_tasks_lock
- *   在所有路径上都只会是外层锁（sched_sleep_ticks() 插入时早已释放它，
+ *   在所有路径上都只会是外层锁（sched_sleep_ns() 插入时早已释放它，
  *   之后才单独去拿 run_queue.lock），不会与 run_queue.lock 形成加锁顺序反转。
  */
 void sched_check_timers(void)
 {
-    uint64_t now = tick_get_os_tick();
+    uint64_t now = ktime_get_ns();
     struct list_head *pos, *tmp;
 
     irq_key_t sleeping_tasks_lock_key = spinlock_acquire(&sleeping_tasks_lock);
     list_for_each_safe(pos, tmp, &sleeping_tasks)
     {
         pcb_t *p = list_entry(pos, pcb_t, proc_timer_linker);
-        if (p->proc_wake_tick > now)
+        if (p->proc_wake_time_ns > now)
         {
             break;
         }
-        list_del(&p->proc_timer_linker);
+        list_del_init(&p->proc_timer_linker);
         wakeup(p);
     }
     spinlock_release(&sleeping_tasks_lock, sleeping_tasks_lock_key);

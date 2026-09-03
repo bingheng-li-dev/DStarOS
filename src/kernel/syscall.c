@@ -13,6 +13,8 @@
 #include "tty.h"
 #include "vmm.h"
 #include "signal.h"
+#include "sched.h"
+#include "ktime.h"
 
 /* read/write 的中转缓冲大小：一页，kmalloc 分配——内核栈只有 1 页 4KB
  * （KERNEL_STACKPSIZE 1），FatFS 调用链本来就深，不能在栈上开这么大的缓冲。 */
@@ -1137,11 +1139,14 @@ static long sys_getpgid(int pid)
     return pgid_result;
 }
 
-/* a0=path, a1=argv, a2=envp（本阶段忽略 argv/envp）。成功后 sp 已被改写为进入新程序的帧，
- * 本函数返回 0；trap.c 会把 0 写回 a0（新程序 _start 不读 argc，无害）。失败返回负 ENO*。 */
+/* a0=path, a1=argv, a2=envp。成功后 sp 已被改写为进入新程序的帧，本函数返回 0；
+ * trap.c 那句 `sp->x10_a0 = syscall_dispatch(sp)` 于是把 0 写回 a0——这正好符合
+ * Linux 进程入口的约定（a0 在 _start 处为 0），而 argc/argv 是从**栈上**读的，
+ * 不经过 a0，所以这条写回不会破坏刚铺好的初始栈。失败返回负 ENO*。 */
 static long sys_execve(intstkf_t *sp)
 {
-    return do_exec(sp, (const char *)sp->x10_a0);
+    return do_exec(sp, (const char *)sp->x10_a0,
+                   (char *const *)sp->x11_a1, (char *const *)sp->x12_a2);
 }
 
 static long sys_wait4(int pid, int *ustatus, int options, void *rusage)
@@ -1390,6 +1395,440 @@ static long sys_munmap(virAddr_t addr, uint64_t len)
     return ENO0_NO_ERROR;
 }
 
+/* ============================================================
+ * 时间
+ * ============================================================ */
+
+/* 纳秒拆成 struct timespec */
+static void ns_to_timespec(uint64_t ns, struct timespec *ts)
+{
+    ts->tv_sec  = (int64_t)(ns / NSEC_PER_SEC);
+    ts->tv_nsec = (int64_t)(ns % NSEC_PER_SEC);
+}
+
+/* struct timespec 合到纳秒；字段非法（负数 / tv_nsec 越界）返回 -EINVAL */
+static long timespec_to_ns(const struct timespec *ts, uint64_t *out_ns)
+{
+    if (ts->tv_sec < 0 || ts->tv_nsec < 0 || ts->tv_nsec >= (int64_t)NSEC_PER_SEC)
+    {
+        return ENO6_INVAL_PARAM;
+    }
+    *out_ns = (uint64_t)ts->tv_sec * NSEC_PER_SEC + (uint64_t)ts->tv_nsec;
+    return ENO0_NO_ERROR;
+}
+
+/* 读一个 clock id 的当前值（纳秒）；不支持的 id 返回 -EINVAL。
+ * 本内核不挂起，MONOTONIC / MONOTONIC_RAW / BOOTTIME 三者等价。 */
+static long clock_read_ns(int clock_id, uint64_t *out_ns)
+{
+    switch (clock_id)
+    {
+    case CLOCK_REALTIME:
+    case CLOCK_REALTIME_COARSE:
+        *out_ns = ktime_get_real_ns();
+        return ENO0_NO_ERROR;
+    case CLOCK_MONOTONIC:
+    case CLOCK_MONOTONIC_RAW:
+    case CLOCK_MONOTONIC_COARSE:
+    case CLOCK_BOOTTIME:
+        *out_ns = ktime_get_ns();
+        return ENO0_NO_ERROR;
+    default:
+        return ENO6_INVAL_PARAM;
+    }
+}
+
+static long sys_clock_gettime(int clock_id, struct timespec *uts)
+{
+    uint64_t ns;
+    long ret = clock_read_ns(clock_id, &ns);
+    if (ret != ENO0_NO_ERROR)
+    {
+        return ret;
+    }
+    if (uts == NULL)
+    {
+        return ENO8_NULL_POINTER;
+    }
+    struct timespec ts;
+    ns_to_timespec(ns, &ts);
+    if (copy_to_user(uts, &ts, sizeof(ts)) != 0)
+    {
+        return ENO8_NULL_POINTER;
+    }
+    return ENO0_NO_ERROR;
+}
+
+/**
+ * @brief 时钟分辨率，即 time CSR 的一格
+ * @note K210 的 390 MHz 下这个除法截断成 2 ns，可接受——clock_getres 的语义本来就是"约"。
+ */
+static long sys_clock_getres(int clock_id, struct timespec *uts)
+{
+    uint64_t ns;
+    long ret = clock_read_ns(clock_id, &ns); /* 只借它校验 clock_id */
+    if (ret != ENO0_NO_ERROR)
+    {
+        return ret;
+    }
+    if (uts == NULL)
+    {
+        return ENO0_NO_ERROR; /* Linux 允许 res 为 NULL，此时只校验 clock_id */
+    }
+    struct timespec ts = { 0, (int64_t)(NSEC_PER_SEC / TIMEBASE_FREQ_HZ) };
+    if (copy_to_user(uts, &ts, sizeof(ts)) != 0)
+    {
+        return ENO8_NULL_POINTER;
+    }
+    return ENO0_NO_ERROR;
+}
+
+/**
+ * @brief 设置墙钟
+ * @note 只接受 CLOCK_REALTIME——CLOCK_MONOTONIC 不可设置是 POSIX 的硬要求，
+ *   它存在的全部意义就是不受调时影响。不做权限检查（单用户系统，无 uid 概念）。
+ */
+static long sys_clock_settime(int clock_id, const struct timespec *uts)
+{
+    if (clock_id != CLOCK_REALTIME)
+    {
+        return ENO6_INVAL_PARAM;
+    }
+    struct timespec ts;
+    if (uts == NULL || copy_from_user(&ts, uts, sizeof(ts)) != 0)
+    {
+        return ENO8_NULL_POINTER;
+    }
+    uint64_t ns;
+    long ret = timespec_to_ns(&ts, &ns);
+    if (ret != ENO0_NO_ERROR)
+    {
+        return ret;
+    }
+    ktime_set_real_ns(ns);
+    return ENO0_NO_ERROR;
+}
+
+/* tz 一律忽略（Linux 也是），非 NULL 时不写、不报错 */
+static long sys_gettimeofday(struct timeval *utv, void *utz)
+{
+    (void)utz;
+    if (utv == NULL)
+    {
+        return ENO0_NO_ERROR;
+    }
+    uint64_t ns = ktime_get_real_ns();
+    struct timeval tv;
+    tv.tv_sec  = (int64_t)(ns / NSEC_PER_SEC);
+    tv.tv_usec = (int64_t)((ns % NSEC_PER_SEC) / NSEC_PER_USEC);
+    if (copy_to_user(utv, &tv, sizeof(tv)) != 0)
+    {
+        return ENO8_NULL_POINTER;
+    }
+    return ENO0_NO_ERROR;
+}
+
+static long sys_settimeofday(const struct timeval *utv, const void *utz)
+{
+    (void)utz;
+    if (utv == NULL)
+    {
+        return ENO0_NO_ERROR;
+    }
+    struct timeval tv;
+    if (copy_from_user(&tv, utv, sizeof(tv)) != 0)
+    {
+        return ENO8_NULL_POINTER;
+    }
+    if (tv.tv_sec < 0 || tv.tv_usec < 0 || tv.tv_usec >= (int64_t)USEC_PER_SEC)
+    {
+        return ENO6_INVAL_PARAM;
+    }
+    ktime_set_real_ns((uint64_t)tv.tv_sec * NSEC_PER_SEC + (uint64_t)tv.tv_usec * NSEC_PER_USEC);
+    return ENO0_NO_ERROR;
+}
+
+/**
+ * @brief nanosleep / clock_nanosleep 的共同实现
+ * @param[in]  clock_id 参照的时钟；决定 TIMER_ABSTIME 下 ureq 按哪个时钟解释
+ * @param[in]  flags    TIMER_ABSTIME 或 0
+ * @param[in]  ureq     请求的时长（相对）或时刻（绝对）
+ * @param[out] urem     被信号打断时回填剩余时长；TIMER_ABSTIME 下按 POSIX 不回填
+ * @retval ENO0_NO_ERROR    睡满了
+ * @retval ENO26_INTERRUPTED 被信号打断
+ * @details **被打断时返回 -EINTR 而不是 -ERESTARTSYS，这是有意的**：
+ *   SA_RESTART 的重启会拿着原始的 req 再睡一遍完整时长，`sleep 10` 每收到一次
+ *   SIGCHLD 就多睡 10 秒。Linux 为此有一套 restart_block + restart_syscall 机制，
+ *   本项目不做——musl 的 sleep() 自己就在拿 rem 循环重试，续睡由用户态负责。
+ *   **前提是 rem 必须填准**，这也正是 sleeping_tasks 改纳秒时基的直接原因。
+ *
+ *   绝对/相对两种模式统一成"先算出还要睡多久"：读一次请求时钟的当前值，目标减
+ *   当前即可，不需要把墙钟偏移暴露出来。
+ */
+static long do_nanosleep(int clock_id, int flags, const struct timespec *ureq,
+                         struct timespec *urem)
+{
+    struct timespec req;
+    if (ureq == NULL || copy_from_user(&req, ureq, sizeof(req)) != 0)
+    {
+        return ENO8_NULL_POINTER;
+    }
+
+    uint64_t want_ns;
+    long ret = timespec_to_ns(&req, &want_ns);
+    if (ret != ENO0_NO_ERROR)
+    {
+        return ret;
+    }
+
+    bool absolute = (flags & TIMER_ABSTIME) != 0;
+    uint64_t delta_ns = want_ns;
+    if (absolute)
+    {
+        uint64_t now_on_clock;
+        ret = clock_read_ns(clock_id, &now_on_clock);
+        if (ret != ENO0_NO_ERROR)
+        {
+            return ret;
+        }
+        delta_ns = (want_ns > now_on_clock) ? (want_ns - now_on_clock) : 0;
+    }
+
+    /* 零时长直接返回，不进 sleeping_tasks——usleep(0) 是常见惯用法 */
+    if (delta_ns == 0)
+    {
+        return ENO0_NO_ERROR;
+    }
+
+    uint64_t deadline_ns = ktime_get_ns() + delta_ns;
+    sched_sleep_ns(delta_ns);
+
+    if (signal_pending(proc_get_current()))
+    {
+        if (!absolute && urem != NULL)
+        {
+            uint64_t now = ktime_get_ns();
+            uint64_t remain = (deadline_ns > now) ? (deadline_ns - now) : 0;
+            struct timespec rem;
+            ns_to_timespec(remain, &rem);
+            if (copy_to_user(urem, &rem, sizeof(rem)) != 0)
+            {
+                return ENO8_NULL_POINTER;
+            }
+        }
+        return ENO26_INTERRUPTED;
+    }
+    return ENO0_NO_ERROR;
+}
+
+static long sys_nanosleep(const struct timespec *ureq, struct timespec *urem)
+{
+    return do_nanosleep(CLOCK_MONOTONIC, 0, ureq, urem);
+}
+
+static long sys_clock_nanosleep(int clock_id, int flags,
+                                const struct timespec *ureq, struct timespec *urem)
+{
+    if (clock_id != CLOCK_REALTIME && clock_id != CLOCK_MONOTONIC)
+    {
+        return ENO6_INVAL_PARAM;
+    }
+    return do_nanosleep(clock_id, flags, ureq, urem);
+}
+
+/* ============================================================
+ * ITIMER_REAL 定时器
+ * ============================================================ */
+
+static void ns_to_timeval(uint64_t ns, struct timeval *tv)
+{
+    tv->tv_sec  = (int64_t)(ns / NSEC_PER_SEC);
+    tv->tv_usec = (int64_t)((ns % NSEC_PER_SEC) / NSEC_PER_USEC);
+}
+
+static long timeval_to_ns(const struct timeval *tv, uint64_t *out_ns)
+{
+    if (tv->tv_sec < 0 || tv->tv_usec < 0 || tv->tv_usec >= (int64_t)USEC_PER_SEC)
+    {
+        return ENO6_INVAL_PARAM;
+    }
+    *out_ns = (uint64_t)tv->tv_sec * NSEC_PER_SEC + (uint64_t)tv->tv_usec * NSEC_PER_USEC;
+    return ENO0_NO_ERROR;
+}
+
+/**
+ * @brief 装/改 ITIMER_REAL 定时器，到期向本进程投 SIGALRM
+ * @note ITIMER_VIRTUAL / ITIMER_PROF 要按进程 CPU 时间计费，依赖 utime/stime 拆分，
+ *   本内核没有，一律 -EINVAL。it_value 为 {0,0} 表示取消。
+ *   uold 回填的是**剩余时间**，不是原始设定值。
+ */
+static long sys_setitimer(int which, const struct itimerval *unew, struct itimerval *uold)
+{
+    if (which != ITIMER_REAL)
+    {
+        return ENO6_INVAL_PARAM;
+    }
+
+    uint64_t value_ns = 0;
+    uint64_t interval_ns = 0;
+    if (unew != NULL)
+    {
+        struct itimerval nv;
+        if (copy_from_user(&nv, unew, sizeof(nv)) != 0)
+        {
+            return ENO8_NULL_POINTER;
+        }
+        long ret = timeval_to_ns(&nv.it_value, &value_ns);
+        if (ret != ENO0_NO_ERROR)
+        {
+            return ret;
+        }
+        ret = timeval_to_ns(&nv.it_interval, &interval_ns);
+        if (ret != ENO0_NO_ERROR)
+        {
+            return ret;
+        }
+    }
+
+    pcb_t *cur = proc_get_current();
+    uint64_t old_value = 0;
+    uint64_t old_interval = 0;
+    uint64_t expire_ns = (value_ns == 0) ? 0 : (ktime_get_ns() + value_ns);
+    ktime_alarm_set(cur, expire_ns, interval_ns, &old_value, &old_interval);
+
+    if (uold != NULL)
+    {
+        struct itimerval ov;
+        ns_to_timeval(old_value, &ov.it_value);
+        ns_to_timeval(old_interval, &ov.it_interval);
+        if (copy_to_user(uold, &ov, sizeof(ov)) != 0)
+        {
+            return ENO8_NULL_POINTER;
+        }
+    }
+    return ENO0_NO_ERROR;
+}
+
+static long sys_getitimer(int which, struct itimerval *ucur)
+{
+    if (which != ITIMER_REAL)
+    {
+        return ENO6_INVAL_PARAM;
+    }
+    if (ucur == NULL)
+    {
+        return ENO8_NULL_POINTER;
+    }
+    uint64_t value = 0;
+    uint64_t interval = 0;
+    ktime_alarm_get(proc_get_current(), &value, &interval);
+
+    struct itimerval cv;
+    ns_to_timeval(value, &cv.it_value);
+    ns_to_timeval(interval, &cv.it_interval);
+    if (copy_to_user(ucur, &cv, sizeof(cv)) != 0)
+    {
+        return ENO8_NULL_POINTER;
+    }
+    return ENO0_NO_ERROR;
+}
+
+/* ============================================================
+ * 身份与杂项
+ * ============================================================ */
+
+/* 目标字段已被 memset 清零，只需拷贝有效字节，末尾的结束符天然就位 */
+static void utsname_set(char *dst, const char *src)
+{
+    size_t n = strlen(src);
+    if (n > UTSNAME_LEN - 1)
+    {
+        n = UTSNAME_LEN - 1;
+    }
+    memcpy(dst, src, n);
+}
+
+/**
+ * @brief 返回系统信息
+ * @note struct utsname 是 6 x 65 = 390 字节，domainname 虽是 GNU 扩展但在内核 ABI
+ *   里真实存在——少填它会让 musl 读到缓冲区尾部 65 字节的栈垃圾。
+ *   machine 必须严格是 "riscv64"，uname -m 拼错会让脚本走错分支。
+ */
+static long sys_uname(struct utsname *ubuf)
+{
+    if (ubuf == NULL)
+    {
+        return ENO8_NULL_POINTER;
+    }
+    struct utsname uts;
+    memset(&uts, 0, sizeof(uts));
+    utsname_set(uts.sysname,    "DStarOS");
+    utsname_set(uts.nodename,   "dstaros");
+    utsname_set(uts.release,    "0.1.0");
+    utsname_set(uts.version,    "#1 SMP DStarOS");
+    utsname_set(uts.machine,    "riscv64");
+    utsname_set(uts.domainname, "(none)");
+    if (copy_to_user(ubuf, &uts, sizeof(uts)) != 0)
+    {
+        return ENO8_NULL_POINTER;
+    }
+    return ENO0_NO_ERROR;
+}
+
+/* 返回旧掩码并置新值。FAT 没有权限位，这里只是把值存住供 umask 内建读回 */
+static long sys_umask(int mask)
+{
+    pcb_t *cur = proc_get_current();
+    long old = cur->proc_umask;
+    cur->proc_umask = (uint16_t)(mask & 0777);
+    return old;
+}
+
+/* time CSR 计数换算成 clock_t（AT_CLKTCK = 100 Hz），不是本内核的 200 Hz tick */
+static long counts_to_clock_t(uint64_t counts)
+{
+    return (long)(counts * USER_HZ / TIMEBASE_FREQ_HZ);
+}
+
+/**
+ * @brief 进程时间统计
+ * @note 本内核不在 trap 进出时分别计费，无法拆分用户态/内核态时间——全部记在
+ *   tms_utime，tms_stime / tms_cstime 恒 0。tms_cutime 由 do_wait() 收割子进程时累加。
+ * @return 任意起点的单调计数（Linux 用系统启动以来的时间），单位同样是 100 Hz。
+ */
+static long sys_times(struct tms *ubuf)
+{
+    pcb_t *cur = proc_get_current();
+    if (ubuf != NULL)
+    {
+        struct tms t;
+        t.tms_utime  = counts_to_clock_t(cur->proc_sum_exec_runtime);
+        t.tms_stime  = 0;
+        t.tms_cutime = counts_to_clock_t(cur->proc_sum_exec_runtime_children);
+        t.tms_cstime = 0;
+        if (copy_to_user(ubuf, &t, sizeof(t)) != 0)
+        {
+            return ENO8_NULL_POINTER;
+        }
+    }
+    return (long)(ktime_get_ns() / (NSEC_PER_SEC / USER_HZ));
+}
+
+static long sys_sched_yield(void)
+{
+    sched_schedule();
+    return ENO0_NO_ERROR;
+}
+
+/* 存下指针、返回 pid。**不做退出时的 futex 唤醒**——本内核没有 futex，
+ * 且单线程进程没人在等这个字段被清零。musl 的 __init_tp 启动即调本调用。 */
+static long sys_set_tid_address(uint64_t tidptr)
+{
+    pcb_t *cur = proc_get_current();
+    cur->proc_clear_child_tid = tidptr;
+    return cur->proc_pid;
+}
+
 long syscall_dispatch(intstkf_t *sp)
 {
     switch (sp->x17_a7) /* a7中存放了系统调用号 */
@@ -1476,6 +1915,45 @@ long syscall_dispatch(intstkf_t *sp)
                         (int)sp->x13_a3, (int)sp->x14_a4, (uint64_t)sp->x15_a5);
     case __NR_munmap:
         return sys_munmap((virAddr_t)sp->x10_a0, (uint64_t)sp->x11_a1);
+    case __NR_clock_gettime:
+        return sys_clock_gettime((int)sp->x10_a0, (struct timespec *)sp->x11_a1);
+    case __NR_clock_getres:
+        return sys_clock_getres((int)sp->x10_a0, (struct timespec *)sp->x11_a1);
+    case __NR_clock_settime:
+        return sys_clock_settime((int)sp->x10_a0, (const struct timespec *)sp->x11_a1);
+    case __NR_gettimeofday:
+        return sys_gettimeofday((struct timeval *)sp->x10_a0, (void *)sp->x11_a1);
+    case __NR_settimeofday:
+        return sys_settimeofday((const struct timeval *)sp->x10_a0, (const void *)sp->x11_a1);
+    case __NR_nanosleep:
+        return sys_nanosleep((const struct timespec *)sp->x10_a0, (struct timespec *)sp->x11_a1);
+    case __NR_clock_nanosleep:
+        return sys_clock_nanosleep((int)sp->x10_a0, (int)sp->x11_a1,
+                                   (const struct timespec *)sp->x12_a2,
+                                   (struct timespec *)sp->x13_a3);
+    case __NR_setitimer:
+        return sys_setitimer((int)sp->x10_a0, (const struct itimerval *)sp->x11_a1,
+                             (struct itimerval *)sp->x12_a2);
+    case __NR_getitimer:
+        return sys_getitimer((int)sp->x10_a0, (struct itimerval *)sp->x11_a1);
+    case __NR_uname:
+        return sys_uname((struct utsname *)sp->x10_a0);
+    case __NR_umask:
+        return sys_umask((int)sp->x10_a0);
+    case __NR_times:
+        return sys_times((struct tms *)sp->x10_a0);
+    case __NR_sched_yield:
+        return sys_sched_yield();
+    case __NR_set_tid_address:
+        return sys_set_tid_address((uint64_t)sp->x10_a0);
+    /* 单用户系统，四个 id 恒为 0（root）；gettid 无线程组，等于 pid */
+    case __NR_getuid:
+    case __NR_geteuid:
+    case __NR_getgid:
+    case __NR_getegid:
+        return 0;
+    case __NR_gettid:
+        return proc_get_current()->proc_pid;
     default:
         printf("syscall: unknown nr=%ld\n", sp->x17_a7);
         return ENO20_NOSYS;

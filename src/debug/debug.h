@@ -115,7 +115,17 @@
  * 以及非法访问触发 SIGSEGV（此时内核必须不 panic）。
  * 串口应看到 "=== sigtest done: N pass  0 fail ==="。
  * 置 1 时不跑 exectest/filetest/pipetest/ttytest/memtest/默认用户程序。 */
-#define DEBUG_SIGNAL_TEST 1
+#define DEBUG_SIGNAL_TEST 0
+
+/* 时间与杂项 syscall 验证：置 1 时先在 ramdisk 塞好 /argvtest，再 fork 一个
+ * user/timetest.c 编译出的用户程序，端到端触发 clock_gettime/getres/settime、
+ * gettimeofday、nanosleep/clock_nanosleep（含 TIMER_ABSTIME 与被 SIGALRM 打断时
+ * 回填 rem）、setitimer/getitimer 的单次与周期定时器、uname/umask/times/
+ * sched_yield/set_tid_address/身份四件套，以及 execve 传 argv/envp（由 /argvtest
+ * 自校验 argc/argv/envp/auxv 与 sp 对齐，退出码即失败条数）。
+ * 串口应看到 "=== argvtest done: ..." 与 "=== timetest done: N pass  0 fail ==="。
+ * 置 1 时不跑 exectest/filetest/pipetest/ttytest/memtest/sigtest/默认用户程序。 */
+#define DEBUG_TIME_TEST 1
 
 /* PTE A/D 位实测探针：置 1 时在 hart0 初始化阶段（trap_init 之后）跑
  * vmm_probe_pte_ad()，判定本平台是硬件自动置位 A/D 还是软件管理。

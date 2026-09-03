@@ -126,9 +126,18 @@ void wakeup(pcb_t *proc);
  *              按自己的语义决定（比如信号量等待用 UNINTERRUPTIBLE）。 */
 void sleep(pcb_t *proc, sta_t state);
 
-/* 当前任务定时睡眠 ticks 个 tick_get_os_tick() 单位后被 tick 中断唤醒；
- * 期间从就绪队列摘下，不占用 CPU（区别于 tick_delay() 的忙等自旋）。 */
+/* 当前任务定时睡眠 ns 纳秒后被 tick 中断唤醒；期间从就绪队列摘下，不占用 CPU
+ * （区别于 tick_delay() 的忙等自旋）。**到期检查点是每个 tick 一次**，所以实际
+ * 睡眠时长会向上取整到 tick 边界；纳秒时基买到的是"剩余时间可以算准"。
+ * 可被信号唤醒（置 INTERRUPTIBLE）——返回后调用者应自行检查 signal_pending()。 */
+void sched_sleep_ns(uint64_t ns);
+/* 同上，以 tick 为单位。 */
 void sched_sleep_ticks(uint64_t ticks);
+/* 把任务从 sleeping_tasks 上摘下来；幂等（不在链上时是空操作）。
+ * **被信号唤醒的定时睡眠必须走这里**：signal_send() 只把任务置 RUNNING 并入就绪
+ * 队列，节点仍留在 sleeping_tasks 上，到点 sched_check_timers() 会对同一个 pcb
+ * 再 list_del + wakeup 一次（若进程已退出，pcb 已还给 slab，就是拿悬空指针操作链表）。 */
+void sched_timer_remove(pcb_t *p);
 /* 由 tick_int_handler() 每次 tick 调用：唤醒 sleeping_tasks 中已到期的任务。 */
 void sched_check_timers(void);
 

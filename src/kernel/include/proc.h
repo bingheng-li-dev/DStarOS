@@ -133,8 +133,25 @@ struct proc_control_block
     struct list_head proc_wait_linker;   /* 挂入等待队列（信号量 / wait）的节点 */
 
     /* ==================== 定时唤醒相关 ==================== */
-    uint64_t proc_wake_tick;             /* 到期时刻（tick_get_os_tick() 单位），仅挂在 sleeping_tasks 期间有效 */
-    struct list_head proc_timer_linker;  /* 挂入 sleeping_tasks 排序链表的节点 */
+    /* 到期时刻（ktime_get_ns() 时基的绝对纳秒），仅挂在 sleeping_tasks 期间有效。
+     * 用纳秒而不是 tick 计数，不是为了到期精度（检查点仍是每 tick 一次），而是
+     * nanosleep 被信号打断时必须回填准确的剩余时间，tick 粒度下只能给出 ±5 ms。 */
+    uint64_t proc_wake_time_ns;
+    /* 挂入 sleeping_tasks 排序链表的节点。**空链表状态（list_empty）是
+     * sched_timer_remove() 幂等的唯一判据**，所以入链前、摘链后都必须维护它。 */
+    struct list_head proc_timer_linker;
+
+    /* ==================== ITIMER_REAL 定时器 ==================== */
+    uint64_t proc_alarm_expire_ns;       /* 到期的绝对时刻，0 = 未装定时器 */
+    uint64_t proc_alarm_interval_ns;     /* 周期，0 = 单次 */
+    /* 挂入 ktime.c 的 alarm_list 的节点。与 proc_timer_linker 分开是必须的：
+     * 一个进程可以同时睡在 nanosleep 里、又装着定时器，共用一个节点等于挂两条链。 */
+    struct list_head proc_alarm_linker;
+
+    /* ==================== 杂项 ==================== */
+    uint16_t proc_umask;                 /* 文件创建掩码，fork 继承、exec 保留 */
+    uint64_t proc_clear_child_tid;       /* set_tid_address 存下的用户指针；不做退出时的 futex 唤醒 */
+    uint64_t proc_sum_exec_runtime_children; /* 已收割子进程的累计执行时间之和，times() 的 tms_cutime */
 };
 
 struct proc_pid_map
@@ -152,7 +169,7 @@ void do_exit(int16_t error_code) __attribute__((noreturn));
 /* 被信号杀死的退出路径：wait status 的低 7 位是信号号，而不是 (code<<8) */
 void do_exit_signal(int sig) __attribute__((noreturn));
 int16_t do_wait(int16_t pid, int *status);
-int do_exec(intstkf_t *sp, const char *path);
+int do_exec(intstkf_t *sp, const char *path, char *const *argv, char *const *envp);
 int16_t create_kernel_thread_by_fork(void *func(void *), void *args, uint32_t clone_flags);
 /* 按 pid 查找 pcb（find_proc_by_pid 的公开包装）；未找到返回 NULL。
  * @note 内部自取 proc_list_lock，**调用者不得已经持有它**（自旋锁不可重入）。 */

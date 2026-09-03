@@ -16,7 +16,7 @@ static inline virAddr_t round_up_page(virAddr_t va)
     return (va + PGSIZE - 1) & ~(PGSIZE - 1);
 }
 
-int elf_load(mm_t *mm, const unsigned char *image, uint64_t size, virAddr_t *entry)
+int elf_load(mm_t *mm, const unsigned char *image, uint64_t size, elf_info_t *info)
 {
     Elf64_Ehdr *ehdr = (Elf64_Ehdr *)image; /* 文件头在image最开头 */
 
@@ -59,15 +59,28 @@ int elf_load(mm_t *mm, const unsigned char *image, uint64_t size, virAddr_t *ent
     /* 程序头表在 e_phoff 处；PT_LOAD 段的内容在 image + phdr[i].p_offset 处 */
     Elf64_Phdr *phdr_base = (Elf64_Phdr *)(image + ehdr->e_phoff);
     virAddr_t max_end = 0;
+    /* AT_PHDR 的两条求法，优先 PT_PHDR（GNU ld 通常会生成），否则退回
+     * "覆盖了 e_phoff 的那个 PT_LOAD 段" */
+    virAddr_t pt_phdr_va = 0;
+    virAddr_t phdr_in_load_va = 0;
     /* 遍历 e_phnum 个 Elf64_Phdr，处理 PT_LOAD 可加载段
      * 注意：调用者需保证各 PT_LOAD 段按页对齐、互不共享物理页（见 lds/user.ld 的段间对齐），
      * 本函数按段独立建 VMA 并映射，不处理多个段共享同一物理页的场景。 */
     for (int i = 0; i < ehdr->e_phnum; i++)
     {
         Elf64_Phdr *ph = &phdr_base[i];
+        if (ph->p_type == PT_PHDR)
+        {
+            pt_phdr_va = ph->p_vaddr;
+        }
         if (ph->p_type != PT_LOAD)
         {
             continue; /* 只处理加载段 */
+        }
+        /* 程序头表通常落在第一个 PT_LOAD 段里（它从文件偏移 0 开始映射） */
+        if (ehdr->e_phoff >= ph->p_offset && ehdr->e_phoff < ph->p_offset + ph->p_filesz)
+        {
+            phdr_in_load_va = ph->p_vaddr + (ehdr->e_phoff - ph->p_offset);
         }
 
         /* 段内容必须落在 [0, size) 内，否则下面的 memcpy 会读到 image 缓冲区之外。
@@ -136,7 +149,11 @@ int elf_load(mm_t *mm, const unsigned char *image, uint64_t size, virAddr_t *ent
             max_end = vma->vm_end;
         }
     }
-    *entry = ehdr->e_entry; /* 输出程序入口地址 */
+    info->entry   = ehdr->e_entry;
+    info->phdr_va = (pt_phdr_va != 0) ? pt_phdr_va : phdr_in_load_va;
+    /* 求不出程序头表地址时 phnum 必须一起清零，见 elf_info_t 的注释 */
+    info->phent   = (info->phdr_va != 0) ? ehdr->e_phentsize : 0;
+    info->phnum   = (info->phdr_va != 0) ? ehdr->e_phnum : 0;
 
     /* 堆 VMA 一次性建到最大尺寸，实际可访问边界由 mm->brk_current 单独控制
      * （vmm_vma_get 对 VMA_HEAP 有 va >= brk_current 即越界的特判），

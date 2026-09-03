@@ -6,23 +6,15 @@
 #include "encoding.h"
 #include "sched.h"
 #include "tty.h"
+#include "ktime.h"
 
 #define OS_TICK cpu_get_by_index(0)->tick
 
 osslock_t tick_lock;
-/* timebase 单位是 time CSR 的计数值，需按平台实际主频折算出 200 Hz（5 ms 一个 tick）：
- * QEMU virt 的 time CSR 为 10 MHz（-machine dumpdtb 导出的 timebase-frequency 实测确认）；
- * K210 无 time CSR，由 rustsbi-k210 模拟 CLINT mtime，频率对应其 390 MHz 主频折算。
- * 二者不可混用同一个常量——此前长期沿用 K210 的折算值在 QEMU 上运行，实际 tick 周期
- * 变成约 0.195 秒（~5 Hz），仅在此前从未依赖低延迟轮询的场景下未被察觉。
- * @todo 若日后硬件选型定为 VisionFive 2（JH7110），需按其 time CSR 实际频率
- *   （SoC 手册/设备树 timebase-frequency 实测值，不是 K210 的 390 MHz）新增一个
- *   平台分支，不可直接套用下面任一现有值。 */
-#ifdef QEMU
-static uint64_t timebase = (10000000 / 200);
-#else
-static uint64_t timebase = (390000000 / 200);
-#endif
+/* 频率常量与 tick 频率见 tick.h 的 TIMEBASE_FREQ_HZ / TICK_HZ——那里也解释了
+ * 两个平台的折算值为何不可混用。clock_gettime 需要的是频率本身，所以常量必须
+ * 有名字、不能只以除法结果的形式存在。 */
+static uint64_t timebase = TICK_PERIOD_COUNTS;
 
 static void tick_set_next_int(uint64_t stime)
 {
@@ -63,6 +55,7 @@ void tick_int_handler(void)
     sched_task_tick();
     tty_poll_input();
     sched_check_timers();
+    ktime_check_alarms();
     tick_set_next_int(timebase);
 }
 

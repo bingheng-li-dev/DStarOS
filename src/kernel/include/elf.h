@@ -47,6 +47,10 @@
 #define PT_LOAD    1
 #define PT_DYNAMIC 2
 #define PT_INTERP  3
+#define PT_NOTE    4
+#define PT_SHLIB   5
+#define PT_PHDR    6
+#define PT_TLS     7
 
 /* 段权限标志 */
 #define PF_R		0x4
@@ -94,6 +98,21 @@ struct elf64_phdr {
 };
 typedef struct elf64_phdr Elf64_Phdr;
 
-int elf_load(mm_t *mm, const unsigned char *image, uint64_t size, virAddr_t *entry);
+/**
+ * @brief elf_load 的出参：进入新程序所需的全部信息
+ * @details phdr_va 是**程序头表在新地址空间里的虚拟地址**，不是文件偏移；
+ *   musl 的 __init_tls 靠 AT_PHDR/AT_PHENT/AT_PHNUM 找 PT_TLS 段。
+ *   求不出来时 phdr_va 与 phnum **一起**置 0——要么全对要么全 0，
+ *   填一半会让 musl 拿着假地址去解引用。
+ */
+typedef struct elf_info
+{
+    virAddr_t entry;    /* 程序入口，即 e_entry */
+    virAddr_t phdr_va;  /* 程序头表的用户虚拟地址；0 表示求不出 */
+    uint16_t  phent;    /* 单个程序头的字节数，即 e_phentsize */
+    uint16_t  phnum;    /* 程序头个数；phdr_va 为 0 时本字段同为 0 */
+} elf_info_t;
+
+int elf_load(mm_t *mm, const unsigned char *image, uint64_t size, elf_info_t *info);
 
 #endif
