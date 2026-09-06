@@ -1,2 +1,2 @@
-docker run -itd -v D:\riscv-os\DStarOS\:/root/riscv/DStarOS -v D:\riscv-os\riscv-os\toolchain-kendryte210:/root/riscv/toolchain-kendryte210 --name dstar-v3 riscv-os-devkit:v3
-docker exec -it dstar-v3 /bin/bash
+docker run -itd -v D:\riscv-os\DStarOS\:/root/riscv/DStarOS -v D:\riscv-os\riscv-os\toolchain-kendryte210:/root/riscv/toolchain-kendryte210 --name dstar-v4 riscv-os-devkit:v4
+docker exec -it dstar-v4 /bin/bash
