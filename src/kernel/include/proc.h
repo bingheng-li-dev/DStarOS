@@ -26,6 +26,24 @@ struct sched_class;
 #define PNAME_MAX_LENGTH 64
 #define KERNEL_STACKPSIZE 1
 #define KERNRL_STKSIZE KERNEL_STACKPSIZE *PGSIZE
+
+/* 内核栈**最高的这些字节不作栈用**，留作 per-hart 记账区：[栈顶, 栈顶+8) 存
+ * "本任务当前跑在哪个 hart 上"。`trap_return` 返回 U 态前写进去，`trap_entry`
+ * 从 U 态进来时读回 `tp`。
+ *
+ * 为什么需要它：内核拿 `tp` 当 hart 号用（`cpu_get_core_id_asm()` 直接读 tp，
+ * `cpu_get_current()` = `&cpus[tp]`），而 **`tp` 在 RISC-V 上是用户可写的普通寄存器**
+ * ——musl 的 `__set_thread_area` 就是一条 `mv tp, a0`，纯寄存器写、不走 syscall，
+ * 内核根本无从察觉。用户一旦把 tp 改成自己的 TLS 指针，之后每次陷入内核，
+ * `cpus[tp]` 就是野指针。这个不变式此前只是靠"手写的用户程序碰巧不碰 tp"维持着。
+ *
+ * 取 16 而不是 8：RISC-V psABI 要求栈指针 16 字节对齐，保留区大小必须是 16 的倍数，
+ * 否则下移后的栈顶会破坏对齐。 */
+#define KSTACK_RESERVED 16
+
+/* 供 trap 使用的内核栈顶（sscratch 存的就是它）。注意**不是**分配区的末端：
+ * 最高 KSTACK_RESERVED 字节被保留区占着。 */
+#define PROC_KSTACK_TOP(pcb) ((uintptr_t)((pcb)->kernel_stack + KERNRL_STKSIZE - KSTACK_RESERVED))
 #define PID_MAX_VALUE (((int16_t)1 << 15) - 2) /* 0 <= PID <= PID_MAX_VALUE*/
 #define PROC_MAX_AMOUNT (PID_MAX_VALUE / 2)    /* 1(idle) <= task_count <= PROC_MAX_AMOUNT */
 #define NOFILE 16

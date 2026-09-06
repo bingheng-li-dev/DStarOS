@@ -916,7 +916,7 @@ static int16_t copy_proc_mm(uint32_t clone_flags, pcb_t *pcb)
 
 static void copy_proc_stk(pcb_t *pcb, uintptr_t stack, intstkf_t *regs)
 {
-    pcb->proc_int_stack = (intstkf_t *)(pcb->kernel_stack + KERNRL_STKSIZE - sizeof(intstkf_t));
+    pcb->proc_int_stack = (intstkf_t *)(PROC_KSTACK_TOP(pcb) - sizeof(intstkf_t));
     *(pcb->proc_int_stack) = *(regs);
     /* For child process,"fork" returns 0. */
     pcb->proc_int_stack->x10_a0 = 0;
@@ -1539,7 +1539,8 @@ static void print_ctx_stk(ctx_t *ctx)
  *   在内核栈顶伪造一个 trap 帧，使硬件以为这是一次正常的 trap 返回，从而以 U 态身份
  *   跳入用户入口。具体步骤：
  *
- *   1. 在内核栈顶（kernel_stack + KERNRL_STKSIZE）向下划出 sizeof(intstkf_t) 空间，
+ *   1. 在 trap 栈顶（PROC_KSTACK_TOP，即分配区末端再减去 KSTACK_RESERVED）向下
+ *      划出 sizeof(intstkf_t) 空间，
  *      清零后填写关键字段：
  *        - sepc    = entry        （sret 后 PC 跳至用户入口）
  *        - x2_sp   = ustack       （用户栈顶）
@@ -1564,12 +1565,15 @@ void enter_user_mode(virAddr_t entry, virAddr_t ustack)
 
     pcb_t *cur = proc_get_current();
     /* 由高地址向低地址开辟帧空间，不会覆盖原有数据，因为该函数noreturn，原栈空间数据已无用 */
-    intstkf_t *f = (intstkf_t *)(cur->kernel_stack + KERNRL_STKSIZE - sizeof(intstkf_t));
+    intstkf_t *f = (intstkf_t *)(PROC_KSTACK_TOP(cur) - sizeof(intstkf_t));
 
     memset(f, 0, sizeof(intstkf_t));
     f->sepc    = entry;
     f->x2_sp   = ustack;
-    f->x4_tp   = cpu_get_core_id();
+    /* 用户的 tp 归用户：它是 TLS 指针（musl 的 __init_tls 会用一条 mv tp,a0 设好它），
+     * 不是内核的 hart 号。以前这里塞 hart 号，是因为内核靠 tp 认 hart 而 trap_entry
+     * 又不重设它——那个不变式现在由内核栈顶的保留槽维持（见 KSTACK_RESERVED）。 */
+    f->x4_tp   = 0;
     /* **`~SSTATUS_SIE` 不能少**（2026-09-03 修掉的一个真 bug）。这个帧是软件凭空造的，
      * `read_csr(sstatus)` 取自一个普通内核线程，此刻 SIE=1；而 `trap_return` 会在
      * `sret` 之前几条指令处 `csrw sstatus, ra` 把它整个写回去——于是**中断在 S 态被重新

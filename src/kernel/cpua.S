@@ -22,9 +22,26 @@ trap_entry:
     csrrw sp, sscratch, sp  # 交换：来自 U 则 sp←内核栈顶, sscratch←用户sp；来自 S 则 sp←0, sscratch←内核sp
     bnez sp, 1f             # sp != 0 → 来自 U 态（sscratch 原本存内核栈顶）
     csrr  sp, sscratch      # 来自 S 态：sscratch 现含触发时的内核 sp，装回 sp（不再交换回去）
+    addi  sp,  sp, -35 * REGBYTES
+    sd    tp, 4*REGBYTES(sp)    # 来自 S 态：tp 本来就是 hart 号，原样存下（返回 S 态时不恢复）
+    j 2f
 
 1:
+    # 来自 U 态：**tp 现在是用户的值，必须换回本 hart 的编号**。
+    # 内核拿 tp 当 hart 号（cpu_get_core_id_asm 直接读 tp、cpu_get_current() = &cpus[tp]），
+    # 而 tp 在 RISC-V 上是用户可写的普通寄存器——musl 的 __set_thread_area 就是一条
+    # mv tp,a0，纯寄存器写、不走 syscall。带着用户的 tp 往下跑，第一次
+    # proc_get_current() 就会去解引用 cpus[用户TLS指针]。
+    # **次序要紧**：必须先把用户的 tp 存进帧、再覆盖它。反过来写的话帧里存的就成了
+    # hart 号，返回 U 态时把 hart 号当成 TLS 指针还给用户，musl 的 __init_ssp 会拿它
+    # 去写 tp-16（实测 va=0xfffffffffffffff0）。
     addi  sp,  sp, -35 * REGBYTES
+    sd    tp, 4*REGBYTES(sp)    # 先存用户的 tp，返回 U 态时要原样还给它
+    # 再从内核栈顶的保留槽取回本 hart 号（见 proc.h 的 KSTACK_RESERVED）。
+    # 该槽由 trap_return 在上一次返回 U 态之前写好；压帧后栈顶在 35*REGBYTES(sp) 处。
+    ld    tp, 35*REGBYTES(sp)
+
+2:
 
     sd ra, 1*REGBYTES(sp)
 
@@ -35,7 +52,7 @@ trap_entry:
     sd ra, 2*REGBYTES(sp)
 
     sd gp, 3*REGBYTES(sp)
-    sd tp, 4*REGBYTES(sp)
+    # tp 已在上面按 U/S 两条路径分别存过，这里不重复
     sd t0, 5*REGBYTES(sp)
     sd t1, 6*REGBYTES(sp)
     sd t2, 7*REGBYTES(sp)
@@ -94,11 +111,17 @@ trap_return:
     andi t1, t0, SSTATUS_SPP    # t1 = t0 & SSTATUS_SPP（0x0100），按位与后t1=0x100或0x000
     bnez t1, 1f                 # 0为U态，1为S态
     addi t2, sp, 35*REGBYTES    # 返回 U 态：sscratch ← 内核栈顶
+    sd tp, 0(t2)                # 把本 hart 号存进栈顶保留槽，供下次 trap_entry 取回
     csrw sscratch, t2
+    # 恢复**用户自己的** tp（TLS 指针）。必须排在上面那条 sd 之后：那条用的是内核的 tp。
+    # 从这里到 sret 之间没有任何代码读 tp，而且中断已经关了（上面的 csrci），
+    # 所以带着用户的 tp 走完这段尾巴是安全的。
+    ld tp, 4*REGBYTES(sp)
     j 2f
-    
+
 1:
     csrw sscratch, zero         # 返回 S 态：sscratch ← 0
+                                # 不恢复 tp：S 态继续用内核的 hart 号，理由见下方注释
 
 2:
     ld ra, 32*REGBYTES(sp)
@@ -110,15 +133,18 @@ trap_return:
     ld ra, 1*REGBYTES(sp)
 
     ld gp, 3*REGBYTES(sp)
-    # 故意不恢复 tp：tp 存的是"当前在哪个 hart 上跑"（cpu_get_core_id_asm 直接读 tp，
-    # cpu_get_current() = &cpus[tp]），它描述的是物理执行位置，不是任务的私有状态。
-    # 帧里那份 tp 可能是陈旧的：① do_fork 把父进程的帧整体复制给子进程，帧里带的是
-    # 父进程当时所在的 hart 号，子进程很可能被另一个 hart 取走执行；② 任务在系统调用
-    # 中途被换出、由另一个 hart 换回来时，帧里仍是换出前那个 hart 号。恢复它会让代码
-    # 在 hart A 上运行却去读写 hart B 的 per-CPU 状态（irq_disable_nesting 计数错乱、
-    # proc_get_current() 拿到另一个 hart 的当前任务）。
-    # tp 仅在启动时被set一次，其描述的是"这是哪个物理核"，因此 switch_to 不保存/恢复 tp
-    # ld tp, 4*REGBYTES(sp)
+    # 这里不恢复 tp——**返回 U 态那条路已经在上面单独恢复过了**，走到这里的只剩
+    # "返回 S 态"，而 S 态必须继续用内核的 hart 号。
+    #
+    # tp 在本内核里有两重身份，按特权级切换：
+    #   S 态：当前 hart 的编号（cpu_get_core_id_asm 直接读 tp，cpu_get_current() = &cpus[tp]）；
+    #   U 态：用户自己的 TLS 指针，内核不解释它。
+    # 所以帧里那份 tp 只对"返回 U 态"有意义。对 S 态它是陈旧的：① do_fork 把父进程的帧
+    # 整体复制给子进程，帧里带的是父进程当时所在的 hart 号，子进程很可能被另一个 hart
+    # 取走执行；② 任务在系统调用中途被换出、由另一个 hart 换回来时，帧里仍是换出前那个
+    # hart 号。在这里恢复它会让代码在 hart A 上运行却去读写 hart B 的 per-CPU 状态
+    # （irq_disable_nesting 计数错乱、proc_get_current() 拿到另一个 hart 的当前任务）。
+    # switch_to 同理不保存/恢复 tp。
     ld t0, 5*REGBYTES(sp)
     ld t1, 6*REGBYTES(sp)
     ld t2, 7*REGBYTES(sp)
