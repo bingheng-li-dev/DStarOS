@@ -45,6 +45,16 @@ struct bestfitFrameAllocator /* Best fit,it allows to allocate a continuous bloc
     void (*bffa_insertAndMerge)(pframe_t *baseppn, uint16_t nsize);
 };
 
+/* PMM 全程用 uint16_t 记页数（pframe_t.nsize、fslist_t.fnsize、alloc() 的形参、
+ * pmm_init 里的 cursor），**这个宽度直接决定了能管理多少物理内存**：
+ * 页数一旦超过 65535 就静默回绕，PageListBegin 数组按回绕后的小值分配，
+ * 此后对高位页帧的每一次访问都是越界写，且不会有任何护栏接住。
+ * 这条约束此前只隐含在类型里，谁都看不见，所以在这里钉成编译期断言。 */
+#define PMM_MAX_PAGES ((uint64_t)UINT16_MAX)
+
+_Static_assert((MEMORY_END - KERNEL_START) / PGSIZE <= PMM_MAX_PAGES,
+               "MEMORY_END too large: page count overflows the uint16_t counters in pmm.c");
+
 /* Each pframe maps a ppn/pa,use convert_pframe2ppn/pa to covert. */
 extern pframe_t *PageListBegin;
 extern fslist_t FreeList;

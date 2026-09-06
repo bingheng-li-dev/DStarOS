@@ -17,7 +17,7 @@
 #For RustSBI v0.4.0
 qemu-system-riscv64 \
     -M  virt \
-    -m  8M   \
+    -m  128M   \
     -bios ./bootloader/RustSBI/v0.4.0/rustsbi-prototyper-dynamic.elf \
     -smp 2  \
     -kernel build/kernel.elf    \

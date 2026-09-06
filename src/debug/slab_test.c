@@ -20,7 +20,17 @@
 #define SLAB_TEST_MAX_OBJS 400
 #define SLAB_TEST_BIG_PAGES 16   /* 耗尽用例每块的页数 */
 
+/* 耗尽用例的块数上限。**必须大于"全部空闲内存能切出多少块"**，否则循环先撞上限退出，
+ * `n1 < 上限` 那条断言就失去了意义——它验的是 kmalloc 在真正耗尽时安静返回 NULL，
+ * 而不是撞上 alloc() 的 panic。这里按 MEMORY_END 推导而不是写死：原先复用
+ * SLAB_TEST_MAX_OBJS（400 块 × 16 页 = 25 MB）在 6 MB 物理内存下成立，
+ * 2026-09-06 把内存抬到 110 MB 之后就恒撞上限、3/3 必失败。 */
+#define SLAB_TEST_MAX_BLOCKS \
+    (((MEMORY_END - KERNEL_START) / PGSIZE) / SLAB_TEST_BIG_PAGES + 16)
+
 static void *test_objs[SLAB_TEST_MAX_OBJS];
+/* 耗尽用例专用，与 test_objs 分开：两者的容量判据完全不同（见 SLAB_TEST_MAX_BLOCKS）*/
+static void *test_blocks[SLAB_TEST_MAX_BLOCKS];
 static int slab_pass;
 static int slab_fail;
 
@@ -251,14 +261,14 @@ static void test_fragmentation(void)
 static int exhaust_big_blocks(void)
 {
     int n = 0;
-    while (n < SLAB_TEST_MAX_OBJS)
+    while (n < SLAB_TEST_MAX_BLOCKS)
     {
         void *p = kmalloc(SLAB_TEST_BIG_PAGES * PGSIZE);
         if (p == NULL)
         {
             break;
         }
-        test_objs[n++] = p;
+        test_blocks[n++] = p;
     }
     return n;
 }
@@ -267,8 +277,8 @@ static void release_big_blocks(int n)
 {
     for (int i = 0; i < n; i++)
     {
-        kfree(test_objs[i]);
-        test_objs[i] = NULL;
+        kfree(test_blocks[i]);
+        test_blocks[i] = NULL;
     }
 }
 
@@ -295,7 +305,7 @@ static void test_reclaim(void)
      * panic("Frame has not been allocated!")，现在应当安静地返回 NULL */
     int n1 = exhaust_big_blocks();
     uint16_t low1 = FreeList.fnsize;
-    expect(n1 > 0 && n1 < SLAB_TEST_MAX_OBJS, "kmalloc returns NULL on exhaustion instead of panic");
+    expect(n1 > 0 && n1 < SLAB_TEST_MAX_BLOCKS, "kmalloc returns NULL on exhaustion instead of panic");
     release_big_blocks(n1);
 
     /* 判据是"再来一轮还能不能拿到同样多的块"，而不是把全局空闲页数跟快照对齐。

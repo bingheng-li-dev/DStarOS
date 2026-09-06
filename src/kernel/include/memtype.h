@@ -50,8 +50,27 @@ extern char ebss[];      /* .bss 段结束 */
 #define KERNEL_START ((phyAddr_t)(0x80200000)) /* 使用绝对值而非skernel，避免开启MMU后计算整个内存布局错误 */
 /* 内核占用物理内存的末端，必须从链接符号读取。 */
 #define KERNEL_END ((phyAddr_t)ekernel)
-/* k210物理内存末端 */
-#define MEMORY_END ((phyAddr_t)(0x80800000))
+
+/* 物理内存布局（QEMU virt）：
+ *
+ *   0x80000000  ┌────────────────┐  RAM 起点，RustSBI 占 0x80000000~0x80200000
+ *   0x80200000  ├────────────────┤  KERNEL_START：内核镜像 + PMM 页帧元数据
+ *               │   PMM 页帧池    │
+ *   0x87000000  ├────────────────┤  MEMORY_END：PMM 管到这里为止（不含）
+ *               │  rootfs 预留区  │  ROOTFS_PHYS_BASE，QEMU -device loader 装到这里
+ *   0x88000000  └────────────────┘  RAM 终点，见 scripts/run.sh 的 -m
+ *
+ * rootfs 预留区**故意放在 MEMORY_END 之外**：PMM 的页帧池只覆盖
+ * [KERNEL_START, MEMORY_END)，天然就不会把这块编进去，pmm.c 一行都不用改。
+ * 这比在池子中间挖洞简单得多，也不容易差一页。
+ *
+ * 改这里任何一个值都要同步改 scripts/run.sh 与 scripts/forgdb.sh 的 -m，
+ * 三者对不上时 QEMU 只会静默给出更小的 RAM，越界访问要到很后面才暴露。
+ *
+ * K210 只有 8 MB SRAM，上板时这几个值必须按平台分支；硬件选型未定，暂不动。 */
+#define MEMORY_END ((phyAddr_t)(0x87000000))
+#define ROOTFS_PHYS_BASE ((phyAddr_t)(0x87000000))
+#define ROOTFS_MAX_SIZE ((uint64_t)(16 * 1024 * 1024))
 /* 内核高位虚拟地址偏移 */
 #define KERNEL_VA_OFFSET 0xffffffc000000000UL /* Sv39 内核高地址区起始 */
 
