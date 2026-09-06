@@ -1,6 +1,6 @@
 #!/bin/bash
 # 回归套件运行器（容器内使用）：bash scripts/regress.sh <suite> [runs]
-#   suite: sched | slab | file | pipe | tty | mem | exec | sig | time
+#   suite: sched | slab | file | pipe | tty | mem | exec | sig | time | seg
 # 切换套件前必须自行改 src/debug/debug.h 里对应的开关（六个 U 态开关互斥）再 make。
 cd "$(dirname "$0")/.." || exit 1
 
@@ -58,6 +58,7 @@ suite_marker()
         mem)   echo '=== memtest done:' ;;
         sig)   echo '=== sigtest done:' ;;
         time)  echo '=== timetest done:' ;;
+        seg)   echo '=== segtest done:' ;;
         exec)  echo 'exectest: child reaped, done' ;;
         *)     echo '' ;;
     esac

@@ -1224,7 +1224,7 @@ static void run_user_program(const unsigned char *elf, unsigned long elf_len)
     enter_user_mode(einfo.entry, user_sp);
 }
 
-#if !DEBUG_EXEC_TEST && !DEBUG_FILE_TEST && !DEBUG_PIPE_TEST && !DEBUG_TTY_TEST && !DEBUG_MEM_TEST && !DEBUG_SIGNAL_TEST && !DEBUG_TIME_TEST
+#if !DEBUG_EXEC_TEST && !DEBUG_FILE_TEST && !DEBUG_PIPE_TEST && !DEBUG_TTY_TEST && !DEBUG_MEM_TEST && !DEBUG_SIGNAL_TEST && !DEBUG_TIME_TEST && !DEBUG_SEG_TEST
 static void run_first_user_program(void)
 {
     run_user_program(user_elf, user_elf_len);
@@ -1337,6 +1337,15 @@ static void seed_argvtest(void)
 }
 #endif
 
+#if DEBUG_SEG_TEST
+static void run_segtest_program(void)
+{
+    extern const unsigned char user_segtest_elf[];
+    extern const unsigned long user_segtest_elf_len;
+    run_user_program(user_segtest_elf, user_segtest_elf_len);
+}
+#endif
+
 static int16_t init(void)
 {
     printf("%s::Hello! I'm the init process!!\n", __FUNCTION__);
@@ -1440,6 +1449,10 @@ static int16_t init(void)
      * 再跑 timetest（不跑其它测试程序与默认用户程序）*/
     seed_argvtest();
     int16_t pid = create_kernel_thread_by_fork((void *)run_timetest_program, NULL, 0);
+#elif DEBUG_SEG_TEST
+    /* 验证 elf_load 对"多个 PT_LOAD 共享同一物理页"的处理：segtest 不依赖 /hello，
+     * 直接跑（不跑其它测试程序与默认用户程序）*/
+    int16_t pid = create_kernel_thread_by_fork((void *)run_segtest_program, NULL, 0);
 #else
     int16_t pid = create_kernel_thread_by_fork((void *)run_first_user_program, NULL, 0);
 #endif

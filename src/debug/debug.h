@@ -127,6 +127,14 @@
  * 置 1 时不跑 exectest/filetest/pipetest/ttytest/memtest/sigtest/默认用户程序。 */
 #define DEBUG_TIME_TEST 1
 
+/* ELF 共享页加载验证：置 1 时 fork 一个 user/segtest.c 编译出的用户程序。
+ * 它由 user/user_dense.ld 链接，两个 PT_LOAD 段的虚拟地址首尾相接、共用中间那一页
+ * ——elf_load 若按"一段一次映射"处理，后一段会给共享页换上一张新的零页，
+ * 把前一段落在该页上的 .rodata 整片抹掉。
+ * 串口应看到 "=== segtest done: 4 pass  0 fail ==="。
+ * 置 1 时不跑其它测试程序与默认用户程序。 */
+#define DEBUG_SEG_TEST 0
+
 /* PTE A/D 位实测探针：置 1 时在 hart0 初始化阶段（trap_init 之后）跑
  * vmm_probe_pte_ad()，判定本平台是硬件自动置位 A/D 还是软件管理。
  * 时钟置换算法依赖硬件自动置位，动手前用它确认，不要照规范假设。
