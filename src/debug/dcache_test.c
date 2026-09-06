@@ -281,7 +281,7 @@ static void test_watermark(void)
 
     drain_all();
     slab_reclaim_all();
-    uint64_t free_before   = FreeList.fnsize;
+    uint64_t free_before   = pmm_free_list.fnsize;
     uint32_t dentry_before = dentry_cache->nr_inuse;
     uint32_t inode_before  = inode_cache->nr_inuse;
 
@@ -318,7 +318,7 @@ static void test_watermark(void)
     expect(st.nr_unused >= DCACHE_LOW_WATER, "batch shrink does not over-collect");
     expect(st.evicts > 0, "watermark actually triggered eviction");
 
-    uint64_t free_peak = FreeList.fnsize;
+    uint64_t free_peak = pmm_free_list.fnsize;
     expect(free_peak < free_before, "a full cache really does occupy memory");
 
     /* 回收之后再访问同一批路径仍然功能正确，只是变成 miss */
@@ -350,7 +350,7 @@ static void test_watermark(void)
     /* 空闲页数只与"缓存最满的那一刻"比：hart 1 会在 main() 里跑 vmm_test，在测量
      * 窗口内借还整页，直接跟 free_before 对齐会偶发差几页，那是另一个 hart 的账。
      * "有没有泄漏"的精确判据是上面两条 nr_inuse，这里只确认页确实吐回去了。 */
-    uint64_t free_after = FreeList.fnsize;
+    uint64_t free_after = pmm_free_list.fnsize;
     expect(free_after > free_peak, "cache pages went back to the PMM");
     printf("[dcachetest] free pages: before=%ld peak=%ld after=%ld\n",
            free_before, free_peak, free_after);

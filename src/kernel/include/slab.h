@@ -37,7 +37,7 @@ void slab_dump_stats(void);
 /* 通用尺寸类入口，size 超过 SLAB_MAX_OBJ_SIZE 时返回 NULL，由调用方回退到整页路径 */
 kmem_cache_t *slab_size_cache(uint64_t size);
 
-/* alloc_page() 失败时先 slab_reclaim_all() 再重试一次；调用者不得持有 PmmLock */
+/* pmm_alloc_page() 失败时先 slab_reclaim_all() 再重试一次；调用者不得持有 pmm_lock */
 pframe_t *slab_alloc_page_retry(void);
 
 extern kmem_cache_t *vma_cache;

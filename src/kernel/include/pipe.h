@@ -4,7 +4,7 @@
 #include "memtype.h" /* PGSIZE */
 #include "sync.h"    /* osslock_t, waitq_t */
 #include "types.h"   /* ssize_t, size_t */
-#include "pmm.h"     /* pframe_t, alloc_page, dealloc */
+#include "pmm.h"     /* pframe_t, pmm_alloc_page, pmm_free_pages */
 
 struct file;
 typedef struct file file_t;
@@ -22,8 +22,8 @@ typedef struct file file_t;
 typedef struct pipe
 {
     osslock_t lock;     /* 保护以下全部字段，也保护两条等待队列 */
-    char     *buf;      /* 一页环形缓冲，alloc_page() 得来 */
-    pframe_t *buf_frame; /* buf 对应的原始页帧，释放时精确对应 dealloc()——
+    char     *buf;      /* 一页环形缓冲，pmm_alloc_page() 得来 */
+    pframe_t *buf_frame; /* buf 对应的原始页帧，释放时精确对应 pmm_free_pages()——
                           * pmm.h 没有 kva 反推 pframe_t* 的函数，必须自己存一份 */
     uint32_t  head;     /* 下一个写入位置（模 PIPE_SIZE） */
     uint32_t  tail;     /* 下一个读出位置（模 PIPE_SIZE） */

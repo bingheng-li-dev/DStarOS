@@ -30,7 +30,7 @@
 extern void sched_test_check(const char *name, int cond);
 
 /* 手工初始化一个 pipe_t：buf 用 kmalloc(PIPE_SIZE)，测试场景不追求走
- * alloc_page（那是整页分配器的事，与 pipe_read 本身的逻辑无关），语义等价。 */
+ * pmm_alloc_page（那是整页分配器的事，与 pipe_read 本身的逻辑无关），语义等价。 */
 static void pipe_test_init(pipe_t *p, int writers)
 {
     memset(p, 0, sizeof(*p));

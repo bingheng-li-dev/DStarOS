@@ -19,7 +19,7 @@ static void *kmalloc_once(uint64_t size)
         return slab_cache_alloc(cache);
     }
 
-    pframe_t *frame = alloc(convert_pa2ppn_cil((phyAddr_t)size));
+    pframe_t *frame = pmm_alloc_pages(convert_pa2ppn_cil((phyAddr_t)size));
     if (frame == NULL)
     {
         return NULL;
@@ -27,8 +27,8 @@ static void *kmalloc_once(uint64_t size)
     return (void *)convert_pframe2kva(frame);
 }
 
-/* reclaim 必须留在这一层：alloc() 内部持着 PmmLock，就地调 slab_reclaim_all()
- * 既是对非重入锁的二次 acquire，锁序也与 cache->lock → PmmLock 恰好相反。 */
+/* reclaim 必须留在这一层：pmm_alloc_pages() 内部持着 pmm_lock，就地调 slab_reclaim_all()
+ * 既是对非重入锁的二次 acquire，锁序也与 cache->lock → pmm_lock 恰好相反。 */
 void *kmalloc(uint64_t size)
 {
     void *ptr = kmalloc_once(size);
@@ -53,7 +53,7 @@ void kfree(void *ptr)
     pframe_t *frame = convert_pa2pframe_flr(kva_to_pa((virAddr_t)ptr));
     if (frame->slab_cache == NULL)
     {
-        dealloc(frame);
+        pmm_free_pages(frame);
     }
     else
     {

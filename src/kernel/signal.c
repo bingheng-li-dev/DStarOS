@@ -57,7 +57,7 @@ void signal_init(void)
         panic("signal_init: cannot create sighand cache");
     }
 
-    sigpage_frame = alloc(1);
+    sigpage_frame = pmm_alloc_pages(1);
     if (sigpage_frame == NULL)
     {
         panic("signal_init: cannot allocate sigpage");

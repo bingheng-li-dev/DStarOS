@@ -25,10 +25,10 @@ void vmm_test(void)
 {
     printf("\n=== VMM test ===\n");
 
-    /* --- 测试 1：alloc_page + KVA 读写 ---
+    /* --- 测试 1：pmm_alloc_page + KVA 读写 ---
      * 验证偏移映射建立正确：通过 pa_to_kva 取得的高位 VA 可以正常读写物理帧 */
-    pframe_t *frame = alloc_page();
-    check("alloc_page not NULL", frame != NULL);
+    pframe_t *frame = pmm_alloc_page();
+    check("pmm_alloc_page not NULL", frame != NULL);
     if (frame)
     {
         volatile uint64_t *p = (volatile uint64_t *)convert_pframe2kva(frame);
@@ -36,7 +36,7 @@ void vmm_test(void)
         p[1] = 0x0123456789abcdefUL;
         check("KVA p[0] write/read", p[0] == 0xdeadbeefcafe1234UL);
         check("KVA p[1] write/read", p[1] == 0x0123456789abcdefUL);
-        dealloc(frame);
+        pmm_free_pages(frame);
     }
 
     /* --- 测试 2：VMA 插入与查找 ---

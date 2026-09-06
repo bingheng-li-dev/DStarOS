@@ -147,7 +147,7 @@ kmem_cache_t *slab_size_cache(uint64_t size)
  * @param[in,out] cache 目标 cache
  * @retval NULL 物理内存耗尽
  * @return 已清零的对象地址（KVA）
- * @details 锁序固定为 cache->lock → PmmLock，因此向 PMM 要页之前必须先放开
+ * @details 锁序固定为 cache->lock → pmm_lock，因此向 PMM 要页之前必须先放开
  *   cache->lock。放锁期间另一个 hart 可能已经补上了页，所以拿回锁后一律回到
  *   循环开头重判，新页只作为保留页安置，绝不直接使用。
  */
@@ -177,7 +177,7 @@ void *slab_cache_alloc(kmem_cache_t *cache)
         }
 
         spinlock_release(&cache->lock, cache_lock_key);
-        pframe_t *fresh = alloc_page();
+        pframe_t *fresh = pmm_alloc_page();
         irq_key_t cache_lock_key = spinlock_acquire(&cache->lock);
         if (fresh == NULL)
         {
@@ -193,7 +193,7 @@ void *slab_cache_alloc(kmem_cache_t *cache)
         else
         {
             spinlock_release(&cache->lock, cache_lock_key);
-            dealloc(fresh);
+            pmm_free_pages(fresh);
             /* 重新取锁：赋值给循环外的 key，不能再声明一个同名局部把它遮蔽掉 */
             cache_lock_key = spinlock_acquire(&cache->lock);
         }
@@ -239,7 +239,7 @@ void slab_cache_free(kmem_cache_t *cache, pframe_t *frame, void *obj)
             frame->slab_freelist = NULL;
             cache->nr_slabs--;
             spinlock_release(&cache->lock, cache_lock_key);
-            dealloc(frame);
+            pmm_free_pages(frame);
             return;
         }
     }
@@ -254,7 +254,7 @@ void slab_cache_free(kmem_cache_t *cache, pframe_t *frame, void *obj)
 /**
  * @name slab_reclaim_all
  * @brief 把所有 cache 的保留页与整页空闲的 slab 页吐还给 PMM
- * @note 只能在不持有 PmmLock 的上下文里调用；逐 cache 加解锁，不用一把大锁罩全表。
+ * @note 只能在不持有 pmm_lock 的上下文里调用；逐 cache 加解锁，不用一把大锁罩全表。
  */
 void slab_reclaim_all(void)
 {
@@ -299,20 +299,20 @@ void slab_reclaim_all(void)
             {
                 break;
             }
-            dealloc(victim);
+            pmm_free_pages(victim);
         }
     }
 }
 
 pframe_t *slab_alloc_page_retry(void)
 {
-    pframe_t *frame = alloc_page();
+    pframe_t *frame = pmm_alloc_page();
     if (frame != NULL)
     {
         return frame;
     }
     slab_reclaim_all();
-    return alloc_page();
+    return pmm_alloc_page();
 }
 
 void slab_dump_stats(void)

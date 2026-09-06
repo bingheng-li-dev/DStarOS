@@ -24,8 +24,8 @@ ppn_t vmm_kernel_pgd_ppn;
  *   在只有一个 hart 真正跑用户任务时天然串行、从不需要锁；hart1 也能调度真实任务后，
  *   父子进程可能在两个 hart 上同时各自触发对同一批共享帧的 COW 操作，不加锁会导致
  *   reference 计数丢更新，页框被提前释放却还有 PTE 指向它。
- * @note 锁的顺序约定：本锁总是外层，内部调用 alloc_page()/dealloc() 时它们各自
- *   持有的 PmmLock 是内层——只在这个方向嵌套，不会有加锁顺序反转的死锁风险。
+ * @note 锁的顺序约定：本锁总是外层，内部调用 pmm_alloc_page()/pmm_free_pages() 时它们各自
+ *   持有的 pmm_lock 是内层——只在这个方向嵌套，不会有加锁顺序反转的死锁风险。
  */
 osslock_t vmm_lock;
 
@@ -57,7 +57,7 @@ static pte_t *get_pte(ppn_t pgd_ppn, virAddr_t va, bool create, bool mmu_enabled
             return NULL; /* 如果不创建新页表项，直接返回 NULL */
         }
 
-        pframe_t *new_pmd_frame = alloc_page();
+        pframe_t *new_pmd_frame = pmm_alloc_page();
         if (!new_pmd_frame)
         {
             return NULL;
@@ -76,7 +76,7 @@ static pte_t *get_pte(ppn_t pgd_ppn, virAddr_t va, bool create, bool mmu_enabled
             return NULL;
         }
 
-        pframe_t *newPte_frame = alloc_page();
+        pframe_t *newPte_frame = pmm_alloc_page();
         if (!newPte_frame)
         {
             return NULL;
@@ -112,7 +112,7 @@ static pte_t *get_pte(ppn_t pgd_ppn, virAddr_t va, bool create, bool mmu_enabled
  */
 static void init_kernel_offset_mapping(void)
 {
-    pframe_t *kernel_pgd_pframe = alloc_page();
+    pframe_t *kernel_pgd_pframe = pmm_alloc_page();
     if (!kernel_pgd_pframe)
     {
         panic("Failed to allocate page for kernel PGD!\n");
@@ -411,7 +411,7 @@ int vmm_map_vma(mm_t *mm, vma_t *vma)
         pte_t *ptep = get_pte(mm->pgd_ppn, va, true, true);
         if (!ptep)
         {
-            dealloc(frame);
+            pmm_free_pages(frame);
             return ENO1_NOMORE_MEM;
         }
         *ptep = pte_create(convert_pframe2ppn(frame), flags);
@@ -431,7 +431,7 @@ int vmm_map_vma(mm_t *mm, vma_t *vma)
  * @note 与 vmm_map_vma() 的区别是**不分配新帧**，用于把内核准备好的共享页
  *   （目前只有 sigpage）塞进每个用户地址空间。
  * @note 与 vmm_map_vma() 一样**每建立一次映射就 reference++**：拆除侧
- *   （vmm_unmap_range）是按映射逐一递减、归零即 dealloc() 的，这里不加就会出现
+ *   （vmm_unmap_range）是按映射逐一递减、归零即 pmm_free_pages() 的，这里不加就会出现
  *   "映射了 N 份、只记了 1 份"，第一个进程退出就把这页还给 PMM，其余进程的
  *   PTE 当场变成指向一页随时会被别人拿走的内存。
  */
@@ -465,7 +465,7 @@ void vmm_unmap_vma(mm_t *mm, vma_t *vma)
  * @param[in] mm    目标地址空间
  * @param[in] start 起始虚拟地址（页对齐，含）
  * @param[in] end   结束虚拟地址（页对齐，不含）
- * @details 逐页查 PTE：无效则跳过；否则递减 pframe_t.reference，归零时 dealloc()，
+ * @details 逐页查 PTE：无效则跳过；否则递减 pframe_t.reference，归零时 pmm_free_pages()，
  *   随后清零 PTE 并刷新该地址的 TLB。
  * @note 不释放页表中间节点帧，也不动 mm->mmap_list 上的 vma_t——
  *   VMA 的删除/截断/分裂由调用方负责。
@@ -488,7 +488,7 @@ void vmm_unmap_range(mm_t *mm, virAddr_t start, virAddr_t end)
         frame->reference--;
         if (frame->reference == 0)
         {
-            dealloc(frame);
+            pmm_free_pages(frame);
         }
         spinlock_release(&vmm_lock, vmm_lock_key);
 
@@ -672,13 +672,13 @@ void vmm_page_fault_handler(virAddr_t badva, int fault_type)
     if (!ptep)
     {
         spinlock_release(&vmm_lock, vmm_lock_key);
-        dealloc(frame);
+        pmm_free_pages(frame);
         panic("vmm: get_pte failed in page fault");
     }
     if (pte_is_valid(*ptep))
     {
         spinlock_release(&vmm_lock, vmm_lock_key);
-        dealloc(frame);
+        pmm_free_pages(frame);
         tlb_flush_va(page_va);
         return;
     }
@@ -773,10 +773,10 @@ int vmm_mm_copy(mm_t *dst, mm_t *src)
  */
 void vmm_probe_pte_ad(void)
 {
-    pframe_t *frame = alloc_page();
+    pframe_t *frame = pmm_alloc_page();
     if (!frame)
     {
-        printf("pte_ad_probe: alloc_page failed\n");
+        printf("pte_ad_probe: pmm_alloc_page failed\n");
         return;
     }
 
@@ -785,12 +785,12 @@ void vmm_probe_pte_ad(void)
     if (!ptep || !pte_is_valid(*ptep))
     {
         printf("pte_ad_probe: no valid pte for kva=0x%lx\n", kva);
-        dealloc(frame);
+        pmm_free_pages(frame);
         return;
     }
 
     printf("pte_ad_probe: kva=0x%lx pte=0x%lx\n", kva, *ptep);
-    printf("pte_ad_probe: [1] after alloc(memset)  A=%d D=%d\n",
+    printf("pte_ad_probe: [1] after pmm_alloc_pages(memset)  A=%d D=%d\n",
            (*ptep & PTE_A) ? 1 : 0, (*ptep & PTE_D) ? 1 : 0);
 
     *ptep &= ~(pte_t)(PTE_A | PTE_D);
@@ -839,6 +839,6 @@ void vmm_probe_pte_ad(void)
 
     *ptep |= (pte_t)(PTE_A | PTE_D);
     tlb_flush_va(kva);
-    dealloc(frame);
+    pmm_free_pages(frame);
 }
 #endif

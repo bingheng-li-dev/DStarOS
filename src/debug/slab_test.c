@@ -22,7 +22,7 @@
 
 /* 耗尽用例的块数上限。**必须大于"全部空闲内存能切出多少块"**，否则循环先撞上限退出，
  * `n1 < 上限` 那条断言就失去了意义——它验的是 kmalloc 在真正耗尽时安静返回 NULL，
- * 而不是撞上 alloc() 的 panic。这里按 MEMORY_END 推导而不是写死：原先复用
+ * 而不是撞上 pmm_alloc_pages() 的 panic。这里按 MEMORY_END 推导而不是写死：原先复用
  * SLAB_TEST_MAX_OBJS（400 块 × 16 页 = 25 MB）在 6 MB 物理内存下成立，
  * 2026-09-06 把内存抬到 110 MB 之后就恒撞上限、3/3 必失败。 */
 #define SLAB_TEST_MAX_BLOCKS \
@@ -285,14 +285,14 @@ static void release_big_blocks(int n)
 /* 组 4：slab_reclaim_all 把保留页也吐回 PMM */
 static void test_reclaim(void)
 {
-    uint16_t before = FreeList.fnsize;
+    pgcount_t before = pmm_free_list.fnsize;
     slab_reclaim_all();
-    uint16_t after = FreeList.fnsize;
+    pgcount_t after = pmm_free_list.fnsize;
     /* 只打印不断言。"回收前后空闲页数不减"看着合理，实际余量只有 1 页（实测 reclaim
      * 恒好 +1），而 vmm_test() 在另一个 hart 上随时可能借走一页——一次撞上就翻，
      * 分不清是回收丢页还是别人在借。回收真正要保证的结果由下一条断言覆盖：
      * 保留页确实还给了 PMM，大块分配拿得到。 */
-    printf("[slabtest] reclaim: FreeList.fnsize %d -> %d\n", before, after);
+    printf("[slabtest] reclaim: pmm_free_list.fnsize %d -> %d\n", before, after);
 
     void *big = kmalloc(64 * PGSIZE);
     expect(big != NULL, "large kmalloc after reclaim");
@@ -301,10 +301,10 @@ static void test_reclaim(void)
         kfree(big);
     }
 
-    /* 反复要大块直到连续块耗尽：改造前这里会撞上 alloc() 的
+    /* 反复要大块直到连续块耗尽：改造前这里会撞上 pmm_alloc_pages() 的
      * panic("Frame has not been allocated!")，现在应当安静地返回 NULL */
     int n1 = exhaust_big_blocks();
-    uint16_t low1 = FreeList.fnsize;
+    pgcount_t low1 = pmm_free_list.fnsize;
     expect(n1 > 0 && n1 < SLAB_TEST_MAX_BLOCKS, "kmalloc returns NULL on exhaustion instead of panic");
     release_big_blocks(n1);
 
@@ -315,14 +315,14 @@ static void test_reclaim(void)
      * 块粒度 16 页远大于这点噪声（要整整少 16 页才会少拿到一块），而且"还能再拿到
      * n 块"比"计数回到原位"更强：它要求页真的回到 PMM 并重新合并成了连续块。 */
     int n2 = exhaust_big_blocks();
-    uint16_t low2 = FreeList.fnsize;
+    pgcount_t low2 = pmm_free_list.fnsize;
     release_big_blocks(n2);
     printf("[slabtest] exhaustion: round1 %d x %dKB (fnsize %d -> %d), round2 %d (-> %d)\n",
            n1, SLAB_TEST_BIG_PAGES * 4, after, low1, n2, low2);
     expect(n2 >= n1, "a full exhaust/release cycle gives every block back to the PMM");
 
     /* 归还之后必须重新合并成**大**块。上面两轮只要 16 页的块，merge-on-free 只做了
-     * 一半（相邻块没并起来）照样能过；64 页这条才逼着 FreeAList 真的合并回长连续段。 */
+     * 一半（相邻块没并起来）照样能过；64 页这条才逼着 pmm_free_addr_list 真的合并回长连续段。 */
     void *big2 = kmalloc(64 * PGSIZE);
     expect(big2 != NULL, "64-page block still obtainable after the exhaust/release cycles");
     if (big2 != NULL)

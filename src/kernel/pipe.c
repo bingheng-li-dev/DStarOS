@@ -186,7 +186,7 @@ static void pipe_release_common(pipe_t *p, bool is_reader)
 
     if (empty)
     {
-        dealloc(p->buf_frame);
+        pmm_free_pages(p->buf_frame);
         kfree(p);
     }
 }
@@ -235,7 +235,7 @@ int pipe_alloc(file_t **rfile, file_t **wfile)
     file_t *rf = slab_cache_alloc(file_cache);
     if (!rf)
     {
-        dealloc(frame);
+        pmm_free_pages(frame);
         kfree(p);
         return ENO1_NOMORE_MEM;
     }
@@ -244,7 +244,7 @@ int pipe_alloc(file_t **rfile, file_t **wfile)
     if (!wf)
     {
         kfree(rf);
-        dealloc(frame);
+        pmm_free_pages(frame);
         kfree(p);
         return ENO1_NOMORE_MEM;
     }

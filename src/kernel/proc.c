@@ -22,7 +22,7 @@ struct list_head proc_list;
  * 交给别人）。锁序：tty->lock → proc_list_lock → sighand->lock → run_queue.lock，
  * 单向；持有本锁期间不得睡眠、不得取 VFS 大锁。 */
 static osslock_t proc_list_lock;
-/* Stack of all dealloced pids.In order to alloc these pids again. */
+/* Stack of all dealloced pids.In order to pmm_alloc_pages these pids again. */
 struct list_head pid_stack;
 /* Amount of processes. */
 uint16_t task_count = 0;
@@ -33,7 +33,7 @@ uint16_t task_count = 0;
 static pcb_t *alloc_new_proc(void);
 /* Alloc the kernel stack of a proc. */
 static int16_t alloc_kernel_stack(pcb_t *pcb);
-/* Dealloc the kernel stack of a proc.Attention that it doesn't dealloc the memory pointed by pointers of the pcb!! */
+/* Dealloc the kernel stack of a proc.Attention that it doesn't pmm_free_pages the memory pointed by pointers of the pcb!! */
 static int16_t dealloc_kernel_stack(pcb_t *pcb);
 /* Copy the virtual memory management struct of a proc. */
 static int16_t copy_proc_mm(uint32_t clone_flags, pcb_t *pcb);
@@ -752,7 +752,7 @@ void proc_init(void)
     pcb_t *idle = create_first_proc_idle();
     if (idle == NULL)
     {
-        panic("Failed to alloc idle proc!!\n");
+        panic("Failed to pmm_alloc_pages idle proc!!\n");
     }
     cpu_get_current()->idle_proc = idle;
     sched_set_current(idle);
@@ -887,14 +887,14 @@ static int16_t copy_proc_mm(uint32_t clone_flags, pcb_t *pcb)
     mm_t *mm = vmm_mm_create();
     if (!mm)
     {
-        panic("Failed to alloc new mm for child process!\n");
+        panic("Failed to pmm_alloc_pages new mm for child process!\n");
     }
 
     /* 必须先建立独立 PGD 并设好 mm->pgd_ppn，vmm_mm_copy 才能向正确的页表写 PTE */
     pframe_t *new_pgd_frame = slab_alloc_page_retry();
     if (!new_pgd_frame)
     {
-        panic("Failed to alloc new page for child process PGD!\n");
+        panic("Failed to pmm_alloc_pages new page for child process PGD!\n");
     }
     memset((void *)convert_pframe2kva(new_pgd_frame), 0, PGSIZE);
     new_pgd_frame->reference += 1;
@@ -1353,10 +1353,10 @@ static int16_t init(void)
 #if DEBUG_PROC_init
     /* 验证内核线程 satp 正确：switch_to 切换后，通过 KVA 读写新分配的物理帧。
      * 若 satp 被 switch_to 写成 0（BARE 模式），此处访问高位 VA 会触发 access fault。 */
-    pframe_t *t_frame = alloc_page();
+    pframe_t *t_frame = pmm_alloc_page();
     if (!t_frame)
     {
-        panic("init test: alloc_page returned NULL");
+        panic("init test: pmm_alloc_page returned NULL");
     }
     volatile uint64_t *tp = (volatile uint64_t *)convert_pframe2kva(t_frame);
     *tp = 0xabcd1234ef567890UL;
@@ -1364,7 +1364,7 @@ static int16_t init(void)
     {
         panic("init test: kernel thread KVA FAILED - satp incorrect after switch_to");
     }
-    dealloc(t_frame);
+    pmm_free_pages(t_frame);
     printf("[init] kernel thread KVA after switch_to: PASS\n");
 #endif
 
@@ -1484,7 +1484,7 @@ static int16_t init(void)
             /* 压力用例跑完之后核对各 cache 的 nr_inuse 是否回到基线（vma_cache 尤其）*/
             slab_dump_stats();
             vfs_dcache_stats();
-            printf("[init] FreeList.fnsize=%d\n", FreeList.fnsize);
+            printf("[init] pmm_free_list.fnsize=%d\n", pmm_free_list.fnsize);
 #endif
             sbi_shutdown();
         }
@@ -1603,7 +1603,7 @@ void enter_user_mode(virAddr_t entry, virAddr_t ustack)
  * @return 成功返回 [0, NOFILE) 内的下标；fd 表已满返回 ENO18_TOO_MANY_FILES
  * @note 只负责挑号，不写入 fd 表——真正把 file_t 装进去是 proc_fd_install() 的职责，
  *   两步拆分参照 Linux get_unused_fd()/fd_install()。
- * @todo 添加信号机制以后，若信号处理函数在 alloc 与 install 之间重入本进程的
+ * @todo 添加信号机制以后，若信号处理函数在 pmm_alloc_pages 与 install 之间重入本进程的
  *   fd 分配路径，会拿到重复的 fd 号；当前无信号机制，不构成问题。
  */
 int proc_fd_alloc(void)
