@@ -721,13 +721,13 @@ static void test_argv_envp(void)
     long pid = sys_clone();
     if (pid == 0)
     {
-        sys_execve("/argvtest", argv, envp);
+        sys_execve("/bin/argvtest.elf", argv, envp);
         sys_exit(99); /* 只有 execve 失败才会走到这里 */
     }
     int status = 0;
     sys_wait4((int)pid, &status, 0);
     int code = (status >> 8) & 0xff;
-    expect(code != 99, "execve(/argvtest) succeeded");
+    expect(code != 99, "execve(/bin/argvtest.elf) succeeded");
     expect(code == 0, "argvtest reported 0 failures");
 }
 

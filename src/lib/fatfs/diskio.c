@@ -1,13 +1,15 @@
 /*
  * diskio.c - VFS/FatFS 磁盘 I/O 层
  *
- * QEMU 平台：使用内存 ramdisk（2MB，4096 个 512 字节扇区），
- *            存放在 BSS 段，内核启动时由 bss_init() 清零。
+ * QEMU 平台：使用内存 ramdisk，落在 memtype.h 划出的 rootfs 预留区上
+ *            （ROOTFS_PHYS_BASE，PMM 页帧池之外），内容由 QEMU 的 -device loader
+ *            在启动前原样写进去；没装载镜像时那块是零，fatfs_mount 会退回 f_mkfs。
  * K210 平台：使用 SD 卡驱动（通过 sdcard.h 接口）。
  */
 
 #include "diskio.h"
 #include "stringops.h"
+#include "memtype.h"
 
 #ifdef QEMU
 
@@ -16,10 +18,16 @@
  * ================================================================ */
 
 #define RAMDISK_SECTOR_SIZE    512
-#define RAMDISK_SECTOR_COUNT   4096   /* 共 2MB */
+/* 整个预留区都当成这块"盘"。**不必等于镜像大小**：f_mount 读的是引导扇区里记的
+ * 总扇区数（镜像自己说了算），这个数只被 f_mkfs 用来决定格式化多大。
+ * 于是镜像可以比预留区小，剩下的空间留着以后放大。 */
+#define RAMDISK_SECTOR_COUNT   (ROOTFS_MAX_SIZE / RAMDISK_SECTOR_SIZE)
 
-/* ramdisk 数据区（位于 BSS 段，内核启动时由 bss_init() 清零）*/
-static unsigned char ramdisk_buf[RAMDISK_SECTOR_SIZE * RAMDISK_SECTOR_COUNT];
+/* ramdisk 数据区：指向 rootfs 预留区的内核虚拟地址。
+ * 不能写成静态初始化——pa_to_kva() 是内联函数、不是常量表达式，而且这块地址
+ * 只有在 MMU 打开、内核偏移映射建好之后才可访问（KERNEL_MAP_END 覆盖了它）。
+ * disk_initialize() 由 fatfs_mount() 调用，那时 os_init_after_mmu_enable 早就跑完了。 */
+static unsigned char *ramdisk_buf;
 
 /* ramdisk 初始化状态标志 */
 static int ramdisk_initialized = 0;
@@ -35,6 +43,7 @@ DSTATUS disk_initialize(BYTE pdrv)
     {
         return STA_NOINIT;
     }
+    ramdisk_buf = (unsigned char *)pa_to_kva(ROOTFS_PHYS_BASE);
     ramdisk_initialized = 1;
     return 0;
 }

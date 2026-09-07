@@ -465,7 +465,11 @@ void _start(void)
         check_eq("getdents64: 'fdir' is DT_DIR", find_dirent(dbuf, n, "fdir"), DT_DIR);
         check_eq("getdents64: 'filetest.txt' is DT_REG",
                  find_dirent(dbuf, n, "filetest.txt"), DT_REG);
-        check_eq("getdents64: 'hello' is DT_REG", find_dirent(dbuf, n, "hello"), DT_REG);
+        /* 'bin' 来自 rootfs 镜像（宿主机的 tools/build_rootfs.sh 建的），不是本用例造的。
+         * 原先这里查的是 'hello'——内核启动时自己写进 ramdisk 的那个文件；阶段 9 之后
+         * 程序改由镜像提供、那次 seed 已删除，换成查镜像里的目录，判据反而更强：
+         * 它同时验了"外部造的条目能被列出来"和"目录的 d_type 是 DT_DIR"。 */
+        check_eq("getdents64: 'bin' is DT_DIR", find_dirent(dbuf, n, "bin"), DT_DIR);
         sys_close((int)dirfd);
     }
 

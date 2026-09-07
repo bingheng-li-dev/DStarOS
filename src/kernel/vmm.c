@@ -125,7 +125,10 @@ static void init_kernel_offset_mapping(void)
     ppn_t ppn_skernel  = convert_pa2ppn_flr(KERNEL_START);
     ppn_t ppn_etext    = convert_pa2ppn_flr((phyAddr_t)etext);
     ppn_t ppn_erodata  = convert_pa2ppn_flr((phyAddr_t)erodata);
-    ppn_t ppn_end      = convert_pa2ppn_cil(MEMORY_END);
+    /* 映射到 KERNEL_MAP_END 而不是 MEMORY_END：rootfs 预留区在 PMM 页帧池之外，
+     * 但 diskio.c 要拿 pa_to_kva() 直接读写它，不映射的话第一次 disk_read 就是
+     * 一发落在无 VMA 区域的 S 态缺页，一路走到 panic。 */
+    ppn_t ppn_end      = convert_pa2ppn_cil(KERNEL_MAP_END);
 
     /** 偏移映射：VA = PA + KERNEL_VA_OFFSET → PA，按段分配权限
      * 由ld文件，内存布局为skernel → text → rodata → data → bss → ekernel → 其他物理内存

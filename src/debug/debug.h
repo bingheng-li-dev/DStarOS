@@ -70,14 +70,12 @@
  * "parent: reaped pid=<N> exitcode=42"。跟 DEBUG_SCHED_TEST 互不冲突，可同时置 1。 */
 #define DEBUG_FORK_WAIT_TEST 0
 
-/* dup + execve 验证：置 1 时 init 先把嵌入的 hello ELF 写进 ramdisk 的 "/hello"，
- * 再 fork 一个 user/exectest.c 编译出的用户程序：它 dup(1) 后经新 fd 写、再 clone 出子进程
- * execve("/hello")、父进程 wait4 收割。串口应看到 "exectest: hello via dup fd"（dup 生效）、
+/* dup + execve 验证：置 1 时 fork 一个 user/exectest.c 编译出的用户程序：
+ * 它 dup(1) 后经新 fd 写、再 clone 出子进程 execve("/bin/hello.elf")、父进程 wait4 收割。串口应看到 "exectest: hello via dup fd"（dup 生效）、
  * "hi"（子进程 exec 成 hello）、"exectest: child reaped, done"。置 1 时不跑默认用户程序。 */
 #define DEBUG_EXEC_TEST 0
 
-/* POSIX 文件 syscall 验证：置 1 时 init 先把嵌入的 hello ELF 写进 ramdisk 的
- * "/hello"（getdents64 的目录列表里要能看到它），再 fork 一个 user/filetest.c 编译出的
+/* POSIX 文件 syscall 验证：置 1 时 fork 一个 user/filetest.c 编译出的
  * 用户程序，端到端触发 openat/lseek/readv/writev/fstat/newfstatat/getdents64/mkdirat/
  * unlinkat/renameat/chdir/getcwd/ftruncate/fcntl，并在两个子进程里并发跑文件操作压 VFS 大锁。
  * 这批 syscall 只能由真正的 U 态程序验证——它们都要求真实用户地址空间指针。
@@ -125,7 +123,7 @@
  * 自校验 argc/argv/envp/auxv 与 sp 对齐，退出码即失败条数）。
  * 串口应看到 "=== argvtest done: ..." 与 "=== timetest done: N pass  0 fail ==="。
  * 置 1 时不跑 exectest/filetest/pipetest/ttytest/memtest/sigtest/默认用户程序。 */
-#define DEBUG_TIME_TEST 1
+#define DEBUG_TIME_TEST 0
 
 /* ELF 共享页加载验证：置 1 时 fork 一个 user/segtest.c 编译出的用户程序。
  * 它由 user/user_dense.ld 链接，两个 PT_LOAD 段的虚拟地址首尾相接、共用中间那一页
@@ -134,6 +132,35 @@
  * 串口应看到 "=== segtest done: 4 pass  0 fail ==="。
  * 置 1 时不跑其它测试程序与默认用户程序。 */
 #define DEBUG_SEG_TEST 0
+
+/* musl 启动路径验证：置 1 时 fork 一个 user/mhello.c 编译出的用户程序。
+ * 它是第一个**不手写 ecall、走 libc** 的程序，用第二套工具链
+ * （/root/riscv/toolchain-musl，rv64gc/lp64d）静态链接 musl 编出来。
+ * 验的是 crt1.o 的 _start 能否从阶段 8F 铺的初始栈上把 argc/argv/envp/auxv 读出来、
+ * __libc_start_main → __init_libc → __init_tls/__init_ssp 一路跑到 main。
+ * 串口应看到 "hello from musl"，且**不应出现任何 "syscall: unknown nr="**。
+ * 置 1 时不跑其它测试程序与默认用户程序。 */
+#define DEBUG_MUSL_TEST 0
+
+/* libc 级 syscall 覆盖自检：置 1 时 fork 一个 user/msyscheck.c 编译出的用户程序。
+ * 与裸 ecall 那批测试的区别是**换了一个客户**：musl 以它自己的方式调内核——
+ * stdio 走 writev/readv、opendir/readdir 对 getdents64 的缓冲区与 d_reclen 另有假设、
+ * malloc 按尺寸在 brk 与 mmap 之间切换、fork 走 clone(SIGCHLD)、open 会带
+ * O_CLOEXEC/O_DIRECTORY 这些我们从没喂过的标志位。
+ * 顺带把"内核跑不了浮点"钉成用例：子进程 printf("%f") 必须被 SIGILL 杀掉。
+ * 串口应看到 "=== msyscheck done: N pass  0 fail ==="。
+ * 置 1 时不跑其它测试程序与默认用户程序。 */
+#define DEBUG_MSYSCHECK_TEST 0
+
+/* rootfs 镜像通路验证：置 1 时 fork 一个 user/mrootfs.c 编译出的用户程序，
+ * 验证 tools/build_rootfs.sh 在宿主机造好、由 QEMU -device loader 搬进 rootfs
+ * 预留区的 FAT 镜像，内容真的能被内核读到——目录项（含长文件名）、文件内容、
+ * ELF 魔数与尾部各验一条。
+ * **必须先 `make rootfs`**：镜像不存在时 scripts/run.sh 不会加 -device loader，
+ * 内核会 f_mkfs 出一张空盘，这些断言会如实报 FAIL。
+ * 串口应看到 "=== mrootfs done: N pass  0 fail ==="。
+ * 置 1 时不跑其它测试程序与默认用户程序。 */
+#define DEBUG_MROOTFS_TEST 1
 
 /* PTE A/D 位实测探针：置 1 时在 hart0 初始化阶段（trap_init 之后）跑
  * vmm_probe_pte_ad()，判定本平台是硬件自动置位 A/D 还是软件管理。

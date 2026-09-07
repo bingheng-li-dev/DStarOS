@@ -2,9 +2,10 @@
  *
  * 覆盖两个此前没被真实用户进程触发过的缺口：
  *   1) dup(1) 拿到新 fd，向新 fd 写 → 证明 fd 表 dup 生效（新老 fd 指向同一 console file）；
- *   2) clone 出子进程，子进程 execve("/hello") 变身成另一个程序（打印 "hi"），父进程 wait4 收割
+ *   2) clone 出子进程，子进程 execve("/bin/hello.elf") 变身成另一个程序（打印 "hi"），父进程 wait4 收割
  *      → 证明 do_exec 换脑成功、fd 表在 exec 后仍存活、PID 不变、父子链完整。
- * "/hello" 由内核在启动时把嵌入的 hello ELF 写进 ramdisk（见 proc.c 的 seed）。
+ * "/bin/hello.elf" 来自 rootfs 镜像（tools/build_rootfs.sh 在宿主机拷进去的），
+ * 不再由内核启动时现写。
  * 不引入 libc，写法与 fork_wait.c 一致。
  */
 
@@ -79,7 +80,7 @@ void _start(void)
     if (pid == 0)
     {
         /* 子进程：变身 /hello（打印 "hi\n" 后 exit(0)）。execve 成功则不返回 */
-        sys_execve("/hello");
+        sys_execve("/bin/hello.elf");
         puts_fd(1, "exectest: EXEC FAILED\n");  /* 只有 execve 失败才会走到这里 */
         sys_exit(1);
     }

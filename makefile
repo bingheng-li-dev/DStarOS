@@ -47,7 +47,7 @@ KERNEL_ELF := $(OUTDIR)/$(KERNEL_ELF)
 KERNEL_BIN := $(OUTDIR)/$(KERNEL_BIN)
 LDFLAGS += -T $(LDSCRIPT) -o $(KERNEL_ELF)
 
-.PHONY: all debug debugbuild clean
+.PHONY: all debug debugbuild clean rootfs
 
 all: $(KERNEL_ELF)
 
@@ -73,6 +73,12 @@ $(C_OUTDIR):
 $(KERNEL_ELF): $(C_OBJS)
 	$(LD) $(LDFLAGS) $(C_OBJS)
 	$(OBJCOPY) $(KERNEL_ELF) --strip-all -O binary $(KERNEL_BIN)
+
+# 造根文件系统镜像（build/rootfs.img）。**不挂进 all**：它依赖 user/ 下已经编好的
+# .elf，而 user/ 是独立于内核的构建流水线（见 user/Makefile），把两者绑在一起会让
+# 只想编内核的人被迫先备齐 musl 工具链。需要时显式 `make rootfs`。
+rootfs:
+	bash tools/build_rootfs.sh
 
 clean:
 	rm -fv $(C_OBJS) $(C_DEPS) $(KERNEL_ELF) $(KERNEL_BIN)

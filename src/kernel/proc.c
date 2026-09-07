@@ -1095,9 +1095,6 @@ void idle(void)
     }
 }
 
-extern const unsigned char user_elf[];
-extern const unsigned long user_elf_len;
-
 /**
  * @brief 建一个独立的用户地址空间（新 PGD + 复制内核高半段）
  * @return 新 mm；失败返回 NULL
@@ -1155,14 +1152,19 @@ static void proc_signal_init_user(pcb_t *p)
 }
 
 /**
- * @brief 建独立用户地址空间、加载给定 ELF 字节数组并进入 U 态
- * @details 供 `run_first_user_program`/`run_fork_wait_test_program` 共用，两者仅嵌入的 ELF
- *   字节数组不同（`user_elf` / `user_fork_wait_elf`），其余建 mm/切地址空间/建用户栈的流程一致。
- * @param[in] elf     嵌入式 ELF64 字节数组
- * @param[in] elf_len 数组长度
+ * @brief 建独立用户地址空间、从根文件系统加载指定程序并进入 U 态
+ * @param[in] path 可执行文件在根文件系统里的绝对路径
+ * @details 第一个用户进程的加载路径。**程序来自 rootfs 镜像，不再是编译期嵌进内核的
+ *   字节数组**——后者每个 ELF 要膨胀成 6.3 倍的 C 源文件，BusyBox 那个量级根本编不出来。
+ *
+ *   读法与 `do_exec` 一致：一次 kmalloc 把整个文件读进内核堆，`elf_load` 把各段拷进
+ *   用户页之后立刻归还。区别只在参数来源——`do_exec` 的 path/argv 来自用户空间要
+ *   `copy_from_user`，这里的是内核里的字面量。
  * @note noreturn：`enter_user_mode` 内部 `sret` 进入 U 态，不会返回
+ * @note 找不到文件时 panic 并提示跑 `make rootfs`：这条路径上没有可降级的余地，
+ *   静默失败只会表现成"内核起来了但什么都没发生"。
  */
-static void run_user_program(const unsigned char *elf, unsigned long elf_len)
+static void run_user_program(const char *path)
 {
     /* 1) 独立用户 mm（新 PGD + 复制内核半段） */
     mm_t *mm = create_user_mm();
@@ -1178,12 +1180,44 @@ static void run_user_program(const unsigned char *elf, unsigned long elf_len)
     write_csr(satp, cur->proc_context.satp);
     tlb_flush_all();
 
-    /* 3) 解析 ELF：按 PT_LOAD 段建 VMA、映射、拷贝内容，得到入口与程序头表信息 */
+    /* 3) 从根文件系统读出整个 ELF，解析：按 PT_LOAD 段建 VMA、映射、拷贝内容 */
+    vfs_lock();
+    file_t *f = vfs_open(path, O_RDONLY);
+    if (f == NULL)
+    {
+        vfs_unlock();
+        panic("run_user_program: cannot open %s (rootfs image missing? run `make rootfs`)", path);
+    }
+    off_t size = vfs_lseek(f, 0, SEEK_END);
+    vfs_lseek(f, 0, SEEK_SET);
+    if (size <= 0)
+    {
+        vfs_close(f);
+        vfs_unlock();
+        panic("run_user_program: %s is empty", path);
+    }
+    unsigned char *img = kmalloc((size_t)size);
+    if (img == NULL)
+    {
+        vfs_close(f);
+        vfs_unlock();
+        panic("run_user_program: no memory for %s (%ld bytes)", path, (long)size);
+    }
+    ssize_t rd = vfs_read(f, img, (size_t)size);
+    vfs_close(f);
+    vfs_unlock();
+    if (rd != (ssize_t)size)
+    {
+        panic("run_user_program: short read on %s", path);
+    }
+
     elf_info_t einfo;
-    int ret = elf_load(mm, elf, elf_len, &einfo);
+    int ret = elf_load(mm, img, (uint64_t)size, &einfo);
+    /* elf_load 已把各段内容拷进用户页，缓冲区可以还了 */
+    kfree(img);
     if (ret != ENO0_NO_ERROR)
     {
-        panic("run_user_program: elf_load failed, ret=%d", ret);
+        panic("run_user_program: elf_load failed on %s, ret=%d", path, ret);
     }
 
     /* 4) 用户栈 VMA（懒分配，首次访问由 page fault 落实），并铺上初始栈。
@@ -1224,125 +1258,49 @@ static void run_user_program(const unsigned char *elf, unsigned long elf_len)
     enter_user_mode(einfo.entry, user_sp);
 }
 
-#if !DEBUG_EXEC_TEST && !DEBUG_FILE_TEST && !DEBUG_PIPE_TEST && !DEBUG_TTY_TEST && !DEBUG_MEM_TEST && !DEBUG_SIGNAL_TEST && !DEBUG_TIME_TEST && !DEBUG_SEG_TEST
+/* 第一个用户进程跑哪个程序，由 debug.h 里那批互斥的 DEBUG_*_TEST 开关选。
+ *
+ * 从阶段 9 起**只剩"跑哪个路径"这一个维度**：程序统一放在 rootfs 镜像的 /bin 下，
+ * 由 tools/build_rootfs.sh 在宿主机拷进去。此前是"用哪个嵌入的字节数组"——
+ * 每个 ELF 都要经 gen_elf_array.sh 膨胀成 6.3 倍的 C 源文件编进内核，
+ * 十个测试程序就占掉内核镜像的一大半，BusyBox 那个量级根本编不出来。
+ *
+ * 路径带 .elf 后缀是因为镜像里就是这么放的；将来 /sbin/init 落地后这里会换成它。 */
+#if DEBUG_EXEC_TEST
+#define USER_PROGRAM_PATH "/bin/exectest.elf"
+#elif DEBUG_FILE_TEST
+#define USER_PROGRAM_PATH "/bin/filetest.elf"
+#elif DEBUG_PIPE_TEST
+#define USER_PROGRAM_PATH "/bin/pipetest.elf"
+#elif DEBUG_TTY_TEST
+#define USER_PROGRAM_PATH "/bin/ttytest.elf"
+#elif DEBUG_MEM_TEST
+#define USER_PROGRAM_PATH "/bin/memtest.elf"
+#elif DEBUG_SIGNAL_TEST
+#define USER_PROGRAM_PATH "/bin/sigtest.elf"
+#elif DEBUG_TIME_TEST
+#define USER_PROGRAM_PATH "/bin/timetest.elf"
+#elif DEBUG_SEG_TEST
+#define USER_PROGRAM_PATH "/bin/segtest.elf"
+#elif DEBUG_MUSL_TEST
+#define USER_PROGRAM_PATH "/bin/mhello.elf"
+#elif DEBUG_MSYSCHECK_TEST
+#define USER_PROGRAM_PATH "/bin/msyscheck.elf"
+#elif DEBUG_MROOTFS_TEST
+#define USER_PROGRAM_PATH "/bin/mrootfs.elf"
+#else
+#define USER_PROGRAM_PATH "/bin/hello.elf"
+#endif
+
 static void run_first_user_program(void)
 {
-    run_user_program(user_elf, user_elf_len);
+    run_user_program(USER_PROGRAM_PATH);
 }
-#endif
 
 #if DEBUG_FORK_WAIT_TEST
 static void run_fork_wait_test_program(void)
 {
-    extern const unsigned char user_fork_wait_elf[];
-    extern const unsigned long user_fork_wait_elf_len;
-    run_user_program(user_fork_wait_elf, user_fork_wait_elf_len);
-}
-#endif
-
-#if DEBUG_EXEC_TEST || DEBUG_FILE_TEST
-/* 把嵌入的 hello ELF 写进 ramdisk 的 "/hello"，给 exectest 的 execve 一个可加载的目标；
- * 顺带验证 VFS 写盘（这是 rootfs 上第一个真实写入的文件）。在 init（内核上下文）里调用。
- * filetest 也依赖它：那里的 getdents64 用例要在根目录列表里看到 "hello" 这一项。 */
-static void seed_exec_target(void)
-{
-    file_t *f = vfs_open("/hello", O_CREAT | O_WRONLY | O_TRUNC);
-    if (f == NULL)
-    {
-        printf("[init] seed /hello: vfs_open failed\n");
-        return;
-    }
-    ssize_t w = vfs_write(f, user_elf, user_elf_len);
-    vfs_close(f);
-    printf("[init] seed /hello: wrote %ld bytes\n", (long)w);
-}
-#endif
-
-#if DEBUG_EXEC_TEST
-static void run_exectest_program(void)
-{
-    extern const unsigned char user_exectest_elf[];
-    extern const unsigned long user_exectest_elf_len;
-    run_user_program(user_exectest_elf, user_exectest_elf_len);
-}
-#endif
-
-#if DEBUG_FILE_TEST
-static void run_filetest_program(void)
-{
-    extern const unsigned char user_filetest_elf[];
-    extern const unsigned long user_filetest_elf_len;
-    run_user_program(user_filetest_elf, user_filetest_elf_len);
-}
-#endif
-
-#if DEBUG_PIPE_TEST
-static void run_pipetest_program(void)
-{
-    extern const unsigned char user_pipetest_elf[];
-    extern const unsigned long user_pipetest_elf_len;
-    run_user_program(user_pipetest_elf, user_pipetest_elf_len);
-}
-#endif
-
-#if DEBUG_TTY_TEST
-static void run_ttytest_program(void)
-{
-    extern const unsigned char user_ttytest_elf[];
-    extern const unsigned long user_ttytest_elf_len;
-    run_user_program(user_ttytest_elf, user_ttytest_elf_len);
-}
-#endif
-
-#if DEBUG_MEM_TEST
-static void run_memtest_program(void)
-{
-    extern const unsigned char user_memtest_elf[];
-    extern const unsigned long user_memtest_elf_len;
-    run_user_program(user_memtest_elf, user_memtest_elf_len);
-}
-#endif
-
-#if DEBUG_SIGNAL_TEST
-static void run_sigtest_program(void)
-{
-    extern const unsigned char user_sigtest_elf[];
-    extern const unsigned long user_sigtest_elf_len;
-    run_user_program(user_sigtest_elf, user_sigtest_elf_len);
-}
-#endif
-
-#if DEBUG_TIME_TEST
-static void run_timetest_program(void)
-{
-    extern const unsigned char user_timetest_elf[];
-    extern const unsigned long user_timetest_elf_len;
-    run_user_program(user_timetest_elf, user_timetest_elf_len);
-}
-
-/* timetest 的 argv/envp 用例要 execve 一个真实存在的程序，把 argvtest 投进 ramdisk */
-static void seed_argvtest(void)
-{
-    extern const unsigned char user_argvtest_elf[];
-    extern const unsigned long user_argvtest_elf_len;
-    file_t *f = vfs_open("/argvtest", O_CREAT | O_WRONLY | O_TRUNC);
-    if (f == NULL)
-    {
-        printf("[init] seed /argvtest: vfs_open failed\n");
-        return;
-    }
-    ssize_t w = vfs_write(f, user_argvtest_elf, user_argvtest_elf_len);
-    vfs_close(f);
-    printf("[init] seed /argvtest: wrote %ld bytes\n", (long)w);
-}
-#endif
-
-#if DEBUG_SEG_TEST
-static void run_segtest_program(void)
-{
-    extern const unsigned char user_segtest_elf[];
-    extern const unsigned long user_segtest_elf_len;
-    run_user_program(user_segtest_elf, user_segtest_elf_len);
+    run_user_program("/bin/fork_wait.elf");
 }
 #endif
 
@@ -1419,43 +1377,7 @@ static int16_t init(void)
     }
 #endif
 
-#if DEBUG_EXEC_TEST
-    /* 验证 dup + execve：先在 ramdisk 塞好 /hello，再跑 exectest（不跑默认用户程序）*/
-    seed_exec_target();
-    int16_t pid = create_kernel_thread_by_fork((void *)run_exectest_program, NULL, 0);
-#elif DEBUG_FILE_TEST
-    /* 验证 POSIX 文件 syscall：同样先塞好 /hello（filetest 的 getdents64
-     * 用例要在根目录列表里看到它），再跑 filetest（不跑默认用户程序）*/
-    seed_exec_target();
-    int16_t pid = create_kernel_thread_by_fork((void *)run_filetest_program, NULL, 0);
-#elif DEBUG_PIPE_TEST
-    /* 验证管道 syscall：pipetest 不依赖 /hello（不做 execve），
-     * 不需要 seed_exec_target，直接跑（不跑 exectest/filetest/默认用户程序）*/
-    int16_t pid = create_kernel_thread_by_fork((void *)run_pipetest_program, NULL, 0);
-#elif DEBUG_TTY_TEST
-    /* 验证 TTY 行规范层：ttytest 不依赖 /hello，不需要 seed_exec_target，
-     * 直接跑（不跑 exectest/filetest/pipetest/默认用户程序）*/
-    int16_t pid = create_kernel_thread_by_fork((void *)run_ttytest_program, NULL, 0);
-#elif DEBUG_MEM_TEST
-    /* 验证内存管理 syscall：memtest 不依赖 /hello，不需要 seed_exec_target，
-     * 直接跑（不跑 exectest/filetest/pipetest/ttytest/默认用户程序）*/
-    int16_t pid = create_kernel_thread_by_fork((void *)run_memtest_program, NULL, 0);
-#elif DEBUG_SIGNAL_TEST
-    /* 验证信号：sigtest 不依赖 /hello，不需要 seed_exec_target，
-     * 直接跑（不跑 exectest/filetest/pipetest/ttytest/memtest/默认用户程序）*/
-    int16_t pid = create_kernel_thread_by_fork((void *)run_sigtest_program, NULL, 0);
-#elif DEBUG_TIME_TEST
-    /* 验证时间与杂项 syscall：先把 /argvtest 塞进 ramdisk 供 execve 用例使用，
-     * 再跑 timetest（不跑其它测试程序与默认用户程序）*/
-    seed_argvtest();
-    int16_t pid = create_kernel_thread_by_fork((void *)run_timetest_program, NULL, 0);
-#elif DEBUG_SEG_TEST
-    /* 验证 elf_load 对"多个 PT_LOAD 共享同一物理页"的处理：segtest 不依赖 /hello，
-     * 直接跑（不跑其它测试程序与默认用户程序）*/
-    int16_t pid = create_kernel_thread_by_fork((void *)run_segtest_program, NULL, 0);
-#else
     int16_t pid = create_kernel_thread_by_fork((void *)run_first_user_program, NULL, 0);
-#endif
     if (pid < 0)
     {
         panic("Failed to fork user program thread!\n");

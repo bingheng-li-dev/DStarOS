@@ -71,6 +71,15 @@ extern char ebss[];      /* .bss 段结束 */
 #define MEMORY_END ((phyAddr_t)(0x87000000))
 #define ROOTFS_PHYS_BASE ((phyAddr_t)(0x87000000))
 #define ROOTFS_MAX_SIZE ((uint64_t)(16 * 1024 * 1024))
+
+/* 内核偏移映射要覆盖到哪里。**不等于 MEMORY_END**——PMM 的页帧池止于 MEMORY_END，
+ * 但 rootfs 预留区在它之外，而 diskio.c 要拿 pa_to_kva() 直接读写那块内存。
+ * 映射不延长的话，第一次 disk_read 就是一发 S 态缺页（且那块地址没有 VMA，
+ * 会一路走到 panic）。
+ * 分成两个常量而不是把 MEMORY_END 直接抬到 0x88000000：
+ * "PMM 能分配的范围"和"内核能用 KVA 访问的范围"本来就是两件事，
+ * 混成一个会让预留区重新落进页帧池。 */
+#define KERNEL_MAP_END ((phyAddr_t)(ROOTFS_PHYS_BASE + ROOTFS_MAX_SIZE))
 /* 内核高位虚拟地址偏移 */
 #define KERNEL_VA_OFFSET 0xffffffc000000000UL /* Sv39 内核高地址区起始 */
 

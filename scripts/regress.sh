@@ -1,7 +1,11 @@
 #!/bin/bash
 # 回归套件运行器（容器内使用）：bash scripts/regress.sh <suite> [runs]
-#   suite: sched | slab | file | pipe | tty | mem | exec | sig | time | seg
-# 切换套件前必须自行改 src/debug/debug.h 里对应的开关（六个 U 态开关互斥）再 make。
+#   suite: sched | slab | file | pipe | tty | mem | exec | sig | time | seg | musl | msys | mroot
+# 切换套件前必须自行改 src/debug/debug.h 里对应的开关（U 态那批开关互斥）再 make。
+#
+# 阶段 9 起用户程序**从 rootfs 镜像加载**，不再嵌进内核。于是多了一个陷阱：
+# 镜像比 user/*.elf 旧的话，回归会**静默地测上一版程序**，改了测试却看不到变化。
+# 下面的自动重建就是为了堵这个洞——不要指望自己每次记得敲 make rootfs。
 cd "$(dirname "$0")/.." || exit 1
 
 suite="$1"
@@ -59,12 +63,40 @@ suite_marker()
         sig)   echo '=== sigtest done:' ;;
         time)  echo '=== timetest done:' ;;
         seg)   echo '=== segtest done:' ;;
+        musl)  echo '=== mhello done: ok ===' ;;
+        msys)  echo '=== msyscheck done:' ;;
+        mroot) echo '=== mrootfs done:' ;;
         exec)  echo 'exectest: child reaped, done' ;;
         *)     echo '' ;;
     esac
 }
 
 marker=$(suite_marker "$suite")
+
+# rootfs 镜像新鲜度检查：缺失、或比任何一个 user/*.elf 旧，就地重建。
+# 只在有 user/*.elf 时做——纯内核套件（sched/slab/vfs/dcache）不碰镜像，
+# 但重建一次也不贵，不值得为它们分叉。
+rootfs_img="build/rootfs.img"
+if ls user/*.elf >/dev/null 2>&1; then
+    stale=0
+    if [ ! -f "$rootfs_img" ]; then
+        stale=1
+    else
+        for e in user/*.elf; do
+            if [ "$e" -nt "$rootfs_img" ]; then
+                stale=1
+                break
+            fi
+        done
+    fi
+    if [ "$stale" -eq 1 ]; then
+        echo "[$suite] rootfs 镜像缺失或已过期，重建中..."
+        bash tools/build_rootfs.sh >/dev/null || {
+            echo "[$suite] build_rootfs.sh 失败，中止" >&2
+            exit 1
+        }
+    fi
+fi
 
 for i in $(seq 1 "$runs"); do
     if [ "$suite" == "tty" ]; then
