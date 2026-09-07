@@ -34,6 +34,7 @@
 #define SIGKILL  9
 #define SIGUSR1 10
 #define SIGSEGV 11
+#define SIGILL  4
 #define SIGUSR2 12
 #define SIGPIPE 13
 #define SIGTERM 15
@@ -738,6 +739,30 @@ static void test_sigsegv(void)
     check_eq("bad store: killed by SIGSEGV", (long)wtermsig(st), SIGSEGV);
 }
 
+/* ============================================================
+ * 用例 18：浮点指令 → SIGILL 杀掉该进程，**内核不 panic**
+ *
+ * 本内核不保存任何 FP 上下文（ctx_t 与 intstkf_t 里没有一个 f 寄存器），
+ * 所以所有进 U 态的 trapframe 都把 sstatus.FS 关死，任何 F/D 指令都触发非法指令。
+ * 这条用例是那道防线的探针：结果一旦从 SIGILL 变成别的，说明 FS 被谁打开了，
+ * 而 FP 上下文并没有跟上——那时浮点会在进程切换处静默算错，比崩掉难查得多。
+ *
+ * 用 .word 下原始编码而不是写 fadd.d：本程序按 -march=rv64imac 编译（无 D 扩展），
+ * 汇编器不认这条助记符。0x02000053 = fadd.d f0,f0,f0（已用 objdump 核对）。
+ * ============================================================ */
+static void test_sigill_on_fp(void)
+{
+    long cpid = sys_clone();
+    if (cpid == 0)
+    {
+        asm volatile(".word 0x02000053");
+        sys_exit(9);
+    }
+    int st = 0;
+    sys_wait4(cpid, &st);
+    check_eq("fp instruction: killed by SIGILL", (long)wtermsig(st), SIGILL);
+}
+
 void _start(void)
 {
     puts_fd(1, "\n=== sigtest: signal syscalls ===\n");
@@ -758,6 +783,7 @@ void _start(void)
     test_sigchld();
     test_process_group();
     test_sigsegv();
+    test_sigill_on_fp();
 
     puts_fd(1, "=== sigtest done: ");
     put_long(pass_count);

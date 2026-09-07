@@ -11,6 +11,36 @@
 
 extern void trap_init_asm(void);
 
+/**
+ * @brief 处理一次非法指令异常：U 态发起的只杀该进程，S 态发起的 panic
+ * @param[in] sp 本次 trap 的寄存器帧
+ * @details 判据与 vmm.c 的 vmm_segfault 同源——sstatus.SPP 记录的是进入本次 trap
+ *   之前的特权级，从取指异常到这里之间没有嵌套 trap，所以它就是"谁执行了这条指令"。
+ *   用户程序执行非法指令是它自己的事，不该拖垮内核；内核执行到了才说明是内核 bug。
+ *
+ *   stval（本项目里叫 sbadaddr）在非法指令异常中存的是**出错指令自身的编码**
+ *   （规范允许硬件填 0）。与 sepc 一并打出来：拿 sepc 去反汇编、拿 stval 直接看编码，
+ *   两边一对就能定位，不必从地址反推。
+ * @note U 态路径不返回（走 do_exit_signal，父进程 wait 到的 status 低 7 位是 SIGILL）。
+ */
+static void trap_illegal_instruction(intstkf_t *sp)
+{
+    pcb_t *curr = proc_get_current();
+    int from_kernel = (read_csr(sstatus) & SSTATUS_SPP) ? 1 : 0;
+    printf("trap: illegal instruction sepc=0x%lx stval=0x%lx spp=%d pid=%d\n",
+           sp->sepc, sp->sbadaddr, from_kernel, curr ? curr->proc_pid : -1);
+    if (!from_kernel)
+    {
+        /* 用户态最常见的来源是浮点指令：本内核不保存 FP 上下文，构造进 U 态的
+         * trapframe 时一律把 sstatus.FS 关死，于是任何 F/D 指令都会落到这里。
+         * 这是**探针**——与其让浮点在没有上下文保存的情况下静默算错（切一次进程
+         * 结果就变），不如让它当场响，把"用户程序到底用不用浮点"变成实测。 */
+        do_exit_signal(SIGILL);
+    }
+    panic("illegal instruction in kernel mode");
+}
+
+
 static void kernelExternIrqHandler(void)
 {
     /* 如果确实是有外部中断。理论上这个if语句可以去掉。 */
@@ -198,8 +228,8 @@ static void trap_dispatch(intstkf_t *sp)
             printf("Instruction access fault");
             break;
         case CAUSE_ILLEGAL_INSTRUCTION:
-            printf("Illegal instruction");
-            break;
+            trap_illegal_instruction(sp);
+            return;
         case CAUSE_BREAKPOINT:
             printf("Breakpoint");
             break;

@@ -711,7 +711,7 @@ int do_exec(intstkf_t *sp, const char *path, char *const *argv, char *const *env
     /* 清 SIE 的理由同 enter_user_mode（那里有详细说明）。本函数是在真正的 syscall trap
      * 里被调用的，`read_csr(sstatus)` 的 SIE 本来就已被硬件清掉，这一句现在是冗余的；
      * 写出来是为了不让这条不变式依赖"调用者恰好在 trap 上下文里"这个隐含前提。 */
-    sp->sstatus = (read_csr(sstatus) & ~SSTATUS_SPP & ~SSTATUS_SIE) | SSTATUS_SPIE | SSTATUS_SUM;
+    sp->sstatus = (read_csr(sstatus) & ~SSTATUS_SPP & ~SSTATUS_SIE & ~SSTATUS_FS) | SSTATUS_SPIE | SSTATUS_SUM;
 
     return ENO0_NO_ERROR;
 }
@@ -726,7 +726,7 @@ int16_t create_kernel_thread_by_fork(void *func(void *), void *args, uint32_t cl
     /* SSTATUS_SPP: Set 1 to make sure S-mode.
      * SSTATUS_SPIE:Set 1 to make sure the interrupt will be enable when goes out of trap.Cause SPIE restores the value of SIE.
      * SSTATUS_SIE: Set 1 to enable global interrupt.Here disable the interrupt in order to simulate a in-trap envirnment. */
-    regs.sstatus = (read_csr(sstatus) | SSTATUS_SPP | SSTATUS_SPIE) & ~SSTATUS_SIE;
+    regs.sstatus = (read_csr(sstatus) | SSTATUS_SPP | SSTATUS_SPIE) & ~SSTATUS_SIE & ~SSTATUS_FS;
     extern void kernel_thread_entry(void);
     regs.sepc = (uint64_t)kernel_thread_entry;
     return do_fork((clone_flags | CLONE_VM), 0, &regs);
@@ -1584,8 +1584,15 @@ void enter_user_mode(virAddr_t entry, virAddr_t ustack)
      * ——**用户态从 `trap_return` 自己的地址开始取指**。
      * 真正的硬件 trap 不会有这个问题：进 trap 时硬件已清 SIE，帧里存的本来就是 0。
      * `create_kernel_thread_by_fork` 早就写了 `& ~SSTATUS_SIE`（注释说"模拟 in-trap 环境"），
-     * 只有本函数漏了。`sret` 会用 SPIE 恢复中断，所以这里清掉不影响返回 U 态后的状态。 */
-    f->sstatus = (read_csr(sstatus) & ~SSTATUS_SPP & ~SSTATUS_SIE) | SSTATUS_SPIE | SSTATUS_SUM;
+     * 只有本函数漏了。`sret` 会用 SPIE 恢复中断，所以这里清掉不影响返回 U 态后的状态。
+     *
+     * **`~SSTATUS_FS` 同理**：本内核不保存任何 FP 上下文（ctx_t 与 intstkf_t 里没有
+     * 一个 f 寄存器），FS 一旦不是 Off，用户态的浮点值就会在进程切换时被别人覆盖、
+     * 静默算错。关死之后任何 F/D 指令都触发非法指令，由 trap.c 的
+     * trap_illegal_instruction() 打诊断并 SIGILL 杀掉该进程——错得响亮好过错得安静。
+     * 复位值本来就是 Off，但这里写的是"软件凭空造帧就要把每一位都想清楚"，
+     * 而不是"依赖 read_csr 恰好读到 0"——上面那条 SIE 的教训就是这么来的。 */
+    f->sstatus = (read_csr(sstatus) & ~SSTATUS_SPP & ~SSTATUS_SIE & ~SSTATUS_FS) | SSTATUS_SPIE | SSTATUS_SUM;
     /* **绝对不能在这里 write_csr(sscratch, 内核栈顶)**（2026-09-03 修掉的一个真 bug）。
      * sscratch 的不变式是"S 态恒为 0"，`trap_entry` 全靠 `sscratch != 0` 判断这次 trap
      * 来自 U 态。在这里提前写非零值，就把从此刻到 `sret` 之间的整段 S 态代码置于
