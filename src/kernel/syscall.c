@@ -589,9 +589,22 @@ static long sys_unlinkat(int dirfd, const char *upath, int flags)
     return ret;
 }
 
-static long sys_renameat(int olddirfd, const char *uoldpath,
-                         int newdirfd, const char *unewpath)
+/**
+ * @brief renameat2(2)：改名/移动
+ * @param[in] flags RENAME_NOREPLACE / RENAME_EXCHANGE / RENAME_WHITEOUT，一律不支持
+ * @note flags 非 0 时返回 EINVAL 而不是忽略：那三个标志都要求**原子**语义
+ *   （不覆盖 / 互换 / 留白），底下的 FatFS 一个都给不了，静默忽略等于骗调用方。
+ * @note riscv64 的 asm-generic ABI 没有 renameat(38)，musl 的 rename()/renameat()
+ *   发的都是这个号。此前内核接的是 38——那个号在本 ABI 上根本不存在，
+ *   只有我们自己手写的 filetest 在用它，所以一直没被发现。
+ */
+static long sys_renameat2(int olddirfd, const char *uoldpath,
+                          int newdirfd, const char *unewpath, int flags)
 {
+    if (flags != 0)
+    {
+        return ENO6_INVAL_PARAM;
+    }
     /* 两个 VFS_PATH_MAX 缓冲共 512 字节，在 1 页内核栈里可以接受 */
     char koldpath[VFS_PATH_MAX];
     char knewpath[VFS_PATH_MAX];
@@ -1860,9 +1873,10 @@ long syscall_dispatch(intstkf_t *sp)
         return sys_mkdirat((int)sp->x10_a0, (const char *)sp->x11_a1, (int)sp->x12_a2);
     case __NR_unlinkat:
         return sys_unlinkat((int)sp->x10_a0, (const char *)sp->x11_a1, (int)sp->x12_a2);
-    case __NR_renameat:
-        return sys_renameat((int)sp->x10_a0, (const char *)sp->x11_a1,
-                            (int)sp->x12_a2, (const char *)sp->x13_a3);
+    case __NR_renameat2:
+        return sys_renameat2((int)sp->x10_a0, (const char *)sp->x11_a1,
+                             (int)sp->x12_a2, (const char *)sp->x13_a3,
+                             (int)sp->x14_a4);
     case __NR_chdir:
         return sys_chdir((const char *)sp->x10_a0);
     case __NR_getcwd:

@@ -20,7 +20,9 @@
 #define __NR_ioctl       29
 #define __NR_mkdirat     34
 #define __NR_unlinkat    35
-#define __NR_renameat    38
+/* riscv64 的 asm-generic ABI **没有 renameat(38)**（那是 __ARCH_WANT_RENAMEAT 的
+ * 老架构才有的），只有 renameat2。musl 的 rename()/renameat() 都发这个号。 */
+#define __NR_renameat2   276
 #define __NR_ftruncate   46
 #define __NR_chdir       49
 #define __NR_openat      56

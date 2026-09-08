@@ -15,7 +15,7 @@
 #define __NR_fcntl       25
 #define __NR_mkdirat     34
 #define __NR_unlinkat    35
-#define __NR_renameat    38
+#define __NR_renameat2   276
 #define __NR_ftruncate   46
 #define __NR_chdir       49
 #define __NR_openat      56
@@ -125,6 +125,21 @@ static inline long syscall4(long nr, long a0, long a1, long a2, long a3)
     return r_a0;
 }
 
+/* renameat2 要五个参数（第五个是 flags），syscall4 不够用 */
+static inline long syscall5(long nr, long a0, long a1, long a2, long a3, long a4)
+{
+    register long r_a7 asm("a7") = nr;
+    register long r_a0 asm("a0") = a0;
+    register long r_a1 asm("a1") = a1;
+    register long r_a2 asm("a2") = a2;
+    register long r_a3 asm("a3") = a3;
+    register long r_a4 asm("a4") = a4;
+    asm volatile("ecall"
+                 : "+r"(r_a0)
+                 : "r"(r_a1), "r"(r_a2), "r"(r_a3), "r"(r_a4), "r"(r_a7)
+                 : "memory");
+    return r_a0;
+}
 static long sys_write(int fd, const char *buf, unsigned long len)
 {
     return syscall4(__NR_write, fd, (long)buf, (long)len, 0);
@@ -172,7 +187,9 @@ static long sys_unlinkat(int dirfd, const char *path, int flags)
 }
 static long sys_renameat(int odfd, const char *op, int ndfd, const char *np)
 {
-    return syscall4(__NR_renameat, odfd, (long)op, ndfd, (long)np);
+    /* riscv64 上没有 renameat(38)，只有 renameat2(276)——这个夹具此前发的是一个
+     * 在本 ABI 上根本不存在的号，只因为内核也照着错的号接线才对得上。flags 恒 0。 */
+    return syscall5(__NR_renameat2, odfd, (long)op, ndfd, (long)np, 0);
 }
 static long sys_chdir(const char *path)  { return syscall4(__NR_chdir, (long)path, 0, 0, 0); }
 static long sys_getcwd(char *buf, unsigned long size)
