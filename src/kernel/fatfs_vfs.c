@@ -869,6 +869,30 @@ static int fatfs_close_cb(file_t *file)
 }
 
 /**
+ * @brief 把 FatFS 的 FIL 内部读写指针对齐到 VFS 的 file->f_pos
+ * @retval ENO0_NO_ERROR 已对齐（本来就相等，或 f_lseek 成功）
+ * @details FIL 自带一个读写指针，而 VFS 层会在**不经过 f_op->lseek** 的情况下改
+ *   file->f_pos——O_APPEND 就是这么干的：vfs_open 把 f_pos 置成 i_size，vfs_write
+ *   每次写前再置一次。两边不同步的话，写会落在 FIL 指针所在的位置上，
+ *   表现是"echo x >> f 变成了从头覆盖"。
+ *
+ *   顺序读写时两者天然同步（都由 f_read/f_write 一起前进），lseek 也走 f_op->lseek
+ *   把两边一起挪——所以这个洞只有 O_APPEND 会踩，一直到 BusyBox 用 >> 才暴露。
+ */
+static int fatfs_sync_pos(file_t *file, FIL *fil)
+{
+    if ((off_t)f_tell(fil) == file->f_pos)
+    {
+        return ENO0_NO_ERROR;
+    }
+    FRESULT fr = f_lseek(fil, (DWORD)file->f_pos);
+    if (fr != FR_OK)
+    {
+        return fresult_to_vfs(fr);
+    }
+    return ENO0_NO_ERROR;
+}
+/**
  * @brief 从文件中读取数据
  * @param[in]  file 文件对象
  * @param[out] buf  接收数据的缓冲区
@@ -888,6 +912,12 @@ static ssize_t fatfs_read_cb(file_t *file, void *buf, size_t len)
     if (!fil)
     {
         return (ssize_t)ENO8_NULL_POINTER;
+    }
+
+    int sret = fatfs_sync_pos(file, fil);
+    if (sret != ENO0_NO_ERROR)
+    {
+        return (ssize_t)sret;
     }
 
     UINT br = 0;
@@ -923,6 +953,12 @@ static ssize_t fatfs_write_cb(file_t *file, const void *buf, size_t len)
     if (!fil)
     {
         return (ssize_t)ENO8_NULL_POINTER;
+    }
+
+    int sret = fatfs_sync_pos(file, fil);
+    if (sret != ENO0_NO_ERROR)
+    {
+        return (ssize_t)sret;
     }
 
     UINT bw = 0;

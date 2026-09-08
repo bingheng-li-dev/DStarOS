@@ -441,6 +441,39 @@ void _start(void)
     sys_close((int)dfd);
     check_eq("close", sys_close((int)fd), 0);
 
+    /* ---------- O_APPEND ----------
+     * 这一组补于 2026-09-08：此前 72 条断言一条都没走过 O_APPEND，于是
+     * "fatfs 读写回调从不按 file->f_pos 定位"这个洞一直没被发现——O_APPEND 是
+     * **唯一**一条由 VFS 层绕过 f_op->lseek 直接改 f_pos 的路径，其余场景两份
+     * 位置天然同步。详见 .claude/bugfixes.md。
+     *
+     * 判据刻意用**长度不同**的两段：等长覆盖写出来的结果和追加只差顺序，
+     * 看 st_size 也看不出来。 */
+    {
+        const char *ap = "/append.txt";
+        long afd = sys_openat(AT_FDCWD, ap, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+        check("append: create", afd >= 0);
+        check_eq("append: initial write", sys_write((int)afd, "AAAA", 4), 4);
+        check_eq("append: close after initial write", sys_close((int)afd), 0);
+
+        /* 重新以 O_APPEND 打开：f_pos 必须落在文件末尾，而不是 0 */
+        afd = sys_openat(AT_FDCWD, ap, O_WRONLY | O_APPEND, 0);
+        check("append: reopen with O_APPEND", afd >= 0);
+        check_eq("append: write appends", sys_write((int)afd, "BB", 2), 2);
+        check_eq("append: close", sys_close((int)afd), 0);
+
+        afd = sys_openat(AT_FDCWD, ap, O_RDONLY, 0);
+        check("append: reopen for read", afd >= 0);
+        struct linux_stat ast;
+        check_eq("append: fstat", sys_fstat((int)afd, &ast), 0);
+        check_eq("append: st_size == 6 (not 4)", ast.st_size, 6);
+        char abuf[8] = { 0 };
+        check_eq("append: read back 6", sys_read((int)afd, abuf, sizeof(abuf)), 6);
+        check("append: content is AAAABB", ustrcmp(abuf, "AAAABB") == 0);
+        check_eq("append: close read fd", sys_close((int)afd), 0);
+        check_eq("append: unlink", sys_unlinkat(AT_FDCWD, ap, 0), 0);
+    }
+
     /* ---------- mkdirat + 子目录里建文件 ---------- */
     check_eq("mkdirat /fdir", sys_mkdirat(AT_FDCWD, "/fdir", 0755), 0);
     long ifd = sys_openat(AT_FDCWD, "/fdir/inner.txt", O_CREAT | O_RDWR, 0644);
