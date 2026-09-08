@@ -12,32 +12,30 @@
 extern void trap_init_asm(void);
 
 /**
- * @brief 处理一次非法指令异常：U 态发起的只杀该进程，S 态发起的 panic
- * @param[in] sp 本次 trap 的寄存器帧
+ * @brief 处理一次由指令自身引发的同步异常：U 态发起的只杀该进程，S 态发起的 panic
+ * @param[in] sp   本次 trap 的寄存器帧
+ * @param[in] what 异常名，原样进诊断行
+ * @param[in] sig  U 态时用来杀掉该进程的信号
  * @details 判据与 vmm.c 的 vmm_segfault 同源——sstatus.SPP 记录的是进入本次 trap
- *   之前的特权级，从取指异常到这里之间没有嵌套 trap，所以它就是"谁执行了这条指令"。
- *   用户程序执行非法指令是它自己的事，不该拖垮内核；内核执行到了才说明是内核 bug。
+ *   之前的特权级，从异常发生到这里之间没有嵌套 trap，所以它就是"谁执行了这条指令"。
+ *   用户程序自己作死不该拖垮内核；内核执行到了才说明是内核 bug。
  *
- *   stval（本项目里叫 sbadaddr）在非法指令异常中存的是**出错指令自身的编码**
- *   （规范允许硬件填 0）。与 sepc 一并打出来：拿 sepc 去反汇编、拿 stval 直接看编码，
- *   两边一对就能定位，不必从地址反推。
- * @note U 态路径不返回（走 do_exit_signal，父进程 wait 到的 status 低 7 位是 SIGILL）。
+ *   stval（本项目里叫 sbadaddr）的含义随异常而变：非法指令时是**出错指令自身的编码**
+ *   （规范允许硬件填 0），取指/访存类异常时是**出错的地址**。两种都和 sepc 一并打出来：
+ *   拿 sepc 去反汇编、拿 stval 看编码或地址，两边一对就能定位。
+ * @note U 态路径不返回（走 do_exit_signal，父进程 wait 到的 status 低 7 位就是 sig）。
  */
-static void trap_illegal_instruction(intstkf_t *sp)
+static void trap_user_exception(intstkf_t *sp, const char *what, int sig)
 {
     pcb_t *curr = proc_get_current();
     int from_kernel = (read_csr(sstatus) & SSTATUS_SPP) ? 1 : 0;
-    printf("trap: illegal instruction sepc=0x%lx stval=0x%lx spp=%d pid=%d\n",
-           sp->sepc, sp->sbadaddr, from_kernel, curr ? curr->proc_pid : -1);
+    printf("trap: %s sepc=0x%lx stval=0x%lx spp=%d pid=%d\n",
+           what, sp->sepc, sp->sbadaddr, from_kernel, curr ? curr->proc_pid : -1);
     if (!from_kernel)
     {
-        /* 用户态最常见的来源是浮点指令：本内核不保存 FP 上下文，构造进 U 态的
-         * trapframe 时一律把 sstatus.FS 关死，于是任何 F/D 指令都会落到这里。
-         * 这是**探针**——与其让浮点在没有上下文保存的情况下静默算错（切一次进程
-         * 结果就变），不如让它当场响，把"用户程序到底用不用浮点"变成实测。 */
-        do_exit_signal(SIGILL);
+        do_exit_signal(sig);
     }
-    panic("illegal instruction in kernel mode");
+    panic("%s in kernel mode", what);
 }
 
 
@@ -221,24 +219,31 @@ static void trap_dispatch(intstkf_t *sp)
         case CAUSE_SUPERVISOR_ECALL:
             printf("Environment call from S-mode");
             return;
+        /* 下面这六条形状相同：都是"某条指令自己作死"，U 态触发只杀该进程。
+         * 信号映射按 POSIX。此前只有非法指令一条这么做，其余五条一律 panic 整个内核
+         * ——那意味着一个用户程序里的野指针取指就能带走整个操作系统。 */
         case CAUSE_MISALIGNED_FETCH:
-            printf("Instruction address misaligned");
-            break;
+            trap_user_exception(sp, "instruction address misaligned", SIGBUS);
+            return;
         case CAUSE_FAULT_FETCH:
-            printf("Instruction access fault");
-            break;
+            trap_user_exception(sp, "instruction access fault", SIGSEGV);
+            return;
         case CAUSE_ILLEGAL_INSTRUCTION:
-            trap_illegal_instruction(sp);
+            /* 用户态最常见的来源是浮点指令：本内核不保存 FP 上下文，构造进 U 态的
+             * trapframe 时一律把 sstatus.FS 关死，于是任何 F/D 指令都会落到这里。
+             * 这是**探针**——与其让浮点在没有上下文保存的情况下静默算错（切一次进程
+             * 结果就变），不如让它当场响，把"用户程序到底用不用浮点"变成实测。 */
+            trap_user_exception(sp, "illegal instruction", SIGILL);
             return;
         case CAUSE_BREAKPOINT:
-            printf("Breakpoint");
-            break;
+            trap_user_exception(sp, "breakpoint", SIGTRAP);
+            return;
         case CAUSE_MISALIGNED_LOAD:
-            printf("Load address misaligned");
-            break;
+            trap_user_exception(sp, "load address misaligned", SIGBUS);
+            return;
         case CAUSE_MISALIGNED_STORE:
-            printf("Store address misaligned");
-            break;
+            trap_user_exception(sp, "store address misaligned", SIGBUS);
+            return;
         case CAUSE_HYPERVISOR_ECALL:
             printf("Environment call from H-mode");
             break;

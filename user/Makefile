@@ -37,7 +37,7 @@ MUSL_CFLAGS := -O2 -static -Wall -Werror
 
 .PHONY: all clean
 
-all: hello.elf fork_wait.elf exectest.elf filetest.elf pipetest.elf ttytest.elf memtest.elf sigtest.elf timetest.elf argvtest.elf segtest.elf waittest.elf mhello.elf msyscheck.elf mrootfs.elf
+all: hello.elf fork_wait.elf exectest.elf filetest.elf pipetest.elf ttytest.elf memtest.elf sigtest.elf timetest.elf argvtest.elf segtest.elf waittest.elf trapkill.elf mhello.elf msyscheck.elf mrootfs.elf
 
 hello.elf: hello.c $(LDSCRIPT)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ hello.c
@@ -87,6 +87,10 @@ waittest.elf: waittest.c $(LDSCRIPT)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ waittest.c
 	$(OBJCOPY) --strip-all $@ $@
 
+trapkill.elf: trapkill.c $(LDSCRIPT)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ trapkill.c
+	$(OBJCOPY) --strip-all $@ $@
+
 mhello.elf: mhello.c
 	$(MUSL_CC) $(MUSL_CFLAGS) -o $@ mhello.c
 	$(MUSL_STRIP) $@
@@ -106,4 +110,4 @@ check-mhello: mhello.elf
 	@$(MUSL_OBJDUMP) -d $< | grep -oE '\b(f(add|sub|mul|div|sqrt|sgnj|min|max|cvt|mv|eq|lt|le|class|madd|msub|nmadd|nmsub)\.[sd]|f(l|s)[wd])\b' | sort | uniq -c; echo "  (上面为空 = 没有浮点指令)"
 
 clean:
-	rm -f hello.elf fork_wait.elf exectest.elf filetest.elf pipetest.elf ttytest.elf memtest.elf sigtest.elf timetest.elf argvtest.elf segtest.elf waittest.elf mhello.elf msyscheck.elf mrootfs.elf
+	rm -f hello.elf fork_wait.elf exectest.elf filetest.elf pipetest.elf ttytest.elf memtest.elf sigtest.elf timetest.elf argvtest.elf segtest.elf waittest.elf trapkill.elf mhello.elf msyscheck.elf mrootfs.elf

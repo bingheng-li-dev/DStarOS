@@ -169,6 +169,14 @@
  * 置 1 时不跑其它测试程序与默认用户程序。 */
 #define DEBUG_WAIT_TEST 0
 
+/* U 态同步异常不得 panic 内核：置 1 时 fork 一个 user/trapkill.c 编译出的用户程序。
+ * 逐条触发 ebreak / 非法指令 / 未对齐访存 / 未对齐取指，断言"只杀掉该子进程、
+ * 内核仍在运行"。触发不了的那几条（RV64GC 与 QEMU virt 决定的，见程序内注释）
+ * 如实报告为 "no trap"，不伪造异常。
+ * 串口应看到 "=== trapkill done: N pass  0 fail ..."。
+ * 置 1 时不跑其它测试程序与默认用户程序。 */
+#define DEBUG_TRAP_TEST 0
+
 /* PTE A/D 位实测探针：置 1 时在 hart0 初始化阶段（trap_init 之后）跑
  * vmm_probe_pte_ad()，判定本平台是硬件自动置位 A/D 还是软件管理。
  * 时钟置换算法依赖硬件自动置位，动手前用它确认，不要照规范假设。

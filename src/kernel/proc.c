@@ -1321,6 +1321,8 @@ static void run_user_program(const char *path)
 #define USER_PROGRAM_PATH "/bin/mrootfs.elf"
 #elif DEBUG_WAIT_TEST
 #define USER_PROGRAM_PATH "/bin/waittest.elf"
+#elif DEBUG_TRAP_TEST
+#define USER_PROGRAM_PATH "/bin/trapkill.elf"
 #else
 #define USER_PROGRAM_PATH "/bin/hello.elf"
 #endif
