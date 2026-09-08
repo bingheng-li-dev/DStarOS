@@ -7,18 +7,18 @@
 
 extern osslock_t tick_lock;
 
-/* time CSR 的计数频率，按平台实际主频折算：
- * QEMU virt 的 time CSR 为 10 MHz（-machine dumpdtb 导出的 timebase-frequency 实测确认）；
- * K210 无 time CSR，由 rustsbi-k210 模拟 CLINT mtime，频率对应其 390 MHz 主频折算。
- * 二者不可混用同一个常量——此前长期沿用 K210 的折算值在 QEMU 上运行，实际 tick 周期
- * 变成约 0.195 秒（~5 Hz），仅在此前从未依赖低延迟轮询的场景下未被察觉。
- * @todo 若日后硬件选型定为 VisionFive 2（JH7110），需按其 time CSR 实际频率
- *   （SoC 手册/设备树 timebase-frequency 实测值，不是 K210 的 390 MHz）新增一个
- *   平台分支，不可直接套用下面任一现有值。 */
-#ifdef QEMU
-#define TIMEBASE_FREQ_HZ 10000000UL
+/* time CSR 的计数频率。**必须与平台实际值一致**：此前长期沿用另一平台的折算值，
+ * 实际 tick 周期变成约 0.195 秒（~5 Hz），因为在此之前没有任何功能依赖低延迟轮询，
+ * 一直没被察觉，直到 TTY 的输入轮询接上去才暴露。
+ *
+ * 保持编译期常量而不是运行时变量，是因为它被 ktime.h 的内联函数与 syscall.c 当除数用，
+ * 常量除法会被优化成乘加移位；改成变量就是每次 clock_gettime 都做一次真 64 位除法。 */
+#if defined(QEMU)
+#define TIMEBASE_FREQ_HZ 10000000UL     /* -machine dumpdtb 导出的 timebase-frequency 实测确认 */
+#elif defined(VF2)
+#define TIMEBASE_FREQ_HZ 4000000UL      /* JH7110，**待上板核对** */
 #else
-#define TIMEBASE_FREQ_HZ 390000000UL
+#error "未知平台：TIMEBASE_FREQ_HZ 没有对应取值（PLATFORM 只允许 QEMU / VF2）"
 #endif
 
 /* 定时器中断频率（5 ms 一个 tick）。tty 的输入靠 tick 轮询，低于这个值打字会发粘。 */

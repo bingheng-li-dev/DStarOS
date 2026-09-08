@@ -1530,7 +1530,7 @@ static long sys_clock_gettime(int clock_id, struct timespec *uts)
 
 /**
  * @brief 时钟分辨率，即 time CSR 的一格
- * @note K210 的 390 MHz 下这个除法截断成 2 ns，可接受——clock_getres 的语义本来就是"约"。
+ * @note 频率不整除 1e9 时这个除法会截断，可接受——clock_getres 的语义本来就是"约"。
  */
 static long sys_clock_getres(int clock_id, struct timespec *uts)
 {

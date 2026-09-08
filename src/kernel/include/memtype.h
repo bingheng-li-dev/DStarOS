@@ -67,7 +67,8 @@ extern char ebss[];      /* .bss 段结束 */
  * 改这里任何一个值都要同步改 scripts/run.sh 与 scripts/forgdb.sh 的 -m，
  * 三者对不上时 QEMU 只会静默给出更小的 RAM，越界访问要到很后面才暴露。
  *
- * K210 只有 8 MB SRAM，上板时这几个值必须按平台分支；硬件选型未定，暂不动。 */
+ * VF2(JH7110) 上板时这几个值要按 PLATFORM 分支：DDR 基址是 0x4000_0000，
+ * 内存规模先与 QEMU 侧同量级（放开到 GB 级要先做 2 MB 大页线性映射）。 */
 #define MEMORY_END ((phyAddr_t)(0x87000000))
 #define ROOTFS_PHYS_BASE ((phyAddr_t)(0x87000000))
 #define ROOTFS_MAX_SIZE ((uint64_t)(16 * 1024 * 1024))

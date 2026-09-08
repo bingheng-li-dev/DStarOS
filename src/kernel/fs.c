@@ -19,7 +19,7 @@ void fs_init(void)
     /* 2. 注册 fatfs 文件系统类型 */
     fatfs_register();
 
-    /* 3. 挂载根文件系统（驱动号 0 对应 QEMU ramdisk 或 K210 SD 卡）*/
+    /* 3. 挂载根文件系统（驱动号 0 对应内存 ramdisk，见 diskio.c）*/
     int ret = vfs_mount("/", "fatfs", NULL);
     if (ret != ENO0_NO_ERROR)
     {

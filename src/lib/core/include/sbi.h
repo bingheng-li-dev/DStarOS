@@ -4,7 +4,7 @@
  * Keeps only extensions needed for the BusyBox target path:
  * v0.1 legacy, BASE, TIME, IPI, RFENCE, HSM, SRST.
  *
- * SMP note: DStarOS has 2 harts (hart 0 / hart 1 on K210).
+ * SMP note: hart_mask is a plain unsigned long bitmask (bit N = hart N).
  * hart_mask is a plain unsigned long bitmask (bit N = hart N).
  * No cpumask_t needed.
  *
@@ -347,16 +347,6 @@ static inline int sbi_hsm_hart_status(unsigned long hartid)
     if (ret.error)
         return (int)ret.error;
     return (int)ret.value;
-}
-
-/* ------------------------------------------------------------------ */
-/* Vendor extension: enable M-mode external interrupt forwarding        */
-/* Custom call used in trap.c; kept as-is.                              */
-/* ------------------------------------------------------------------ */
-
-static inline void sbi_set_mie(void)
-{
-    SBI_CALL_LEGACY(0x0A000005, 0, 0, 0);
 }
 
 /* ------------------------------------------------------------------ */

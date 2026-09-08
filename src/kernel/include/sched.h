@@ -11,7 +11,7 @@
 
 /**
  * @brief 读取调度用的当前时刻
- * @return `time` CSR 的当前值（QEMU virt 为 10 MHz，K210 约 7.8 MHz）
+ * @return `time` CSR 的当前值（频率见 tick.h 的 TIMEBASE_FREQ_HZ，按平台不同）
  * @details @TODO
  *   有意**不用** tick 计数（`tick_get_current()`）作为时基：即使按 200 Hz（5 ms/tick）
  *   折算，协作式调度下内核线程往往打印完就让出，运行时长远小于一个 tick ——

@@ -20,9 +20,9 @@ struct proc_control_block;
  * @brief time CSR 计数值换算成纳秒
  * @details 先把整秒摘出去再乘余数，否则 counts * 1e9 在 counts 超过约 1.8e10
  *   （QEMU 的 10 MHz 下约 30 分钟）时 64 位就溢出了。
- *   余数最大 FREQ-1，乘 1e9 后最坏 3.9e17（K210 的 390 MHz），离 1.8e19 还很远。
- * @note 不能图省事写成 (counts % FREQ) * (NSEC_PER_SEC / FREQ)——QEMU 上
- *   1e9/1e7 = 100 恰好整除、碰巧对，K210 的 390 MHz 不整除，那样写会系统性偏 20%。
+ *   余数最大 FREQ-1，乘 1e9 后最坏 1e16（10 MHz），离 1.8e19 还很远。
+ * @note 不能图省事写成 (counts % FREQ) * (NSEC_PER_SEC / FREQ)——当前两个平台
+ *   （10 MHz / 4 MHz）都恰好整除、碰巧对，但换一个不整除的频率就会系统性偏。
  */
 static inline uint64_t counts_to_ns(uint64_t counts)
 {

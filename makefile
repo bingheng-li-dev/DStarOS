@@ -2,7 +2,13 @@
 TOOLPATH?="/root/riscv/toolchain-kendryte210/bin"
 TOOLPREFIX?=$(TOOLPATH)/riscv64-unknown-elf-
 
+# 目标平台。K210 已于 2026-09-08 退出（priv-1.9.1 草案规范 + 8 MB SRAM），
+# 相关代码已整体删除，不要再往回加平台分支。
 PLATFORM?=QEMU
+VALID_PLATFORMS := QEMU VF2
+ifeq ($(filter $(PLATFORM),$(VALID_PLATFORMS)),)
+$(error PLATFORM=$(PLATFORM) 无效，可选：$(VALID_PLATFORMS))
+endif
 
 CC := $(TOOLPREFIX)gcc
 AS := $(TOOLPREFIX)as
@@ -17,7 +23,11 @@ CFLAGS += -ffreestanding -fno-common -mno-relax
 CFLAGS += -MMD -MP
 CFLAGS += -D $(PLATFORM)
 
-LDSCRIPT:=./lds/linker_qemu.ld
+ifeq ($(PLATFORM),VF2)
+LDSCRIPT := ./lds/linker_vf2.ld
+else
+LDSCRIPT := ./lds/linker_qemu.ld
+endif
 LDFLAGS := -z max-page-size=4096
 
 KERNEL_ELF:=kernel.elf

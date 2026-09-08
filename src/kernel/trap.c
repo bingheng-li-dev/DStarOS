@@ -66,11 +66,6 @@ static void kernelExternIrqHandler(void)
         {
             plicComplete(irq);
         }
-#ifndef QEMU
-        /* clear pending bit. */
-        set_csr(sip, read_csr(sip) & ~0x2);
-        sbi_set_mie();
-#endif
     }
 }
 

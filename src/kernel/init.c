@@ -16,12 +16,6 @@
 #include "ktime.h"
 #include "fpu.h"
 
-#ifndef QEMU
-#include "sdcard.h"
-#include "fpioa.h"
-#include "dmac.h"
-#endif
-
 #if DEBUG_INIT_main
 extern int main(int argc, char **args);
 #endif
@@ -62,10 +56,6 @@ void os_init_after_mmu_enable(uint64_t hartid)
                           * proc_init 会给 init 装 fd 0/1/2，届时 tty 必须已经能用 */
         signal_init();   /* sigpage 的物理页；必须早于任何 create_user_mm() */
 
-#ifndef QEMU
-        fpioa_pin_init();
-        dmac_init();
-#endif
         // plicInit();
         fs_init();
         sched_init();   /* 全局就绪队列只能由 hart 0 初始化一次，否则 hart 1 会把 init 冲掉 */

@@ -1,54 +1,35 @@
 #ifndef _PERIPH_LAYOUT_H_
 #define _PERIPH_LAYOUT_H_
 
-// k210 peripherals
-// (0x0200_0000, 0x1000),      /* CLINT     */
-// // we only need claim/complete for target0 after initializing
-// (0x0C20_0000, 0x1000),      /* PLIC      */
-// (0x3800_0000, 0x1000),      /* UARTHS    */
-// (0x3800_1000, 0x1000),      /* GPIOHS    */
-// (0x5020_0000, 0x1000),      /* GPIO      */
-// (0x5024_0000, 0x1000),      /* SPI_SLAVE */
-// (0x502B_0000, 0x1000),      /* FPIOA     */
-// (0x502D_0000, 0x1000),      /* TIMER0    */
-// (0x502E_0000, 0x1000),      /* TIMER1    */
-// (0x502F_0000, 0x1000),      /* TIMER2    */
-// (0x5044_0000, 0x1000),      /* SYSCTL    */
-// (0x5200_0000, 0x1000),      /* SPI0      */
-// (0x5300_0000, 0x1000),      /* SPI1      */
-// (0x5400_0000, 0x1000),      /* SPI2      */
-// (0x8000_0000, 0x600000),    /* Memory    */
-
-// qemu -machine virt is set up like this,
-// based on qemu's hw/riscv/virt.c:
-//
-// 00001000 -- boot ROM, provided by qemu
-// 02000000 -- CLINT
-// 0C000000 -- PLIC
-// 10000000 -- uart0 
-// 10001000 -- virtio disk 
-// 80000000 -- boot ROM jumps here in machine mode
-//             -kernel loads the kernel here
-// unused RAM after 80000000.
+/* 外设物理地址布局。
+ *
+ * QEMU virt（见 qemu hw/riscv/virt.c）：
+ *   0x0200_0000  CLINT
+ *   0x0C00_0000  PLIC
+ *   0x1000_0000  UART0
+ *   0x1000_1000  virtio disk
+ *   0x8000_0000  RAM（RustSBI 在前，内核从 0x8020_0000 起）
+ *
+ * ⚠️ **下面的 *_V 宏目前没有任何映射代码去落实它**。`VIRT_OFFSET` 是早期从 xv6
+ * 抄来的一套设备虚拟地址方案，与内核实际在用的偏移映射
+ * （KVA = PA + KERNEL_VA_OFFSET，见 memtype.h）**不是一套体系**——内核页表只映射了
+ * RAM，没有映射任何 MMIO。这也正是 init.c 里 plicInit() 一直被注释掉的原因。
+ * 真要用 MMIO 时，应当改成 pa_to_kva(PA) 并在内核页表里补设备段映射，
+ * 而不是沿用 VIRT_OFFSET。
+ *
+ * VF2(JH7110) 的外设地址待上板核对后按 PLATFORM 分支补。
+ */
 
 #define VIRT_OFFSET             0x3F00000000L
 
-#ifdef QEMU
-// qemu puts UART registers here in physical memory.
 #define UART                    0x10000000L
-#else
-#define UART                    0x38000000L
-#endif
-
 #define UART_V                  (UART + VIRT_OFFSET)
 
-#ifdef QEMU
-// virtio mmio interface
+/* virtio mmio interface */
 #define VIRTIO0                 0x10001000
 #define VIRTIO0_V               (VIRTIO0 + VIRT_OFFSET)
-#endif
 
-// local interrupt controller, which contains the timer.
+/* local interrupt controller, which contains the timer. */
 #define CLINT                   0x02000000L
 #define CLINT_V                 (CLINT + VIRT_OFFSET)
 
@@ -63,29 +44,5 @@
 #define PLIC_SPRIORITY(hart)    (PLIC_V + 0x201000 + (hart) * 0x2000)
 #define PLIC_MCLAIM(hart)       (PLIC_V + 0x200004 + (hart) * 0x2000)
 #define PLIC_SCLAIM(hart)       (PLIC_V + 0x201004 + (hart) * 0x2000)
-
-#ifndef QEMU
-#define GPIOHS                  0x38001000
-#define DMAC                    0x50000000
-#define GPIO                    0x50200000
-#define SPI_SLAVE               0x50240000
-#define FPIOA                   0x502B0000
-#define SPI0                    0x52000000
-#define SPI1                    0x53000000
-#define SPI2                    0x54000000
-#define SYSCTL                  0x50440000
-
-#define GPIOHS_V                (0x38001000 + VIRT_OFFSET)
-#define DMAC_V                  (0x50000000 + VIRT_OFFSET)
-#define GPIO_V                  (0x50200000 + VIRT_OFFSET)
-#define SPI_SLAVE_V             (0x50240000 + VIRT_OFFSET)
-#define FPIOA_V                 (0x502B0000 + VIRT_OFFSET)
-#define SPI0_V                  (0x52000000 + VIRT_OFFSET)
-#define SPI1_V                  (0x53000000 + VIRT_OFFSET)
-#define SPI2_V                  (0x54000000 + VIRT_OFFSET)
-#define SYSCTL_V                (0x50440000 + VIRT_OFFSET)
-
-
-#endif
 
 #endif
