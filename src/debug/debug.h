@@ -181,7 +181,7 @@
  * tools/build_rootfs.sh 放进镜像）。它是第一个不由本仓库编写的用户程序。
  * **必须先 `bash tools/build_busybox.sh` 再 `make rootfs`**，否则镜像里没有它。
  * 置 1 时不跑其它测试程序与默认用户程序。 */
-#define DEBUG_BUSYBOX_TEST 1
+#define DEBUG_BUSYBOX_TEST 0
 
 /* BusyBox 以什么形态启动，仅在 DEBUG_BUSYBOX_TEST 为 1 时有意义：
  *   1 = 交互式 shell（argv 为 {"busybox", "sh"}），**这是默认的交付形态**；

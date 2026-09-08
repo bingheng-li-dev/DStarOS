@@ -76,13 +76,29 @@ done
 # 用户程序统一放 /bin。fork_wait.elf 与 msyscheck.elf 的主名超过 8 字符，
 # 会生成长文件名目录项——ffconf.h 里 _USE_LFN=3 打开了 LFN，vfs 回归也覆盖过这条路径。
 shopt -s nullglob
-elves=("$ROOT_DIR"/user/*.elf)
+elves=()
+for e in "$ROOT_DIR"/user/*.elf; do
+    # init.elf 单独装到 ::/sbin/init，不进 /bin——留一份重名的副本在 /bin 只会让
+    # 以后排查"到底 exec 了哪一个"时多一个候选。
+    [ "$(basename "$e")" = "init.elf" ] && continue
+    elves+=("$e")
+done
 if [ ${#elves[@]} -eq 0 ]; then
     echo "build_rootfs: user/ 下没有 .elf，先在 user/ 里 make" >&2
     exit 1
 fi
 mcopy -i "$OUT" "${elves[@]}" ::/bin/
 echo "build_rootfs: 拷入 ${#elves[@]} 个用户程序"
+
+# /sbin/init：阶段 11 起 PID 1 直接变身成它（见 src/kernel/proc.c 的 BOOT_AS_INIT）。
+# **不存在时不报错**，理由同下面的 busybox：纯内核回归不需要它。
+INIT_BIN="$ROOT_DIR/user/init.elf"
+if [ -f "$INIT_BIN" ]; then
+    mcopy -i "$OUT" "$INIT_BIN" ::/sbin/init
+    echo "build_rootfs: 拷入 /sbin/init（$(stat -c %s "$INIT_BIN") 字节）"
+else
+    echo "build_rootfs: 未找到 $INIT_BIN，本次不放 /sbin/init（先在 user/ 里 make）"
+fi
 
 # BusyBox（tools/build_busybox.sh 的产物）。**不存在时不报错**：纯内核回归
 # （sched/slab/vfs/dcache）不需要它，照"镜像不存在时内核仍能启动"的同一条思路。

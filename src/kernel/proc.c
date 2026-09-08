@@ -199,6 +199,15 @@ static void exit_common(int16_t error_code, uint8_t sig)
 {
     pcb_t *curr = proc_get_current();
 
+    /* PID 1 退出 = 系统失去 init：孤儿从此无人收割、shell 也再起不来，
+     * 与其带着这个空洞继续跑，不如就地 panic（与 Linux 一致，也好定位）。
+     * **必须放在最前面**——下面的孤儿过继要 find_proc_by_pid(1)，那正是自己。
+     * 回归形态下 PID 1 是内核线程、永远走不到这里，这条判断只对生产形态生效。 */
+    if (curr->proc_pid == 1)
+    {
+        panic("init (pid 1) exited: code=%d sig=%d", (int)error_code, (int)sig);
+    }
+
     /* 摘掉两条定时链上可能残留的节点。当前走不到（进程只能在自己的 nanosleep
      * 返回点之后才可能退出，那里已经摘过），但把 pcb 还给 slab 之前确保它不再
      * 挂在任何全局链表上是零成本的保险——真出现残留就是 tick 中断里的悬空指针。 */
@@ -1345,8 +1354,20 @@ static void run_user_program(const char *path, const char *const argv[], int arg
 #define USER_PROGRAM_PATH "/bin/busybox"
 #elif DEBUG_MFP_TEST
 #define USER_PROGRAM_PATH "/bin/mfptest.elf"
-#else
+#elif DEBUG_FORK_WAIT_TEST
+/* 这个开关靠内核态 init 的收割循环打印 "reaped pid=..."，不能让 PID 1 变身；
+ * 给它一个跑完就退出的程序占位，收割循环才有东西可收。 */
 #define USER_PROGRAM_PATH "/bin/hello.elf"
+#else
+/* 没有任何测试开关打开 = 生产形态：PID 1 自己变身 /sbin/init（阶段 11）。
+ * BOOT_AS_INIT **只在这一支定义**，于是往上面那条链里新加测试开关时不用记得
+ * 同步维护它——新开关一旦命中，这一支就走不到，BOOT_AS_INIT 自动是 0。 */
+#define USER_PROGRAM_PATH "/sbin/init"
+#define BOOT_AS_INIT 1
+#endif
+
+#ifndef BOOT_AS_INIT
+#define BOOT_AS_INIT 0
 #endif
 
 /* 只有 BusyBox 需要真正的 argv——它按 argv[0]（以及 standalone 模式下的 argv[1]）
@@ -1364,7 +1385,7 @@ static void run_user_program(const char *path, const char *const argv[], int arg
 #define USER_PROGRAM_ARGV { "busybox", "sh", "-c", "echo bb-echo && ls / >/dev/null && cat /etc/issue >/dev/null && mkdir /tmp/bb && ls /tmp >/dev/null && rmdir /tmp/bb && ls / | cat >/dev/null && pwd >/dev/null && uname >/dev/null && sleep 0 && echo === bbtest done ===" }
 #endif
 #else
-#define USER_PROGRAM_ARGV { "/init" }
+#define USER_PROGRAM_ARGV { "init" }
 #endif
 
 /* argv[0] 一律写程序名而不是路径：BusyBox 按 argv[0] 分发 applet，
@@ -1458,13 +1479,23 @@ static int16_t init(void)
     }
 #endif
 
+#if BOOT_AS_INIT
+    /* 生产形态：PID 1 **自己变身**成 /sbin/init，不 fork、也不再有内核态收割循环。
+     * 收割职责随之搬到用户态——do_exit 的孤儿过继目标仍然是 find_proc_by_pid(1)，
+     * 那正是变身之后的这个进程，内核侧的过继机制一行都没改。
+     * run_user_program 末尾是 enter_user_mode，正常情况下永不返回。 */
+    run_first_user_program();
+    panic("init: run_user_program(" USER_PROGRAM_PATH ") returned");
+#else
     int16_t pid = create_kernel_thread_by_fork((void *)run_first_user_program, NULL, 0);
     if (pid < 0)
     {
         panic("Failed to fork user program thread!\n");
     }
 
-    /* 永久收割循环：孤儿最终都会过继到这里，没有这个循环孤儿僵尸会永久堆积 */
+    /* 永久收割循环：孤儿最终都会过继到这里，没有这个循环孤儿僵尸会永久堆积。
+     * **回归形态专用**：scripts/regress.sh 判一套跑完，靠的就是下面那句
+     * "no more children, shutting down" 之后 QEMU 退出。 */
     while (1)
     {
         int status;
@@ -1492,6 +1523,7 @@ static int16_t init(void)
             sbi_shutdown();
         }
     }
+#endif /* BOOT_AS_INIT */
 }
 
 static void fork_out(void)
