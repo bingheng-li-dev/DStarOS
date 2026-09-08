@@ -740,17 +740,20 @@ static void test_sigsegv(void)
 }
 
 /* ============================================================
- * 用例 18：浮点指令 → SIGILL 杀掉该进程，**内核不 panic**
+ * 用例 18：浮点指令**正常执行**，不再被 SIGILL 杀
  *
- * 本内核不保存任何 FP 上下文（ctx_t 与 intstkf_t 里没有一个 f 寄存器），
- * 所以所有进 U 态的 trapframe 都把 sstatus.FS 关死，任何 F/D 指令都触发非法指令。
- * 这条用例是那道防线的探针：结果一旦从 SIGILL 变成别的，说明 FS 被谁打开了，
- * 而 FP 上下文并没有跟上——那时浮点会在进程切换处静默算错，比崩掉难查得多。
+ * 这条用例原本断言的是反面（FS 关死 + SIGILL 探针）。BusyBox 进来之后内核补上了
+ * 真正的 FP 上下文（pcb 里的 proc_fp_regs/proc_fcsr + 切换时存取），进 U 态的
+ * trapframe 把 sstatus.FS 置成 Initial，浮点于是可以正常用了。
+ *
+ * **判据翻面了，但防线没撤**：如果哪天有人把 FS 又关回 Off、或者把 fpu_save/
+ * fpu_restore 摘掉一半，这条会立刻变红。浮点算得对不对由 mfptest 那套负责
+ * （它用 musl 工具链编，能直接写 double），这里只管"能不能执行"。
  *
  * 用 .word 下原始编码而不是写 fadd.d：本程序按 -march=rv64imac 编译（无 D 扩展），
  * 汇编器不认这条助记符。0x02000053 = fadd.d f0,f0,f0（已用 objdump 核对）。
  * ============================================================ */
-static void test_sigill_on_fp(void)
+static void test_fp_no_longer_traps(void)
 {
     long cpid = sys_clone();
     if (cpid == 0)
@@ -760,7 +763,8 @@ static void test_sigill_on_fp(void)
     }
     int st = 0;
     sys_wait4(cpid, &st);
-    check_eq("fp instruction: killed by SIGILL", (long)wtermsig(st), SIGILL);
+    check_eq("fp instruction: not killed by any signal", (long)wtermsig(st), 0);
+    check_eq("fp instruction: child ran to completion", (long)wexitstatus(st), 9);
 }
 
 void _start(void)
@@ -783,7 +787,7 @@ void _start(void)
     test_sigchld();
     test_process_group();
     test_sigsegv();
-    test_sigill_on_fp();
+    test_fp_no_longer_traps();
 
     puts_fd(1, "=== sigtest done: ");
     put_long(pass_count);

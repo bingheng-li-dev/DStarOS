@@ -177,6 +177,14 @@
  * 置 1 时不跑其它测试程序与默认用户程序。 */
 #define DEBUG_TRAP_TEST 0
 
+/* 浮点上下文验证：置 1 时 fork 一个 user/mfptest.c 编译出的用户程序。
+ * 用 musl 工具链编（rv64gc/lp64d），能直接写 double——裸机那套没有 D 扩展。
+ * 验的是"切一次进程浮点结果会不会变"：跨 syscall、跨信号投递、跨 16 轮父子
+ * ping-pong 切换、fork 继承，以及 setjmp/longjmp 往返（ash 就是这个形状）。
+ * 串口应看到 "=== mfptest done: N pass  0 fail ==="。
+ * 置 1 时不跑其它测试程序与默认用户程序。 */
+#define DEBUG_MFP_TEST 0
+
 /* PTE A/D 位实测探针：置 1 时在 hart0 初始化阶段（trap_init 之后）跑
  * vmm_probe_pte_ad()，判定本平台是硬件自动置位 A/D 还是软件管理。
  * 时钟置换算法依赖硬件自动置位，动手前用它确认，不要照规范假设。

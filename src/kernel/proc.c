@@ -14,6 +14,7 @@
 #include "uaccess.h"
 #include "linux_abi.h"
 #include "ktime.h"
+#include "fpu.h"
 
 /* List of all processes. */
 struct list_head proc_list;
@@ -120,6 +121,15 @@ int16_t do_fork(uint32_t clone_flags, uintptr_t stack, intstkf_t *regs)
 
     copy_proc_mm(clone_flags, new_proc);
     copy_proc_stk(new_proc, stack, regs);
+
+    /* 浮点上下文按 fork 的语义整份继承：子进程从 fork 返回那一刻起，看到的寄存器
+     * 必须和父进程一模一样。此刻父进程正跑在内核里、它的 f 寄存器还活在硬件上，
+     * 所以要先存一次再拷——只拷 PCB 里那份的话，拿到的是父进程**上一次被换出时**
+     * 的旧值。 */
+    fpu_save(proc_get_current());
+    memcpy(new_proc->proc_fp_regs, proc_get_current()->proc_fp_regs,
+           sizeof(new_proc->proc_fp_regs));
+    new_proc->proc_fcsr = proc_get_current()->proc_fcsr;
 
     /* umask 由 fork 继承（ITIMER_REAL 相反，POSIX 要求不继承，alloc_new_proc 已清零） */
     new_proc->proc_umask = proc_get_current()->proc_umask;
@@ -742,7 +752,8 @@ int do_exec(intstkf_t *sp, const char *path, char *const *argv, char *const *env
     /* 清 SIE 的理由同 enter_user_mode（那里有详细说明）。本函数是在真正的 syscall trap
      * 里被调用的，`read_csr(sstatus)` 的 SIE 本来就已被硬件清掉，这一句现在是冗余的；
      * 写出来是为了不让这条不变式依赖"调用者恰好在 trap 上下文里"这个隐含前提。 */
-    sp->sstatus = (read_csr(sstatus) & ~SSTATUS_SPP & ~SSTATUS_SIE & ~SSTATUS_FS) | SSTATUS_SPIE | SSTATUS_SUM;
+    sp->sstatus = (read_csr(sstatus) & ~SSTATUS_SPP & ~SSTATUS_SIE & ~SSTATUS_FS)
+                  | SSTATUS_SPIE | SSTATUS_SUM | SSTATUS_FS_INITIAL;
 
     return ENO0_NO_ERROR;
 }
@@ -757,7 +768,8 @@ int16_t create_kernel_thread_by_fork(void *func(void *), void *args, uint32_t cl
     /* SSTATUS_SPP: Set 1 to make sure S-mode.
      * SSTATUS_SPIE:Set 1 to make sure the interrupt will be enable when goes out of trap.Cause SPIE restores the value of SIE.
      * SSTATUS_SIE: Set 1 to enable global interrupt.Here disable the interrupt in order to simulate a in-trap envirnment. */
-    regs.sstatus = (read_csr(sstatus) | SSTATUS_SPP | SSTATUS_SPIE) & ~SSTATUS_SIE & ~SSTATUS_FS;
+    regs.sstatus = ((read_csr(sstatus) | SSTATUS_SPP | SSTATUS_SPIE) & ~SSTATUS_SIE & ~SSTATUS_FS)
+                   | SSTATUS_FS_INITIAL;
     extern void kernel_thread_entry(void);
     regs.sepc = (uint64_t)kernel_thread_entry;
     return do_fork((clone_flags | CLONE_VM), 0, &regs);
@@ -1323,6 +1335,8 @@ static void run_user_program(const char *path)
 #define USER_PROGRAM_PATH "/bin/waittest.elf"
 #elif DEBUG_TRAP_TEST
 #define USER_PROGRAM_PATH "/bin/trapkill.elf"
+#elif DEBUG_MFP_TEST
+#define USER_PROGRAM_PATH "/bin/mfptest.elf"
 #else
 #define USER_PROGRAM_PATH "/bin/hello.elf"
 #endif
@@ -1549,7 +1563,8 @@ void enter_user_mode(virAddr_t entry, virAddr_t ustack)
      * trap_illegal_instruction() 打诊断并 SIGILL 杀掉该进程——错得响亮好过错得安静。
      * 复位值本来就是 Off，但这里写的是"软件凭空造帧就要把每一位都想清楚"，
      * 而不是"依赖 read_csr 恰好读到 0"——上面那条 SIE 的教训就是这么来的。 */
-    f->sstatus = (read_csr(sstatus) & ~SSTATUS_SPP & ~SSTATUS_SIE & ~SSTATUS_FS) | SSTATUS_SPIE | SSTATUS_SUM;
+    f->sstatus = (read_csr(sstatus) & ~SSTATUS_SPP & ~SSTATUS_SIE & ~SSTATUS_FS)
+                 | SSTATUS_SPIE | SSTATUS_SUM | SSTATUS_FS_INITIAL;
     /* **绝对不能在这里 write_csr(sscratch, 内核栈顶)**（2026-09-03 修掉的一个真 bug）。
      * sscratch 的不变式是"S 态恒为 0"，`trap_entry` 全靠 `sscratch != 0` 判断这次 trap
      * 来自 U 态。在这里提前写非零值，就把从此刻到 `sret` 之间的整段 S 态代码置于

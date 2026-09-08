@@ -12,8 +12,8 @@
  *
  * 约定与其它测试一致：逐条打 PASS/FAIL，末尾一行汇总，退出码 = 失败条数。
  *
- * **不要在本文件里格式化浮点**（%f/%e/%g）：内核不保存 FP 上下文、进 U 态时把
- * sstatus.FS 关死，musl 的 fmt_fp 会走到 scalbn 里的 fmul.d，当场 SIGILL。
+ * 浮点格式化（%f/%e/%g）现在可以用：内核补上 FP 上下文之后 sstatus.FS 置成
+ * Initial，musl 的 fmt_fp 走到 scalbn 里那几条 fmul.d 不再触发非法指令。
  * 这条限制本身由 test_fp_is_trapped() 显式验证，不要顺手在别处踩。
  */
 
@@ -308,27 +308,27 @@ static void test_misc(void)
     check(getuid() == 0, "getuid == 0 (single-user)");
 }
 
-/* ---------------- 浮点：当前必然被 SIGILL 杀掉，这里把它钉成已知限制 ---------------- */
-static void test_fp_is_trapped(void)
+/* ---------------- 浮点：现在能正常格式化 ---------------- */
+static void test_fp_printf(void)
 {
-    /* 内核不保存 FP 上下文，进 U 态的 trapframe 把 sstatus.FS 关死，任何 F/D 指令
-     * 都触发非法指令。musl 的 printf 只要真的格式化一个 %f 就会走进 fmt_fp → scalbn，
-     * 那里有 fmul.d。放在子进程里做，父进程据退出状态判定。
-     * 这条**不是**在测 printf，而是在钉住"当前内核跑不了浮点"这条限制：
-     * 哪天它变成 PASS 之外的结果，说明 FS 被谁打开了，而 FP 上下文并没有跟上。 */
+    /* 这条断言原本是反面的（"printf(%f) 必然被 SIGILL 杀"），用来钉住"内核跑不了
+     * 浮点"这条限制。BusyBox 进来之后内核补上了真正的 FP 上下文，限制解除，判据翻面。
+     *
+     * 仍然放在子进程里做：万一哪天 FS 又被关回 Off，这里会是 SIGILL 而不是把整个
+     * 测试程序带走，父进程还能如实报出来。浮点算得对不对由 mfptest 那套负责。 */
     pid_t pid = fork();
     if (pid == 0)
     {
         volatile double d = 1.5;
-        printf("%f\n", d);
-        _exit(0);
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%.1f", d);
+        _exit(strcmp(buf, "1.5") == 0 ? 0 : 1);
     }
     int st = 0;
     waitpid(pid, &st, 0);
-    check(WIFSIGNALED(st) && WTERMSIG(st) == SIGILL,
-          "printf(\"%f\") is killed by SIGILL (no FP context in kernel)");
+    check(WIFEXITED(st) && WEXITSTATUS(st) == 0,
+          "printf(\"%f\") works (kernel now saves FP context)");
 }
-
 int main(void)
 {
     puts("=== msyscheck: libc-level syscall coverage ===");
@@ -341,7 +341,7 @@ int main(void)
     test_signal();
     test_time();
     test_misc();
-    test_fp_is_trapped();
+    test_fp_printf();
 
     printf("=== msyscheck done: %d pass  %d fail ===\n", pass_count, fail_count);
     return fail_count;

@@ -1,4 +1,5 @@
 #include "sched.h"
+#include "fpu.h"
 #include "trap.h"
 #include "proc.h"
 #include "rbtree.h"
@@ -463,6 +464,10 @@ void sched_schedule(void)
          * 之后才允许清零，而那已经是被换上来的执行流在跑了，所以经 per-hart 的
          * prev_proc 传递给它（见 sched_finish_switch） */
         cpu_get_current()->prev_proc = curr;
+        /* 浮点上下文只在**真正发生切换**时存取。这里存、由被换上的那条执行流在
+         * sched_finish_switch() 里恢复——next == curr 那条路径两者都不做，否则就是
+         * 拿上次换出时的旧值盖掉此刻活着的寄存器。 */
+        fpu_save(curr);
         switch_to(&curr->proc_context, &next->proc_context);
         /* curr 这条执行流将来被换回来时从这里继续；此刻持有的是"把它换回来的那条
          * 执行流"acquire 的锁，由下面这次 release 接力放掉 */
@@ -478,10 +483,18 @@ void sched_finish_switch(void)
      * 别的 hart 从这一刻起才被允许把它挑走换上。清零必须在放锁之前完成，
      * 才能和 sched_activate() 里的 proc_on_cpu 判断被同一把锁串行化。 */
     cpu_t *cpu = cpu_get_current();
+    /* prev_proc 非空 <=> 刚刚真的换过任务，这正是"该不该恢复浮点"的判据：正常切换与
+     * fork_out（新任务第一次被换上，它不会从 switch_to 返回）都走这里，而 next == curr
+     * 那条路径 prev_proc 是空的，一次都不碰。 */
+    bool switched = (cpu->prev_proc != NULL);
     if (cpu->prev_proc != NULL)
     {
         cpu->prev_proc->proc_on_cpu = false;
         cpu->prev_proc = NULL;
+    }
+    if (switched)
+    {
+        fpu_restore(cpu->current_proc);
     }
 
     /* 用**被换上的这个任务自己**存下的 key：它是这条执行流当初 acquire 时记下的

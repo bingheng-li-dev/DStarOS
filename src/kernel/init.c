@@ -14,6 +14,7 @@
 #include "tty.h"
 #include "slab.h"
 #include "ktime.h"
+#include "fpu.h"
 
 #ifndef QEMU
 #include "sdcard.h"
@@ -50,6 +51,7 @@ void os_init_after_mmu_enable(uint64_t hartid)
         pmm_init_after_mmu_enable();
         slab_init();
         trap_init();
+        fpu_init();   /* 必须早于任何可能执行浮点指令的代码，含 fpu_save/fpu_restore 自身 */
 #if DEBUG_PTE_AD_PROBE
         vmm_probe_pte_ad();
 #endif
@@ -119,6 +121,7 @@ void os_init_after_mmu_enable(uint64_t hartid)
         hart1_up = 1;   /* 已在高 VA，不再需要恒等映射，放行 hart 0 去移除 */
         mb();
         trap_init();
+        fpu_init();
         tick_init();
         proc_init();
         printf("core %ld init done\n", cpu_get_core_id());

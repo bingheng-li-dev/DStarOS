@@ -188,9 +188,11 @@ static void probe_ebreak(void)
 
 static void probe_illegal(void)
 {
-    /* 0x02000053 = fadd.d f0,f0,f0（已 objdump 核对）。用户程序按
-     * -march=rv64imac 编，汇编器不认 D 扩展助记符，只能下原始编码。 */
-    asm volatile(".word 0x02000053");
+    /* 全零编码在 RISC-V 里被规范定为**保留且非法**，是最可靠的一条。
+     * 这里原本用的是 0x02000053（fadd.d f0,f0,f0）——那时内核把 sstatus.FS 关死，
+     * 浮点指令就是非法指令。补上 FP 上下文之后 fadd.d 会正常执行，
+     * 拿它当非法指令的探针就失效了。 */
+    asm volatile(".word 0x00000000");
 }
 /* 未对齐访存：QEMU 的 virt **硬件支持**未对齐访问，多半不产生异常。
  * volatile 指针防止编译器把它折叠掉或换成两次对齐访问。 */

@@ -37,7 +37,7 @@ MUSL_CFLAGS := -O2 -static -Wall -Werror
 
 .PHONY: all clean
 
-all: hello.elf fork_wait.elf exectest.elf filetest.elf pipetest.elf ttytest.elf memtest.elf sigtest.elf timetest.elf argvtest.elf segtest.elf waittest.elf trapkill.elf mhello.elf msyscheck.elf mrootfs.elf
+all: hello.elf fork_wait.elf exectest.elf filetest.elf pipetest.elf ttytest.elf memtest.elf sigtest.elf timetest.elf argvtest.elf segtest.elf waittest.elf trapkill.elf mhello.elf msyscheck.elf mrootfs.elf mfptest.elf
 
 hello.elf: hello.c $(LDSCRIPT)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ hello.c
@@ -103,6 +103,10 @@ mrootfs.elf: mrootfs.c
 	$(MUSL_CC) $(MUSL_CFLAGS) -o $@ mrootfs.c
 	$(MUSL_STRIP) $@
 
+mfptest.elf: mfptest.c
+	$(MUSL_CC) $(MUSL_CFLAGS) -o $@ mfptest.c
+	$(MUSL_STRIP) $@
+
 # 核对 musl 程序里有没有真的用到浮点指令：内核不保存 FP 上下文，用到就会被 SIGILL 杀。
 # 输出为空即安全。
 .PHONY: check-mhello
@@ -110,4 +114,4 @@ check-mhello: mhello.elf
 	@$(MUSL_OBJDUMP) -d $< | grep -oE '\b(f(add|sub|mul|div|sqrt|sgnj|min|max|cvt|mv|eq|lt|le|class|madd|msub|nmadd|nmsub)\.[sd]|f(l|s)[wd])\b' | sort | uniq -c; echo "  (上面为空 = 没有浮点指令)"
 
 clean:
-	rm -f hello.elf fork_wait.elf exectest.elf filetest.elf pipetest.elf ttytest.elf memtest.elf sigtest.elf timetest.elf argvtest.elf segtest.elf waittest.elf trapkill.elf mhello.elf msyscheck.elf mrootfs.elf
+	rm -f hello.elf fork_wait.elf exectest.elf filetest.elf pipetest.elf ttytest.elf memtest.elf sigtest.elf timetest.elf argvtest.elf segtest.elf waittest.elf trapkill.elf mhello.elf msyscheck.elf mrootfs.elf mfptest.elf

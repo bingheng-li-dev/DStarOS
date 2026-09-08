@@ -175,6 +175,14 @@ struct proc_control_block
     uint16_t proc_umask;                 /* 文件创建掩码，fork 继承、exec 保留 */
     uint64_t proc_clear_child_tid;       /* set_tid_address 存下的用户指针；不做退出时的 futex 唤醒 */
     uint64_t proc_sum_exec_runtime_children; /* 已收割子进程的累计执行时间之和，times() 的 tms_cutime */
+
+    /* ==================== 浮点上下文 ==================== */
+    /* 32 个 f 寄存器 + fcsr，切换任务时无条件存取（见 fpu.c 里为什么不做惰性保存）。
+     * 为它们腾出这 264 字节是 BusyBox 逼出来的：musl 在 lp64d 下的 setjmp/longjmp
+     * 会无条件存取 fs0~fs11，而 ash 的异常机制就建立在 setjmp 上——没有 FP 上下文，
+     * ash 起来的第一条 setjmp 就会被 SIGILL 杀掉。 */
+    uint64_t proc_fp_regs[32];
+    uint64_t proc_fcsr;
 };
 
 struct proc_pid_map
