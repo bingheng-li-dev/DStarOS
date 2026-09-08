@@ -46,7 +46,12 @@ struct sched_class;
 #define PROC_KSTACK_TOP(pcb) ((uintptr_t)((pcb)->kernel_stack + KERNRL_STKSIZE - KSTACK_RESERVED))
 #define PID_MAX_VALUE (((int16_t)1 << 15) - 2) /* 0 <= PID <= PID_MAX_VALUE*/
 #define PROC_MAX_AMOUNT (PID_MAX_VALUE / 2)    /* 1(idle) <= task_count <= PROC_MAX_AMOUNT */
-#define NOFILE 16
+/* fd 表槽位数。16 是阶段 2 定的，够我们自己的测试程序用；**对 ash 不够**——
+ * 它处理重定向的核心动作 savefd() 是 fcntl(fd, F_DUPFD, 10)，刻意把要保存的 fd
+ * 挪到 10 以上避开用户可能用到的 0~9，16 个槽位减去 stdio 之后 10 以上只剩 6 个。
+ * 64 是"多重重定向的管道够用"与"PCB 别无谓变胖"之间的保守中点；真要到 Linux 的
+ * 1024 得把 fd 表改成动态分配，那是另一件事。 */
+#define NOFILE 64
 
 #define CLONE_VM 0x00000100      /* Child process will share the same virtual memory space with it's parent. */
 #define CLONE_FS 0x00000200      /* Child process will share the same file system info with it's parent. */
@@ -186,7 +191,7 @@ int16_t do_fork(uint32_t clone_flags, uintptr_t stack, intstkf_t *regs);
 void do_exit(int16_t error_code) __attribute__((noreturn));
 /* 被信号杀死的退出路径：wait status 的低 7 位是信号号，而不是 (code<<8) */
 void do_exit_signal(int sig) __attribute__((noreturn));
-int16_t do_wait(int16_t pid, int *status);
+int16_t do_wait(int16_t pid, int *status, int options);
 int do_exec(intstkf_t *sp, const char *path, char *const *argv, char *const *envp);
 int16_t create_kernel_thread_by_fork(void *func(void *), void *args, uint32_t clone_flags);
 /* 按 pid 查找 pcb（find_proc_by_pid 的公开包装）；未找到返回 NULL。

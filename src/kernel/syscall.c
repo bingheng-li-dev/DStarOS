@@ -1162,10 +1162,20 @@ static long sys_execve(intstkf_t *sp)
                    (char *const *)sp->x11_a1, (char *const *)sp->x12_a2);
 }
 
+/**
+ * @brief wait4(2)：收割子进程
+ * @param[in]  pid     -1 = 任意子进程；>0 = 只等这一个；0 / <-1 未实现（见 do_wait）
+ * @param[out] ustatus 用户空间的 status 出参，NULL 表示不关心
+ * @param[in]  options WNOHANG 生效；WUNTRACED / WCONTINUED 被忽略
+ * @param[in]  rusage  未实现，忽略
+ * @note WNOHANG 命中时返回 0，此时**不写 ustatus**——没有子进程退出，
+ *   status 里没有任何有意义的内容可填，写进去只会让调用方读到上一轮的残留。
+ */
 static long sys_wait4(int pid, int *ustatus, int options, void *rusage)
 {
+    (void)rusage;
     int kstatus = 0;
-    int16_t ret = do_wait((int16_t)pid, &kstatus);
+    int16_t ret = do_wait((int16_t)pid, &kstatus, options);
     if (ret > 0 && ustatus)
     {
         if (copy_to_user(ustatus, &kstatus, sizeof(kstatus)) != 0)

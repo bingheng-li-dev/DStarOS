@@ -162,6 +162,13 @@
  * 置 1 时不跑其它测试程序与默认用户程序。 */
 #define DEBUG_MROOTFS_TEST 1
 
+/* wait4 的 pid 选择与 WNOHANG，以及放大后的 fd 表：置 1 时 fork 一个
+ * user/waittest.c 编译出的用户程序。三样都是为 ash 补的——它按 pid 跟踪作业、
+ * 每次打提示符前做一次非阻塞收割、用 fcntl(F_DUPFD, 10) 把 fd 挪到 10 以上。
+ * 串口应看到 "=== waittest done: N pass  0 fail ==="。
+ * 置 1 时不跑其它测试程序与默认用户程序。 */
+#define DEBUG_WAIT_TEST 0
+
 /* PTE A/D 位实测探针：置 1 时在 hart0 初始化阶段（trap_init 之后）跑
  * vmm_probe_pte_ad()，判定本平台是硬件自动置位 A/D 还是软件管理。
  * 时钟置换算法依赖硬件自动置位，动手前用它确认，不要照规范假设。

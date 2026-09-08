@@ -397,7 +397,7 @@ static void test_exit_releases_cwd(void)
     if (pid > 0)
     {
         int status = 0;
-        expect(do_wait(-1, &status) == pid, "reaped the chdir worker");
+        expect(do_wait(-1, &status, 0) == pid, "reaped the chdir worker");
     }
 
     int ref_after = cwd_dir_ref();

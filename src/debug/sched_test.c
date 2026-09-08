@@ -47,7 +47,7 @@ int sched_test_reap_all(void)
     while (1)
     {
         int status = 0;
-        int16_t cpid = do_wait(-1, &status);
+        int16_t cpid = do_wait(-1, &status, 0);
         if (cpid <= 0)
         {
             break;
@@ -139,7 +139,7 @@ static void sched_lifecycle_test(void)
     /* 单独验证退出码经 status 正确回传：WEXITSTATUS(status) = (status>>8)&0xff */
     create_kernel_thread_by_fork(life_worker_code42, NULL, 0);
     int status = 0;
-    int16_t c = do_wait(-1, &status);
+    int16_t c = do_wait(-1, &status, 0);
     sched_test_check("reaped exit(42) child", c > 0);
     sched_test_check("exit code 42 via status", ((status >> 8) & 0xff) == 42);
 }

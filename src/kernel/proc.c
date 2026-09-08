@@ -255,15 +255,33 @@ static void exit_common(int16_t error_code, uint8_t sig)
     panic("Zombie task resumed, should never happen\n");
 }
 
-/** 
- * @param pid    -1 = 等任意子进程（本阶段只支持 -1）
- * @param status 出参：POSIX 编码的退出状态（(exit_code & 0xff) << 8）；NULL 表示不关心
- * @retval >0    被收割子进程的 pid
- * @retval <0    ENO*（ENO17_NO_CHILD：无子进程） */
-int16_t do_wait(int16_t pid, int *status)
+/**
+ * @brief 收割一个已退出的子进程
+ * @param[in]  pid     -1 = 任意子进程；>0 = 只等这一个；0 / <-1（按进程组）未实现
+ * @param[out] status  POSIX 编码的退出状态；NULL 表示不关心
+ * @param[in]  options WNOHANG 生效；WUNTRACED / WCONTINUED 被忽略
+ * @retval >0  被收割子进程的 pid
+ * @retval 0   仅 WNOHANG：有匹配的子进程但都还活着
+ * @retval <0  ENO*（ENO17_NO_CHILD：没有匹配的子进程；ENO20_NOSYS：按进程组等待）
+ * @details
+ *   `pid > 0` 这一档是 ash 的刚需：它按 pid 跟踪作业，收错一个就是 `$?` 错、
+ *   或者一个已经死掉的作业永远等不到。`WNOHANG` 同理——ash 每次打提示符之前都会做
+ *   一次非阻塞收割，忽略这个标志会让整个 shell 睡死在提示符之前。
+ * @note WUNTRACED / WCONTINUED 恒被忽略：本内核**没有 STOPPED 状态**
+ *   （`signal.h` 的 `SIG_UNCATCHABLE` 注释写明 SIGSTOP 只是拒绝装 handler），
+ *   没有"停住的子进程"可报，所以忽略是当前语义下唯一诚实的做法。
+ * @note 按进程组等待（`pid == 0` / `pid < -1`）返回 ENO20_NOSYS 而不是退化成
+ *   "等任意"：ash 关掉 job control 之后不该走到这里，**走到了就说明配置没关净**，
+ *   这个信号比一个含糊的实现有价值。
+ */
+int16_t do_wait(int16_t pid, int *status, int options)
 {
     pcb_t *cur = proc_get_current();
-    (void)pid;
+
+    if (pid == 0 || pid < -1)
+    {
+        return ENO20_NOSYS;
+    }
 
     while (1)
     {
@@ -277,6 +295,10 @@ int16_t do_wait(int16_t pid, int *status)
         list_for_each(pos, &cur->proc_children)
         {
             pcb_t *child = list_entry(pos, pcb_t, proc_sibling_linker);
+            if (pid > 0 && child->proc_pid != pid)
+            {
+                continue;
+            }
             has_child = true;
             if (child->proc_state == ZOMBIE)
             {
@@ -335,6 +357,15 @@ int16_t do_wait(int16_t pid, int *status)
         {
             cur->proc_state = RUNNING;
             return ENO17_NO_CHILD;
+        }
+
+        /* 有匹配的子进程但都还活着：WNOHANG 要求立刻返回 0（不是错误）。
+         * **必须在置 INTERRUPTIBLE 之后、sched_schedule() 之前把状态改回来**，
+         * 否则就带着 INTERRUPTIBLE 返回用户态了——与下面 signal_pending 那条同型。 */
+        if (options & WNOHANG)
+        {
+            cur->proc_state = RUNNING;
+            return 0;
         }
 
         /* 有信号待处理就别睡了：把状态改回 RUNNING（不然就带着 INTERRUPTIBLE
@@ -1288,6 +1319,8 @@ static void run_user_program(const char *path)
 #define USER_PROGRAM_PATH "/bin/msyscheck.elf"
 #elif DEBUG_MROOTFS_TEST
 #define USER_PROGRAM_PATH "/bin/mrootfs.elf"
+#elif DEBUG_WAIT_TEST
+#define USER_PROGRAM_PATH "/bin/waittest.elf"
 #else
 #define USER_PROGRAM_PATH "/bin/hello.elf"
 #endif
@@ -1387,7 +1420,7 @@ static int16_t init(void)
     while (1)
     {
         int status;
-        int16_t cpid = do_wait(-1, &status);
+        int16_t cpid = do_wait(-1, &status, 0);
         if (cpid == ENO24_RESTARTSYS)
         {
             /* init 是内核线程（proc_sighand == NULL），走不到这里；留一手防止

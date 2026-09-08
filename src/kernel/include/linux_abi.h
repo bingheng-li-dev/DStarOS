@@ -275,4 +275,11 @@ struct elf64_auxv
 };
 _Static_assert(sizeof(struct elf64_auxv) == 16, "elf64_auxv size must match ELF ABI");
 
+/* ============================================================
+ * wait4 的 options
+ * ============================================================ */
+#define WNOHANG     1   /* 没有可收割的子进程就立刻返回 0，不阻塞 */
+#define WUNTRACED   2   /* 本内核无 STOPPED 状态，恒被忽略（见 do_wait 注释）*/
+#define WCONTINUED  8   /* 同上 */
+
 #endif
