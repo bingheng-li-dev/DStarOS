@@ -979,8 +979,6 @@ static void copy_proc_stk(pcb_t *pcb, uintptr_t stack, intstkf_t *regs)
 
 static pcb_t *create_first_proc_idle(void)
 {
-    extern uintptr_t boot_stack_top1;
-    extern uintptr_t boot_stack_top2;
 
     pcb_t *idle = alloc_new_proc();
     if (idle != NULL)
@@ -988,8 +986,8 @@ static pcb_t *create_first_proc_idle(void)
         idle->proc_pid = 0;
         /* alloc_new_proc 默认把所有任务挂 &fair_sched_class，idle 单独覆盖成 &idle_sched_class */
         idle->proc_sched_class = &idle_sched_class;
-        /* 每个 hart 用自己在 startup.S 里的启动栈作内核栈：core0→boot_stack_top1，core1→boot_stack_top2 */
-        idle->kernel_stack = (phyAddr_t)(cpu_get_core_id() == 0 ? boot_stack_top1 : boot_stack_top2);
+        /* 每个核用自己在 startup.S 里的那一格启动栈作内核栈，按逻辑 cpu 号索引 */
+        idle->kernel_stack = (phyAddr_t)cpu_boot_stack_top((uint16_t)cpu_get_core_id());
         idle->proc_state = RUNNING;
         idle->need_resched = true;
         idle->proc_cwd = NULL;  /* idle 进程使用 VFS 根目录 */

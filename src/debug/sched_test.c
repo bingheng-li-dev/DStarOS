@@ -16,6 +16,7 @@
 #include "sched.h"
 #include "cpu.h"
 #include "tick.h"
+#include "ktime.h"
 #include "atomic.h"
 #include "sync.h"
 
@@ -402,7 +403,7 @@ static void sched_cfs_nostarve_test(void)
 
 static volatile int timer_bg_ran;
 static volatile int timer_sleep_done;
-static volatile uint64_t timer_slept_ticks;
+static volatile uint64_t timer_slept_ns;
 
 static void *timer_bg_worker(void *arg)
 {
@@ -415,12 +416,22 @@ static void *timer_bg_worker(void *arg)
     return NULL;
 }
 
+/* 用 ktime_get_ns()（直读硬件 time CSR）而不是 tick_get_os_tick() 来量。
+ *
+ * 原来用的是 cpu0 的**软件 tick 计数**，那个量里混了三样东西：睡眠开始时距下一次
+ * tick 边界的相位、被唤醒后到真正跑起来的调度延迟、以及 tick 本身的抖动。于是
+ * "睡 3 个 tick"量出来 3 或 4 都是正常的，偶尔还会是 2——4 核浸泡 200 次里中过 1 次
+ * （0.5%），当时看着像内核早醒，实际内核完全正确：sched_sleep_ticks 换算成绝对纳秒，
+ * sched_check_timers 也是拿 ktime_get_ns() 比对，真实睡眠时长从来没短过。
+ *
+ * 换成同一个时基之后，断言才真正在验"睡够了没有"。测量窗口仍然包含唤醒到运行的
+ * 延迟，但那只会让 elapsed 变大，不影响 >= 这个方向。 */
 static void *timer_sleep_worker(void *arg)
 {
     (void)arg;
-    uint64_t before = tick_get_os_tick();
+    uint64_t before = ktime_get_ns();
     sched_sleep_ticks(TIMER_SLEEP_TICKS);
-    timer_slept_ticks = tick_get_os_tick() - before;
+    timer_slept_ns = ktime_get_ns() - before;
     timer_sleep_done = 1;
     return NULL;
 }
@@ -429,18 +440,20 @@ static void sched_timed_sleep_test(void)
 {
     printf("\n-- timed wakeup: sched_sleep_ticks --\n");
 
+    const uint64_t want_ns = (uint64_t)TIMER_SLEEP_TICKS * (NSEC_PER_SEC / TICK_HZ);
+
     timer_bg_ran = 0;
     timer_sleep_done = 0;
-    timer_slept_ticks = 0;
+    timer_slept_ns = 0;
 
     create_kernel_thread_by_fork(timer_bg_worker, NULL, 0);
     create_kernel_thread_by_fork(timer_sleep_worker, NULL, 0);
     sched_test_reap_all();
 
-    printf("  slept %ld ticks (requested %d), bg worker ran %d times meanwhile\n",
-           timer_slept_ticks, TIMER_SLEEP_TICKS, timer_bg_ran);
-    sched_test_check("sleeper woke up after requested ticks",
-                      timer_slept_ticks >= TIMER_SLEEP_TICKS);
+    printf("  slept %ld us (requested %ld us), bg worker ran %d times meanwhile\n",
+           timer_slept_ns / 1000, want_ns / 1000, timer_bg_ran);
+    sched_test_check("sleeper slept at least the requested duration",
+                      timer_slept_ns >= want_ns);
     sched_test_check("bg worker kept running during sleep (not a busy-wait)",
                       timer_bg_ran > 0);
 }

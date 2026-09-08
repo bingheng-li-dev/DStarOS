@@ -7,6 +7,7 @@
 #include "sched.h"
 #include "tty.h"
 #include "ktime.h"
+#include "fdt.h"
 
 #define OS_TICK cpu_get_by_index(0)->tick
 
@@ -22,6 +23,41 @@ static void tick_set_next_int(uint64_t stime)
 #if DEBUG_TICK
     printf("++ setup timer interrupts\n");
 #endif
+}
+
+void tick_check_timebase(phyAddr_t dtb_pa)
+{
+    if (!fdt_init(dtb_pa))
+    {
+        printf("timebase: %lu Hz (compile-time; no usable dtb to verify against)\n",
+               TIMEBASE_FREQ_HZ);
+        return;
+    }
+
+    const void *cpus = fdt_find_node("/cpus");
+    uint32_t hz = 0;
+    if (cpus == NULL || !fdt_prop_u32(cpus, "timebase-frequency", &hz))
+    {
+        printf("timebase: %lu Hz (compile-time; dtb has no /cpus/timebase-frequency)\n",
+               TIMEBASE_FREQ_HZ);
+        return;
+    }
+
+    if ((uint64_t)hz == (uint64_t)TIMEBASE_FREQ_HZ)
+    {
+        printf("timebase: %lu Hz (dtb confirms)\n", (unsigned long)hz);
+        return;
+    }
+
+    /* 不自动改用 DTB 的值：TIMEBASE_FREQ_HZ 是编译期常量，被 ktime.h 的内联函数与
+     * syscall.c 当除数用（常量除法才会被优化成乘加移位），运行时改不了。
+     * 这里只负责把"猜错了"这件事喊得足够响——否则它的症状是打字发粘、sleep 时长
+     * 整体偏，很容易被当成别的问题查半天。 */
+    printf("timebase: *** MISMATCH *** compile-time %lu Hz, dtb says %lu Hz\n",
+           TIMEBASE_FREQ_HZ, (unsigned long)hz);
+    printf("timebase: tick rate and all sleep durations will be off by %lu/%lu"
+           " -- fix TIMEBASE_FREQ_HZ in tick.h and rebuild\n",
+           (unsigned long)hz, TIMEBASE_FREQ_HZ);
 }
 
 /* 必须在trap_init()之后被调用 */

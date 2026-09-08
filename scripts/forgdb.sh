@@ -3,7 +3,7 @@
 #     -M  virt \
 #     -m  8M   \
 #     -bios ./bootloader/RustSBI/v0.0.1/sbi-qemu \
-#     -smp 2  \
+#     -smp ${SMP:-4}  \
 #     -kernel build/kernel.elf    \
 #     -nographic -s -S
 
@@ -34,7 +34,7 @@ qemu-system-riscv64 \
     -M  virt \
     -m  128M   \
     -bios ./bootloader/RustSBI/v0.4.0/rustsbi-prototyper-dynamic.elf \
-    -smp 2  \
+    -smp ${SMP:-4}  \
     -kernel build/kernel.elf    \
     "${LOADER[@]}" \
     -nographic -s -S

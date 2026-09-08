@@ -6,9 +6,7 @@
 #include <stdbool.h>
 
 #include "proc.h"
-
-/* 1 <= CORE_NUMBER. */
-#define CORE_NUMBER 2
+#include "platform.h"   /* CORE_NUMBER / MAX_HARTID / BOOT_STACK_* */
 
 typedef struct os_cpu cpu_t;
 
@@ -24,11 +22,19 @@ struct os_cpu
     uint64_t tick;           /* 当前CPU的tick。 */
 };
 
-int cpu_start_secondary_hart(void);
+/* 注意：以下接口里的 "core id" 一律是**逻辑 cpu 号**（引导核恒为 0、连续编号），
+ * 不是 hartid。两者在 QEMU 上碰巧相等，在 VF2 上不相等——JH7110 的 hart 0 是
+ * 不支持 S 态的 S7 监控核，引导核是某个 U74。需要真 hartid 的只有 SBI 调用，
+ * 由 cpu.c 内部经 cpu_to_hart[] 反查。 */
+void cpu_probe_harts(void);
+int cpu_get_present_count(void);
+int cpu_start_secondary_hart(uint16_t cpu_id);
 uint64_t cpu_get_core_id(void);
 void cpu_set_core_id(uint64_t core_id);
 cpu_t *cpu_get_current(void);
 cpu_t *cpu_get_by_index(uint16_t index);
-void cpu_send_ipi(uint64_t hart_id);
+void cpu_send_ipi(uint16_t cpu_id);
+/* 逻辑 cpu 号 → 该核的引导栈顶（供 idle 任务登记 kernel_stack 用） */
+uintptr_t cpu_boot_stack_top(uint16_t cpu_id);
 
 #endif
