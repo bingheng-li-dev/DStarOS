@@ -440,6 +440,52 @@ static long sys_fstat(int fd, struct linux_stat *ustatbuf)
  * @note 支持 `AT_EMPTY_PATH`——path 为空串时退化成对 `dirfd` 本身做 fstat，
  *   代价只是多一个分支，musl 的 `fstat()` 在某些实现路径上就是这么包装 `newfstatat` 的。
  */
+/**
+ * @brief faccessat(2)：查询对某个路径是否具备请求的权限
+ * @param[in] mode  F_OK / R_OK / W_OK / X_OK 的按位或
+ * @param[in] flags AT_EACCESS / AT_SYMLINK_NOFOLLOW，单用户 + FAT 下都无意义，忽略
+ * @retval 0 具备
+ * @retval ENO28_ACCESS 目标存在但不具备（当前只可能是对只读文件请求 W_OK）
+ * @retval <0 其它 ENO*（路径不存在时是 vfs_stat 给的 ENOENT）
+ * @details 唯一有真实依据的是**写权限**：FAT 的只读属性由 fatfs 适配层映射成
+ *   i_mode 的 0555（见 fatfs_vfs.c 的 lookup_cb），这里据它判定。
+ *   读与执行位在 FAT 上不存在、i_mode 里那两位是编造的恒真值，所以对 R_OK/X_OK
+ *   一律放行——**这不是偷懒，是"文件存在即可读可执行"在本文件系统上的真实语义**，
+ *   do_exec 本来也不检查执行位。
+ *
+ *   不实现的后果不是报错而是行为跑偏：BusyBox 的 rm 用 access(path, W_OK) 决定
+ *   要不要提示，拿到 -ENOSYS 就当成写保护、转去交互提问，把下一行输入吃掉当答案。
+ */
+static long sys_faccessat(int dirfd, const char *upath, int mode, int flags)
+{
+    (void)flags;
+    char kpath[VFS_PATH_MAX];
+    long path_len = strncpy_from_user(kpath, upath, sizeof(kpath));
+    if (path_len < 0)
+    {
+        return path_len;
+    }
+    if (dirfd != AT_FDCWD && kpath[0] != '/')
+    {
+        return ENO19_BAD_FD;
+    }
+
+    stat_t kst;
+    vfs_lock();
+    int ret = vfs_stat(kpath, &kst);
+    vfs_unlock();
+    if (ret != ENO0_NO_ERROR)
+    {
+        return ret;
+    }
+
+    /* 单用户系统，一律按 owner 位判定 */
+    if ((mode & W_OK) && !(kst.st_mode & 0200))
+    {
+        return ENO28_ACCESS;
+    }
+    return 0;
+}
 static long sys_newfstatat(int dirfd, const char *upath, struct linux_stat *ustatbuf, int flags)
 {
     char kpath[VFS_PATH_MAX];
@@ -1807,6 +1853,55 @@ static long sys_umask(int mask)
     return old;
 }
 
+/**
+ * @brief prctl(2)：目前只实现 comm（进程名）的读写
+ * @param[in] option PR_SET_NAME / PR_GET_NAME，其余一律 EINVAL
+ * @param[in] arg2   用户空间的 char[TASK_COMM_LEN] 缓冲区
+ * @retval 0 成功
+ * @retval ENO8_NULL_POINTER 用户指针不可访问
+ * @retval ENO6_INVAL_PARAM 其它 option
+ * @details BusyBox 的 `main` 一上来就调 `re_execed_comm()`：它 `prctl(PR_GET_NAME, comm)`
+ *   拿到自己的进程名，和 `"busybox"` 比对，据此判断本次是不是被自己 re-exec 起来的
+ *   （standalone shell 跑 applet 时会走那条路）。**返回 -ENOSYS 时它那个 `char comm[16]`
+ *   保持未初始化**，比较的是栈垃圾——答案碰巧对，但下一次栈布局一变就可能翻。
+ *
+ *   PCB 里本来就有 `proc_pname`，所以这两条有真实语义可落，不是为了让 BusyBox
+ *   往下走而返回假成功。
+ * @note 只拷 TASK_COMM_LEN（16）字节：调用方按 Linux 的 TASK_COMM_LEN 开缓冲区，
+ *   照 PNAME_MAX_LENGTH（64）拷就是往用户栈上越界写。
+ */
+static long sys_prctl(int option, uint64_t arg2)
+{
+    pcb_t *cur = proc_get_current();
+    char comm[TASK_COMM_LEN];
+
+    switch (option)
+    {
+    case PR_SET_NAME:
+        /* 超长按 Linux 的行为静默截断，不报错——strncpy_from_user 填满 n 字节
+         * 没遇到结束符时返回 ENO11，此时缓冲区已经是我们要的前 16 字节 */
+        if (strncpy_from_user(comm, (const char *)arg2, sizeof(comm)) == ENO8_NULL_POINTER)
+        {
+            return ENO8_NULL_POINTER;
+        }
+        comm[sizeof(comm) - 1] = '\0';
+        set_proc_name(cur, comm);
+        return 0;
+
+    case PR_GET_NAME:
+        memset(comm, 0, sizeof(comm));
+        memcpy(comm, cur->proc_pname, sizeof(comm) - 1);
+        if (copy_to_user((void *)arg2, comm, sizeof(comm)) != 0)
+        {
+            return ENO8_NULL_POINTER;
+        }
+        return 0;
+
+    default:
+        return ENO6_INVAL_PARAM;
+    }
+}
+
 /* time CSR 计数换算成 clock_t（AT_CLKTCK = 100 Hz），不是本内核的 200 Hz tick */
 static long counts_to_clock_t(uint64_t counts)
 {
@@ -1864,6 +1959,9 @@ long syscall_dispatch(intstkf_t *sp)
         return sys_writev((int)sp->x10_a0, (const struct iovec *)sp->x11_a1, (int)sp->x12_a2);
     case __NR_readv:
         return sys_readv((int)sp->x10_a0, (const struct iovec *)sp->x11_a1, (int)sp->x12_a2);
+    case __NR_faccessat:
+        return sys_faccessat((int)sp->x10_a0, (const char *)sp->x11_a1,
+                             (int)sp->x12_a2, (int)sp->x13_a3);
     case __NR_openat:
         return sys_openat((int)sp->x10_a0, (const char *)sp->x11_a1, (int)sp->x12_a2, (int)sp->x13_a3);
     case __NR_lseek:
@@ -1962,6 +2060,8 @@ long syscall_dispatch(intstkf_t *sp)
         return sys_getitimer((int)sp->x10_a0, (struct itimerval *)sp->x11_a1);
     case __NR_uname:
         return sys_uname((struct utsname *)sp->x10_a0);
+    case __NR_prctl:
+        return sys_prctl((int)sp->x10_a0, (uint64_t)sp->x11_a1);
     case __NR_umask:
         return sys_umask((int)sp->x10_a0);
     case __NR_times:

@@ -1203,11 +1203,14 @@ static void proc_signal_init_user(pcb_t *p)
  *   读法与 `do_exec` 一致：一次 kmalloc 把整个文件读进内核堆，`elf_load` 把各段拷进
  *   用户页之后立刻归还。区别只在参数来源——`do_exec` 的 path/argv 来自用户空间要
  *   `copy_from_user`，这里的是内核里的字面量。
+ * @note argv 由调用方给全，**含 argv[0]**——BusyBox 靠 argv[0] 分发 applet，
+ *   写死一个串的话它只会报 `applet not found`。阶段 11 的 /sbin/init 换的只是
+ *   路径与这张表，不用再动参数构造。
  * @note noreturn：`enter_user_mode` 内部 `sret` 进入 U 态，不会返回
  * @note 找不到文件时 panic 并提示跑 `make rootfs`：这条路径上没有可降级的余地，
  *   静默失败只会表现成"内核起来了但什么都没发生"。
  */
-static void run_user_program(const char *path)
+static void run_user_program(const char *path, const char *const argv[], int argc)
 {
     /* 1) 独立用户 mm（新 PGD + 复制内核半段） */
     mm_t *mm = create_user_mm();
@@ -1274,11 +1277,14 @@ static void run_user_program(const char *path)
     {
         panic("run_user_program: exec_args_init failed");
     }
-    if (exec_args_push(&args, "/init") != ENO0_NO_ERROR)
+    for (int i = 0; i < argc; i++)
     {
-        panic("run_user_program: exec_args_push failed");
+        if (exec_args_push(&args, argv[i]) != ENO0_NO_ERROR)
+        {
+            panic("run_user_program: exec_args_push failed on argv[%d]", i);
+        }
     }
-    args.argc = 1;
+    args.argc = argc;
     args.envc = 0;
     virAddr_t user_sp;
     if (setup_user_stack(&args, &einfo, &user_sp) != ENO0_NO_ERROR)
@@ -1335,21 +1341,47 @@ static void run_user_program(const char *path)
 #define USER_PROGRAM_PATH "/bin/waittest.elf"
 #elif DEBUG_TRAP_TEST
 #define USER_PROGRAM_PATH "/bin/trapkill.elf"
+#elif DEBUG_BUSYBOX_TEST
+#define USER_PROGRAM_PATH "/bin/busybox"
 #elif DEBUG_MFP_TEST
 #define USER_PROGRAM_PATH "/bin/mfptest.elf"
 #else
 #define USER_PROGRAM_PATH "/bin/hello.elf"
 #endif
 
+/* 只有 BusyBox 需要真正的 argv——它按 argv[0]（以及 standalone 模式下的 argv[1]）
+ * 决定跑哪个 applet。其余程序一个参数都不看，给一个程序名占住 argv[0] 即可。 */
+#if DEBUG_BUSYBOX_TEST
+#if DEBUG_BUSYBOX_INTERACTIVE
+#define USER_PROGRAM_ARGV { "busybox", "sh" }
+#else
+/* BusyBox 冒烟串。**用 && 串起来**：任何一条失败就短路，收尾的标记打不出来，
+ * regress.sh 于是判"suite did not finish"——不然命令挂了也会被当成通过。
+ * 每一段对应一类 syscall：echo=write、ls=getdents64/newfstatat、cat=openat/read、
+ * mkdir/rmdir=mkdirat/unlinkat、管道=pipe2+clone+wait4、pwd=getcwd、uname、sleep。
+ * 那些 >/dev/null 不是为了安静——重定向走的正是 ash 的 savefd()，也就是
+ * fcntl(F_DUPFD, 10) 那条路径，顺带把 NOFILE 放大那条改动压进来。 */
+#define USER_PROGRAM_ARGV { "busybox", "sh", "-c", "echo bb-echo && ls / >/dev/null && cat /etc/issue >/dev/null && mkdir /tmp/bb && ls /tmp >/dev/null && rmdir /tmp/bb && ls / | cat >/dev/null && pwd >/dev/null && uname >/dev/null && sleep 0 && echo === bbtest done ===" }
+#endif
+#else
+#define USER_PROGRAM_ARGV { "/init" }
+#endif
+
+/* argv[0] 一律写程序名而不是路径：BusyBox 按 argv[0] 分发 applet，
+ * 其余程序不看 argv[0]，统一成这个形状省得两套约定。 */
+static const char *const user_program_argv[] = USER_PROGRAM_ARGV;
+
 static void run_first_user_program(void)
 {
-    run_user_program(USER_PROGRAM_PATH);
+    run_user_program(USER_PROGRAM_PATH, user_program_argv,
+                     (int)(sizeof(user_program_argv) / sizeof(user_program_argv[0])));
 }
 
 #if DEBUG_FORK_WAIT_TEST
 static void run_fork_wait_test_program(void)
 {
-    run_user_program("/bin/fork_wait.elf");
+    static const char *const fw_argv[] = { "fork_wait" };
+    run_user_program("/bin/fork_wait.elf", fw_argv, 1);
 }
 #endif
 

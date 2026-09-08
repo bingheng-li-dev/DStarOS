@@ -23,18 +23,18 @@
 #define DEBUG_MMU_insertAndMerge 0
 #define DEBUG_LOCK_irq_enable 0
 #define DEBUG_PROC_idle 0   /* hart 1 的 idle 会一直空转，置 1 会刷屏 */
-#define DEBUG_PROC_createFirstProcIdle 1
-#define DEBUG_PROC_proc_init 1
-#define DEBUG_PROC_do_fork 1
-#define DEBUG_PROC_findProcByPid 1
-#define DEBUG_PROC_allocNewProc 1
-#define DEBUG_PROC_CTXSTK   1
-#define DEBUG_PROC_init     1
+#define DEBUG_PROC_createFirstProcIdle 0
+#define DEBUG_PROC_proc_init 0
+#define DEBUG_PROC_do_fork 0
+#define DEBUG_PROC_findProcByPid 0
+#define DEBUG_PROC_allocNewProc 0
+#define DEBUG_PROC_CTXSTK   0
+#define DEBUG_PROC_init     0
 
 #define DEBUG_VMM 1
 #if DEBUG_VMM
-#define DEBUG_VMM_page_fault_handler 1
-#define DEBUG_VMM_self_test 1
+#define DEBUG_VMM_page_fault_handler 0
+#define DEBUG_VMM_self_test 0
 
 #endif /* DEBUG_VMM */
 
@@ -160,7 +160,7 @@
  * 内核会 f_mkfs 出一张空盘，这些断言会如实报 FAIL。
  * 串口应看到 "=== mrootfs done: N pass  0 fail ==="。
  * 置 1 时不跑其它测试程序与默认用户程序。 */
-#define DEBUG_MROOTFS_TEST 1
+#define DEBUG_MROOTFS_TEST 0
 
 /* wait4 的 pid 选择与 WNOHANG，以及放大后的 fd 表：置 1 时 fork 一个
  * user/waittest.c 编译出的用户程序。三样都是为 ash 补的——它按 pid 跟踪作业、
@@ -176,6 +176,19 @@
  * 串口应看到 "=== trapkill done: N pass  0 fail ..."。
  * 置 1 时不跑其它测试程序与默认用户程序。 */
 #define DEBUG_TRAP_TEST 0
+
+/* BusyBox 冒烟：置 1 时 fork 一个 /bin/busybox（tools/build_busybox.sh 编、
+ * tools/build_rootfs.sh 放进镜像）。它是第一个不由本仓库编写的用户程序。
+ * **必须先 `bash tools/build_busybox.sh` 再 `make rootfs`**，否则镜像里没有它。
+ * 置 1 时不跑其它测试程序与默认用户程序。 */
+#define DEBUG_BUSYBOX_TEST 1
+
+/* BusyBox 以什么形态启动，仅在 DEBUG_BUSYBOX_TEST 为 1 时有意义：
+ *   1 = 交互式 shell（argv 为 {"busybox", "sh"}），**这是默认的交付形态**；
+ *   0 = 一串用 && 串起来的冒烟命令，供 `bash scripts/regress.sh bb` 使用。
+ * 分成两个开关而不是来回改 proc.c 里那条命令串：改一次忘一次，
+ * 而且回归套件的判据就藏在那串命令的收尾标记里，改坏了不会当场报错。 */
+#define DEBUG_BUSYBOX_INTERACTIVE 1
 
 /* 浮点上下文验证：置 1 时 fork 一个 user/mfptest.c 编译出的用户程序。
  * 用 musl 工具链编（rv64gc/lp64d），能直接写 double——裸机那套没有 D 扩展。

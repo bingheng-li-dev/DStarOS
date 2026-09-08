@@ -84,6 +84,18 @@ fi
 mcopy -i "$OUT" "${elves[@]}" ::/bin/
 echo "build_rootfs: 拷入 ${#elves[@]} 个用户程序"
 
+# BusyBox（tools/build_busybox.sh 的产物）。**不存在时不报错**：纯内核回归
+# （sched/slab/vfs/dcache）不需要它，照"镜像不存在时内核仍能启动"的同一条思路。
+# 只放一个文件、不造任何链接——FAT 没有符号链接，applet 分发靠 BusyBox 自己的
+# CONFIG_FEATURE_SH_STANDALONE（见 configs/busybox_dstar.config）。
+BUSYBOX_BIN="${BUSYBOX_BIN:-$ROOT_DIR/build/busybox}"
+if [ -f "$BUSYBOX_BIN" ]; then
+    mcopy -i "$OUT" "$BUSYBOX_BIN" ::/bin/busybox
+    echo "build_rootfs: 拷入 busybox（$(stat -c %s "$BUSYBOX_BIN") 字节）"
+else
+    echo "build_rootfs: 未找到 $BUSYBOX_BIN，本次不放 busybox（需要时先跑 tools/build_busybox.sh）"
+fi
+
 # 放一个可读的小文件，给"内核能不能读到镜像里的内容"留一个不依赖 ELF 的判据。
 printf 'DStarOS rootfs\n' > /tmp/.rootfs_stamp
 mcopy -i "$OUT" /tmp/.rootfs_stamp ::/etc/issue

@@ -26,6 +26,7 @@
 #define __NR_ftruncate   46
 #define __NR_chdir       49
 #define __NR_openat      56
+#define __NR_faccessat   48
 #define __NR_close       57
 #define __NR_pipe2       59
 #define __NR_getdents64  61
@@ -49,6 +50,7 @@
 #define __NR_getpgid    155
 #define __NR_uname      160
 #define __NR_umask      166
+#define __NR_prctl      167
 #define __NR_gettimeofday 169
 #define __NR_settimeofday 170
 #define __NR_getpid     172

@@ -21,6 +21,7 @@
 #define ENOTDIR       20
 #define EISDIR        21
 #define EINVAL        22
+#define EACCES        13
 #define EMFILE        24
 #define EROFS         30
 #define ENAMETOOLONG  36
@@ -68,6 +69,8 @@
 #define ENO25_NO_SUCH_PROC (-ESRCH)  /* kill 的目标 pid / 进程组不存在 */
 #define ENO26_INTERRUPTED  (-EINTR)  /* 阻塞的 syscall 被信号打断且不重启 */
 #define ENO27_ARG_TOO_LONG (-E2BIG)  /* execve 的 argv/envp 超出内核暂存区上限 */
+
+#define ENO28_ACCESS       (-EACCES) /* faccessat：目标存在但不具备请求的权限 */
 
 /* 内核内部专用：阻塞循环被信号打断时返回它，由 signal_handle_pending() 统一翻译成
  * "重启该 syscall"或 ENO26_INTERRUPTED。**它永远不会出现在 syscall 的返回值里**，

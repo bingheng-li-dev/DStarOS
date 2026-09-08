@@ -15,6 +15,15 @@
 #define AT_SYMLINK_NOFOLLOW  0x100   /* 不跟随符号链接（FAT 无符号链接，直接忽略）*/
 #define AT_REMOVEDIR         0x200   /* unlinkat 删除目标是目录（等价 rmdir）*/
 #define AT_EMPTY_PATH        0x1000  /* path 为空串时对 dirfd 本身操作 */
+#define AT_EACCESS           0x200   /* faccessat：用有效 uid 判定（单用户系统无区别）*/
+
+/* ============================================================
+ * faccessat 的 mode
+ * ============================================================ */
+#define F_OK 0
+#define X_OK 1
+#define W_OK 2
+#define R_OK 4
 
 /* ============================================================
  * fcntl 命令与 fd 标志
@@ -274,6 +283,17 @@ struct elf64_auxv
     uint64_t a_val;
 };
 _Static_assert(sizeof(struct elf64_auxv) == 16, "elf64_auxv size must match ELF ABI");
+
+/* ============================================================
+ * prctl 的 option
+ * ============================================================ */
+#define PR_SET_NAME 15
+#define PR_GET_NAME 16
+
+/* 进程名（comm）的长度上限。**必须是 16**：Linux 的 TASK_COMM_LEN 就是这个数，
+ * PR_GET_NAME 的调用方按它开缓冲区（BusyBox 的 re_execed_comm() 就是 char comm[16]），
+ * 写多了就是往用户栈上越界写。 */
+#define TASK_COMM_LEN 16
 
 /* ============================================================
  * wait4 的 options
