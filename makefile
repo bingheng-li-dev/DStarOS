@@ -111,6 +111,12 @@ $(KERNEL_ELF): $(C_OBJS) | $(C_OUTDIR)
 rootfs:
 	bash tools/build_rootfs.sh
 
+# 打包可被 U-Boot booti 启动的 VF2 内核镜像（含 64 字节 Image 头校验）。
+# 脚本内部自己以 PLATFORM=VF2 全量重建，所以这里不加依赖。
+.PHONY: vf2img
+vf2img:
+	bash tools/build_vf2_image.sh
+
 clean:
 	rm -fv $(C_OBJS) $(C_DEPS) $(KERNEL_ELF) $(KERNEL_BIN) $(PLATFORM_STAMP)
 

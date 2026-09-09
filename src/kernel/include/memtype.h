@@ -46,8 +46,19 @@ extern char erodata[];   /* .rodata 段结束 */
 extern char edata[];     /* .data 段结束 */
 extern char ebss[];      /* .bss 段结束 */
 
-/* 内核镜像物理加载地址，由 RustSBI / QEMU virt 平台固定，必须与链接脚本 PHYS_BASE_ADDRESS 一致。 */
-#define KERNEL_START ((phyAddr_t)(0x80200000)) /* 使用绝对值而非skernel，避免开启MMU后计算整个内存布局错误 */
+/* 内核镜像物理加载地址，**必须与对应平台链接脚本的 PHYS_BASE_ADDRESS 逐字一致**。
+ * 用绝对值而不是 skernel：开启 MMU 后 skernel 变成高虚拟地址，拿它算物理内存布局全错。
+ *
+ * VF2 取 0x40200000 = DDR 基址 0x40000000 + 2 MB，这个 2 MB 偏移不是随便选的——
+ * 它就是 Image 头里的 text_offset，`booti` 按"RAM 基址 + text_offset"决定把内核搬到哪。
+ * 两者必须一致，否则 U-Boot 把内核放到 A 处、内核却按 B 处链接，一执行就跑飞。 */
+#if defined(QEMU)
+#define KERNEL_START ((phyAddr_t)(0x80200000))
+#elif defined(VF2)
+#define KERNEL_START ((phyAddr_t)(0x40200000))
+#else
+#error "未知平台：KERNEL_START 没有对应取值（PLATFORM 只允许 QEMU / VF2）"
+#endif
 /* 内核占用物理内存的末端，必须从链接符号读取。 */
 #define KERNEL_END ((phyAddr_t)ekernel)
 
@@ -67,10 +78,27 @@ extern char ebss[];      /* .bss 段结束 */
  * 改这里任何一个值都要同步改 scripts/run.sh 与 scripts/forgdb.sh 的 -m，
  * 三者对不上时 QEMU 只会静默给出更小的 RAM，越界访问要到很后面才暴露。
  *
- * VF2(JH7110) 上板时这几个值要按 PLATFORM 分支：DDR 基址是 0x4000_0000，
- * 内存规模先与 QEMU 侧同量级（放开到 GB 级要先做 2 MB 大页线性映射）。 */
+ * VF2(JH7110) 用**同一个形状平移**：DDR 基址 0x4000_0000，各段偏移与 QEMU 侧一一对应
+ * （0x8000_0000 → 0x4000_0000）。板子有 4 GB，这里只管 110 MB 是刻意的——
+ * 放开到 GB 级要先做 2 MB 大页线性映射，否则 init_kernel_offset_mapping() 会逐个
+ * 4 KB 页建 PTE，光页表就要几 MB、还要跑上百万次三级 walk。见计划文档 §2.2。
+ *
+ *   VF2:  0x40000000 RAM 起点 │ 0x40200000 KERNEL_START │ 0x47000000 MEMORY_END
+ *         0x47000000 rootfs 预留区 │ 0x48000000 KERNEL_MAP_END
+ *
+ * ⚠️ 上板时要在 U-Boot 里确认 `kernel_addr_r` / `ramdisk_addr_r` / `fdt_addr_r`
+ * 这三个**下载暂存地址**不与上面的区间重叠（它们可以用 setenv 改）。
+ * `booti` 会把内核从暂存地址搬到 KERNEL_START，但 rootfs 是我们自己按地址预载的，
+ * 撞上了不会有任何报错，只会静默改坏内存。 */
+#if defined(QEMU)
 #define MEMORY_END ((phyAddr_t)(0x87000000))
 #define ROOTFS_PHYS_BASE ((phyAddr_t)(0x87000000))
+#elif defined(VF2)
+#define MEMORY_END ((phyAddr_t)(0x47000000))
+#define ROOTFS_PHYS_BASE ((phyAddr_t)(0x47000000))
+#else
+#error "未知平台：MEMORY_END 没有对应取值（PLATFORM 只允许 QEMU / VF2）"
+#endif
 #define ROOTFS_MAX_SIZE ((uint64_t)(16 * 1024 * 1024))
 
 /* 内核偏移映射要覆盖到哪里。**不等于 MEMORY_END**——PMM 的页帧池止于 MEMORY_END，

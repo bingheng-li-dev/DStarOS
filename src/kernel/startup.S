@@ -1,5 +1,39 @@
 #include "platform.h"
 
+#if defined(VF2)
+    # RISC-V Linux Image 头（64 字节）。U-Boot 的 booti 靠它决定把内核搬到哪、搬多少，
+    # 搬完**直接跳到镜像起点**——也就是下面 code0 那条指令。字段顺序与
+    # Linux Documentation/riscv/boot-image-header.rst 一致，一个都不能挪。
+    #
+    # QEMU 侧不需要它（`-kernel` 直接按 ELF 的入口装载），所以只在 VF2 编进去；
+    # 加了头之后 `_start` 不再是镜像第 0 字节，但 cpu_start_secondary_hart() 传的是
+    # kva_to_pa(_start)，走的是链接符号而不是镜像偏移，不受影响。
+    .section .image_header, "a", @progbits
+    .globl _image_header
+_image_header:
+    # code0：booti 跳进来执行的第一条指令，**必须正好 4 字节**——若被压缩成 2 字节的
+    # c.j，后面每个字段都会错位。
+    # 实测当前配置下压不了（`j _start` 跨 section，汇编期算不出距离只能发完整 JAL；
+    # 且 CFLAGS 里有 -mno-relax，链接期也不会缩），norvc 是**冗余保险**而不是唯一防线。
+    # 留着它是因为这两个前提都可能变：把头挪进 .text.entry、或哪天去掉 -mno-relax，
+    # 压缩就会真的发生，而症状是 U-Boot 报 magic 错、看不出根因在这里。
+    .option push
+    .option norvc
+    j       _start
+    .option pop
+    .word   0                       # code1
+    .quad   0x200000                # text_offset：相对 RAM 基址的偏移，
+                                    # 必须与 memtype.h 的 KERNEL_START 低位一致
+    .quad   ekernel - skernel       # image_size：含 .bss，即内核要占用的内存总量
+    .quad   0                       # flags：bit0 = 0 表示小端
+    .word   2                       # version：major 0 / minor 2
+    .word   0                       # res1
+    .quad   0                       # res2
+    .quad   0x5643534952            # magic  "RISCV\0\0\0"
+    .word   0x05435352              # magic2 "RSC\x05"
+    .word   0                       # res3（PE/COFF 偏移，我们不用）
+#endif
+
     # 与vmm.h SATPMODE_RV39 保持一致
     .equ SATPMODE_RV39, 0x8000000000000000
 
