@@ -57,6 +57,26 @@ KERNEL_ELF := $(OUTDIR)/$(KERNEL_ELF)
 KERNEL_BIN := $(OUTDIR)/$(KERNEL_BIN)
 LDFLAGS += -T $(LDSCRIPT) -o $(KERNEL_ELF)
 
+# 换平台必须全量重编。
+# `-D $(PLATFORM)` 是编译期宏，但它变了**不会让任何 .o 的时间戳变化**，于是
+# `make PLATFORM=VF2` 会打印 "Nothing to be done" 并静默复用上一个平台的目标文件——
+# 你以为编了 VF2，拿到的是 QEMU 的产物。这属于"静默给错东西"，比编译失败危险得多
+# （头文件依赖 -MMD 也救不了：变的是命令行宏，不是任何一个文件）。
+# 解法是把平台名戳进 build/.platform，发现和本次不一致就先把 .o 全删掉。
+PLATFORM_STAMP := $(OUTDIR)/.platform
+PREV_PLATFORM := $(shell cat $(PLATFORM_STAMP) 2>/dev/null)
+ifneq ($(PREV_PLATFORM),)
+ifneq ($(PREV_PLATFORM),$(PLATFORM))
+$(info makefile: 平台由 $(PREV_PLATFORM) 变为 $(PLATFORM)，强制全量重编)
+$(shell rm -f $(C_OBJS) $(C_DEPS) $(KERNEL_ELF) $(KERNEL_BIN))
+# 戳必须在**删完 .o 的当下**就更新，不能等构建成功再写：这一趟只要链接失败，
+# build/ 里就留下了"新平台的 .o + 旧平台的戳"，下次切回旧平台时判定为无需重编，
+# 直接拿错平台的 .o 去链接——正是本机制要消灭的那类静默错误换了个触发路径。
+# 戳记的是"build/ 里的 .o 属于哪个平台"，不是"上次成功构建的平台"。
+$(shell mkdir -p $(OUTDIR) && echo $(PLATFORM) > $(PLATFORM_STAMP))
+endif
+endif
+
 .PHONY: all debug debugbuild clean rootfs
 
 all: $(KERNEL_ELF)
@@ -80,9 +100,10 @@ $(OUTDIR)/%.o: %.S | $(C_OUTDIR)
 $(C_OUTDIR):
 	mkdir -p $@
 
-$(KERNEL_ELF): $(C_OBJS)
+$(KERNEL_ELF): $(C_OBJS) | $(C_OUTDIR)
 	$(LD) $(LDFLAGS) $(C_OBJS)
 	$(OBJCOPY) $(KERNEL_ELF) --strip-all -O binary $(KERNEL_BIN)
+	@echo $(PLATFORM) > $(PLATFORM_STAMP)
 
 # 造根文件系统镜像（build/rootfs.img）。**不挂进 all**：它依赖 user/ 下已经编好的
 # .elf，而 user/ 是独立于内核的构建流水线（见 user/Makefile），把两者绑在一起会让
@@ -91,7 +112,7 @@ rootfs:
 	bash tools/build_rootfs.sh
 
 clean:
-	rm -fv $(C_OBJS) $(C_DEPS) $(KERNEL_ELF) $(KERNEL_BIN)
+	rm -fv $(C_OBJS) $(C_DEPS) $(KERNEL_ELF) $(KERNEL_BIN) $(PLATFORM_STAMP)
 
 # 头文件依赖：没有它，改 pmm.h 里 pframe_t 的布局只会重编直接改动的 .c，
 # 其余 .o 仍按旧 sizeof 编译，症状是完全无关的位置莫名其妙地挂掉
