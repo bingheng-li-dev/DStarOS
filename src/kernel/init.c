@@ -15,14 +15,14 @@
 #include "slab.h"
 #include "ktime.h"
 #include "fpu.h"
+#include "fdt.h"
 
 #if DEBUG_INIT_main
 extern int main(int argc, char **args);
 #endif
 
 /* 固件（OpenSBI/RustSBI）或 U-Boot booti 通过 a1 传进来的 DTB 物理地址，
- * 由 startup.S 在 bss 清零之后存入。目前只打印、不解析——留着是因为一旦
- * _start 把 a1 覆盖掉就再也拿不回来了，而将来读内存大小 / 时基 / hart 列表都要靠它。 */
+ * 由 startup.S 在 bss 清零之后存入。时基自检与 hart 探测都要读它。 */
 uint64_t dtb_phys_addr;
 
 /* 在 MMU 开启前调用，返回 satp 寄存器值 */
@@ -32,8 +32,13 @@ void os_init_before_mmu_enable(void)
     printf("DStarOS is starting...\n");
     sbi_init();
     printf("dtb: phys addr 0x%lx\n", dtb_phys_addr);
-    /* 时基自检必须排在这里——MMU 一开，DTB 那块地址就不在内核映射范围内了 */
-    tick_check_timebase((phyAddr_t)dtb_phys_addr);
+    /* 解析一次 DTB，把要用的都读出来。**这三步必须排在 MMU 开启之前**——
+     * 一开 MMU，DTB 那块地址就不在内核偏移映射范围内了（VF2 上它甚至在
+     * KERNEL_MAP_END 之外）。fdt_init 单独一行而不是藏在下面某个函数里，
+     * 是因为下面两个都依赖它，藏起来会变成靠调用顺序维系的隐式约定。 */
+    fdt_init((phyAddr_t)dtb_phys_addr);
+    tick_check_timebase();
+    cpu_probe_harts();
     pmm_init();
     vmm_init();
 }
@@ -82,10 +87,19 @@ void os_init_after_mmu_enable(uint64_t cpu_id)
          * 是 hart0 的 idle 任务）抢占掉，剩下的启动代码要等 idle 被重新调度才继续——
          * 实测 30 次里只有 3 次轮得上，也就是**九成的运行里 hart 1 根本没启动、
          * 整个系统是单核跑的**，`-smp 2` 形同虚设。少数轮得上的运行里，hart 1 又是在
-         * 系统已经在多任务调度之后才半路加入，比在启动阶段加入脆弱得多。 */
-        cpu_probe_harts();   /* 建立逻辑 cpu 号 → hartid 映射，必须早于启动任何从核 */
-
+         * 系统已经在多任务调度之后才半路加入，比在启动阶段加入脆弱得多。
+         *
+         * hart 探测本身已挪到 os_init_before_mmu_enable()——它要读设备树，
+         * 而 DTB 只在 MMU 开启之前可访问。 */
         int started = 0;
+#if defined(VF2)
+        /* ⚑ 首次上板的临时措施：先只跑引导核。
+         * 这次上板要同时验证串口、booti 搬运、内存布局、rootfs 预载，再叠一个多核
+         * 启动，黑屏时无从判断该怪哪一环。cpu_probe_harts() 照常跑并打印完整的
+         * hart 探测结果，等实机日志确认 S7 被正确排除之后，删掉这个 #if 即可开多核。 */
+        printf("core 0: secondary harts held off (first bring-up), %d probed\n",
+               cpu_get_present_count() - 1);
+#else
         for (int id = 1; id < cpu_get_present_count(); id++)
         {
             if (cpu_start_secondary_hart((uint16_t)id) == SBI_SUCCESS)
@@ -93,6 +107,7 @@ void os_init_after_mmu_enable(uint64_t cpu_id)
                 started += 1;
             }
         }
+#endif
 
         /* 有界等待：SBI 报了 SUCCESS 不代表从核真的活着走到了高 VA。
          * 死等的代价是整机停住、串口再无一个字（这个卡死曾经真实发生过），

@@ -6,7 +6,7 @@
 #include <stdbool.h>
 
 #include "proc.h"
-#include "platform.h"   /* CORE_NUMBER / MAX_HARTID / BOOT_STACK_* */
+#include "platform.h"   /* CORE_NUMBER / BOOT_STACK_* */
 
 typedef struct os_cpu cpu_t;
 

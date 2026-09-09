@@ -86,10 +86,13 @@ extern char ebss[];      /* .bss 段结束 */
  *   VF2:  0x40000000 RAM 起点 │ 0x40200000 KERNEL_START │ 0x47000000 MEMORY_END
  *         0x47000000 rootfs 预留区 │ 0x48000000 KERNEL_MAP_END
  *
- * ⚠️ 上板时要在 U-Boot 里确认 `kernel_addr_r` / `ramdisk_addr_r` / `fdt_addr_r`
- * 这三个**下载暂存地址**不与上面的区间重叠（它们可以用 setenv 改）。
- * `booti` 会把内核从暂存地址搬到 KERNEL_START，但 rootfs 是我们自己按地址预载的，
- * 撞上了不会有任何报错，只会静默改坏内存。 */
+ * ⚠️ U-Boot 的几个默认暂存地址实测（2023-02 SDK 固件）与上面的区间**是重叠的**：
+ *     kernel_addr_r  = 0x40200000  恰好等于 KERNEL_START，booti 源即目标，无妨
+ *     fdt_addr_r     = 0x46000000  落在页帧池内 ✗
+ *     ramdisk_addr_r = 0x46100000  落在页帧池内 ✗
+ * 所以加载时**不要用后两个变量**：rootfs 直接写死 0x47000000，DTB 用
+ * fdtcontroladdr（0xfffc56a0，在 KERNEL_MAP_END 之外）。rootfs 是我们自己按地址
+ * 预载的，撞上了不会有任何报错，只会静默改坏内存。命令见 tools/build_vf2_image.sh。 */
 #if defined(QEMU)
 #define MEMORY_END ((phyAddr_t)(0x87000000))
 #define ROOTFS_PHYS_BASE ((phyAddr_t)(0x87000000))

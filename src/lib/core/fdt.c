@@ -204,6 +204,102 @@ const void *fdt_find_node(const char *path)
     return NULL;
 }
 
+bool fdt_is_available(void)
+{
+    return fdt_valid;
+}
+
+const void *fdt_first_subnode(const void *node)
+{
+    if (!fdt_valid || node == NULL)
+    {
+        return NULL;
+    }
+
+    const uint8_t *p = (const uint8_t *)node;
+
+    /* 规范要求属性全部排在子节点之前，所以跳完连续的 PROP 就到第一个子节点了。 */
+    while (p + 4 <= fdt_struct_end)
+    {
+        uint32_t tok = be32(p);
+        p += 4;
+
+        if (tok == FDT_PROP)
+        {
+            uint32_t plen = be32(p);
+            p += 8;
+            p += align4(plen);
+        }
+        else if (tok == FDT_NOP)
+        {
+            continue;
+        }
+        else if (tok == FDT_BEGIN_NODE)
+        {
+            p += align4((uint32_t)strlen((const char *)p) + 1U);
+            return p;
+        }
+        else    /* END_NODE：本节点没有子节点 */
+        {
+            break;
+        }
+    }
+    return NULL;
+}
+
+const void *fdt_next_subnode(const void *subnode)
+{
+    if (!fdt_valid || subnode == NULL)
+    {
+        return NULL;
+    }
+
+    const uint8_t *p = (const uint8_t *)subnode;
+    /* 传进来的指针已经在 subnode 内部，相对父节点的深度是 1。
+     * 深度回到 0 表示刚离开 subnode（此时下一个 BEGIN_NODE 就是兄弟），
+     * 变成 -1 表示连父节点都离开了，兄弟已经列完。 */
+    int depth = 1;
+
+    while (p + 4 <= fdt_struct_end)
+    {
+        uint32_t tok = be32(p);
+        p += 4;
+
+        if (tok == FDT_BEGIN_NODE)
+        {
+            p += align4((uint32_t)strlen((const char *)p) + 1U);
+            if (depth == 0)
+            {
+                return p;
+            }
+            depth += 1;
+        }
+        else if (tok == FDT_END_NODE)
+        {
+            depth -= 1;
+            if (depth < 0)
+            {
+                break;
+            }
+        }
+        else if (tok == FDT_PROP)
+        {
+            uint32_t plen = be32(p);
+            p += 8;
+            p += align4(plen);
+        }
+        else if (tok == FDT_NOP)
+        {
+            continue;
+        }
+        else
+        {
+            break;
+        }
+    }
+    return NULL;
+}
+
 const void *fdt_get_prop(const void *node, const char *name, uint32_t *len)
 {
     if (!fdt_valid || node == NULL)

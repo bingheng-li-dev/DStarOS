@@ -22,10 +22,11 @@
  * 编译期常量兜底；读到了就比对/覆盖，读不到就静默退回常量。这样解析器出错的最坏
  * 后果是"少一条自检"，而不是"拿到垃圾值然后炸掉"。
  *
- * @note **必须在 MMU 开启之前调用**：固件把 DTB 放在自己的内存里（实测 QEMU+RustSBI
- *   下是 0x8005c000），那里在 KERNEL_START 之下，**不在内核偏移映射范围内**，
- *   MMU 开启后再去读就是一个没建过映射的地址。正确用法是开机时解析一次、
- *   把需要的值抄进全局，此后再不碰 DTB。
+ * @note **必须在 MMU 开启之前调用**：DTB 由固件放置，**不在内核偏移映射范围内**，
+ *   MMU 开启后再去读就是一个没建过映射的地址。两个平台各差一头：
+ *     QEMU+RustSBI 实测 0x8005c000，在 KERNEL_START 之下；
+ *     VF2 用 U-Boot 的 fdtcontroladdr，实测 0xfffc56a0，在 KERNEL_MAP_END 之上。
+ *   正确用法是开机时解析一次、把需要的值抄进全局，此后再不碰 DTB。
  */
 
 /**
@@ -37,12 +38,35 @@
 bool fdt_init(phyAddr_t dtb_pa);
 
 /**
+ * @brief DTB 是否解析成功、后续查询是否可用
+ * @details 单独暴露出来是为了让调用方能区分"没有 dtb"和"dtb 里没有这个属性"——
+ *   两者的诊断价值完全不同，混成一条日志会让排查绕远路。
+ */
+bool fdt_is_available(void);
+
+/**
  * @brief 按绝对路径查找节点
  * @param[in] path 形如 "/cpus"、"/chosen"、"/memory"；只支持绝对路径
  * @return 指向该节点属性区起点的不透明指针；未找到返回 NULL
  * @note 路径分量按 '@' 截断比较，于是 "/memory" 能匹配到 "memory@80000000"。
  */
 const void *fdt_find_node(const char *path);
+
+/**
+ * @brief 取节点的第一个直接子节点
+ * @param[in] node 来自 fdt_find_node 或 fdt_next_subnode
+ * @return 子节点属性区起点；没有子节点返回 NULL
+ */
+const void *fdt_first_subnode(const void *node);
+
+/**
+ * @brief 取同一层的下一个兄弟节点
+ * @param[in] subnode 当前子节点（来自 fdt_first_subnode / fdt_next_subnode）
+ * @return 下一个兄弟的属性区起点；已是最后一个返回 NULL
+ * @note 会整体跳过当前节点的**子树**——/cpus/cpu@N 下面还挂着 interrupt-controller，
+ *   只找下一个 BEGIN_NODE 会掉进子节点里去。
+ */
+const void *fdt_next_subnode(const void *subnode);
 
 /**
  * @brief 读取节点下的属性原始数据

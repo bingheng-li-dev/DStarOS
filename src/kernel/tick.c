@@ -25,9 +25,9 @@ static void tick_set_next_int(uint64_t stime)
 #endif
 }
 
-void tick_check_timebase(phyAddr_t dtb_pa)
+void tick_check_timebase(void)
 {
-    if (!fdt_init(dtb_pa))
+    if (!fdt_is_available())
     {
         printf("timebase: %lu Hz (compile-time; no usable dtb to verify against)\n",
                TIMEBASE_FREQ_HZ);

@@ -3,6 +3,8 @@
 #include "sbi.h"
 #include "sync.h"
 #include "console.h"
+#include "fdt.h"
+#include "stringops.h"
 
 extern uint64_t cpu_get_core_id_asm(void);
 extern void cpu_set_core_id_asm(uint64_t core_id);
@@ -21,35 +23,130 @@ static uint64_t cpu_to_hart[CORE_NUMBER];
 static int cpu_present_count = 1;
 
 /**
+ * @brief 判断 riscv,isa 字符串是否表明这颗核支持 S 态
+ * @param[in] isa 设备树 cpu 节点的 "riscv,isa" 属性值
+ * @details 只看**单字母扩展序列**（第一个 '_' 之前）里有没有 's'。
+ *   整串扫是错的：多字母扩展名里带 s 的比比皆是（zicsr / sstc / svadu），
+ *   那样判据会永远返回"支持"，等于没写。
+ *
+ *   判据只对**老规范**的 isa 字符串成立，用序列里有没有 'u' 来识别：
+ *     老规范把特权级当扩展写，VF2 实测 U74 是 "rv64imafdcbsux"、S7 是 "rv64imacu"；
+ *     新规范不再写 s/u，QEMU 8.2 实测是 "rv64imafdch_zicbom_..._sstc_svadu"，
+ *     这时 isa 提供不了任何特权级信息。
+ *   所以不含 'u' 就直接认为可用——否则 QEMU 上四个核会全被排除、静默退化成单核，
+ *   而回归依然是绿的，只是慢一截，极难察觉。
+ * @note 这是启发式，不是规范保证。它成立的前提是"写了 u 就会写 s"，
+ *   目前两类字符串都符合，但没有哪份规范强制这一点。
+ */
+static bool isa_has_supervisor(const char *isa)
+{
+    bool has_s = false;
+    bool has_u = false;
+
+    for (const char *p = isa; *p != '\0' && *p != '_'; p++)
+    {
+        if (*p == 's')
+        {
+            has_s = true;
+        }
+        else if (*p == 'u')
+        {
+            has_u = true;
+        }
+    }
+    return has_u ? has_s : true;
+}
+
+/**
  * @brief 探测系统里有哪些 hart，建立逻辑 cpu 号 → hartid 的映射
- * @details 靠 SBI 的 HSM `hart_status` 逐个试：不存在或被固件屏蔽的 hartid 会返回
- *   负错误码，跳过即可。这样**不依赖设备树**就能枚举，也天然避开了 VF2 上那颗
- *   不支持 S 态的 S7 监控核（固件不会把它列进自己的 hart mask）。
- *   引导核固定占逻辑号 0，其余按 hartid 升序填。
- * @note 必须在 SBI 可用之后、启动任何从核之前调用。
+ * @details 遍历设备树 /cpus 下的 cpu 节点，从 `reg` 取 hartid、按 `riscv,isa`
+ *   判断能否跑 S 态，再用 HSM `hart_status` 确认固件愿意启动它。
+ *   引导核固定占逻辑号 0，其余按设备树里的顺序填。
+ *
+ *   **不能只靠 HSM 枚举**：VF2 的 OpenSBI 把那颗不支持 S 态的 S7 监控核
+ *   （hart 0）也列进了 domain0（实测 `Domain0 HARTs: 0*,1*,2*,3*,4*`），
+ *   照着 HSM 的结果启动它就是让一颗没有 MMU 的核去执行 csrw satp。
+ *
+ *   **也不能靠 mmu-type / status / compatible**：那块板子的 U-Boot 控制 DTB 里
+ *   S7 这三项分别写着 "riscv,sv39" / "okay" / "sifive,u74-mc"，全是从 U74 抄来的，
+ *   一条都不能信。riscv,isa 是唯一如实反映硬件的字段。
+ * @note 必须在 fdt_init() 之后、**MMU 开启之前**调用——DTB 不在内核偏移映射内。
+ *   读不到设备树时退回单核：引导核既然执行到了这里，它必然支持 S 态，
+ *   这个方向的失败是安全的，而猜错了去启动 S7 则是随机死机。
  */
 void cpu_probe_harts(void)
 {
     cpu_to_hart[0] = boot_hartid_raw;
-    int n = 1;
+    cpu_present_count = 1;
 
-    for (uint64_t h = 0; h < MAX_HARTID && n < CORE_NUMBER; h++)
+    const void *cpus = fdt_find_node("/cpus");
+    if (cpus == NULL)
     {
-        if (h == boot_hartid_raw)
+        printf("cpu: %s -- running single core on boot hart %ld\n",
+               fdt_is_available() ? "dtb has no /cpus" : "no usable dtb",
+               (long)boot_hartid_raw);
+        return;
+    }
+
+    int n = 1;
+    for (const void *cpu = fdt_first_subnode(cpus);
+         cpu != NULL;
+         cpu = fdt_next_subnode(cpu))
+    {
+        uint64_t hartid = 0;
+        const char *dtype = fdt_prop_str(cpu, "device_type");
+
+        /* /cpus 底下不只有 cpu 节点，还可能挂 cpu-map 之类的拓扑描述 */
+        if (dtype == NULL || strncmp(dtype, "cpu", 4) != 0)
         {
             continue;
         }
-        if (sbi_hsm_hart_status(h) < 0)
+        if (!fdt_prop_u64(cpu, "reg", &hartid))
         {
             continue;
         }
-        cpu_to_hart[n] = h;
+
+        /* status 与 isa 是**互补**的两条判据，各自覆盖一类设备树，都要查：
+         *   这块板子的 U-Boot 控制 DTB 用老规范写 isa，S7 是 "rv64imacu"，
+         *   但它的 status 撒谎写成 "okay"——只查 status 会漏；
+         *   上游 Linux 的 jh7110 dtsi 用新规范写 isa（"rv64imac_zba_zbb"，无 u），
+         *   isa 判据对它失效，靠的正是 status = "disabled"——只查 isa 会漏。
+         * 设备树规范里 status 缺失等同 "okay"，另外 "reserved" 表示轮不到 OS 用。 */
+        const char *status = fdt_prop_str(cpu, "status");
+        if (status != NULL && strncmp(status, "okay", 5) != 0 &&
+            strncmp(status, "ok", 3) != 0)
+        {
+            printf("cpu: hart %ld status \"%s\", skipped\n", (long)hartid, status);
+            continue;
+        }
+
+        const char *isa = fdt_prop_str(cpu, "riscv,isa");
+        if (isa == NULL || !isa_has_supervisor(isa))
+        {
+            printf("cpu: hart %ld isa \"%s\" -- no S-mode, skipped\n",
+                   (long)hartid, isa != NULL ? isa : "(missing)");
+            continue;
+        }
+        if (hartid == boot_hartid_raw || n >= CORE_NUMBER)
+        {
+            continue;
+        }
+        if (sbi_hsm_hart_status(hartid) < 0)
+        {
+            printf("cpu: hart %ld not startable via HSM, skipped\n", (long)hartid);
+            continue;
+        }
+        cpu_to_hart[n] = hartid;
         n += 1;
     }
     cpu_present_count = n;
 
-    printf("cpu: boot hart %ld -> cpu0; %d cpu(s) present\n",
-           (long)boot_hartid_raw, cpu_present_count);
+    printf("cpu: %d cpu(s):", cpu_present_count);
+    for (int i = 0; i < cpu_present_count; i++)
+    {
+        printf(" cpu%d=hart%ld", i, (long)cpu_to_hart[i]);
+    }
+    printf("\n");
 }
 
 int cpu_get_present_count(void)
