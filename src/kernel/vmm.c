@@ -223,6 +223,37 @@ void vmm_init(void)
     init_kernel_offset_mapping();
 }
 
+#if DEBUG_BRINGUP
+/**
+ * @brief 打印 MMU 开启所依赖的两条关键映射
+ * @details satp 一写，PC 先靠 trampoline 的恒等映射继续在低地址执行，再跳到高 VA 的
+ *   _start_virtual。这两条 PTE 任何一条不对，表现都是"写完 satp 就没声了"——
+ *   那时还没有 trap handler，异常打到 stvec=0 上，连 panic 都吐不出来，
+ *   与"vmm_init 自己卡在循环里"从串口上完全无法区分。
+ * @note 必须在 MMU 开启之前调用（get_pte 的 mmu_enabled 传 false）。
+ */
+void vmm_dump_boot_mappings(void)
+{
+    extern char _trampoline_start[], _start_virtual[];
+
+    printf("mmu: pgd_ppn=0x%lx, satp will be 0x%lx\n",
+           (unsigned long)vmm_kernel_pgd_ppn,
+           (unsigned long)(0x8000000000000000UL | vmm_kernel_pgd_ppn));
+
+    /* 恒等映射：VA 就是 trampoline 的物理地址（MMU 未开，符号取到的即 PA） */
+    virAddr_t tramp_va = (virAddr_t)_trampoline_start;
+    pte_t *pte = get_pte(vmm_kernel_pgd_ppn, tramp_va, false, false);
+    printf("mmu: tramp  va=0x%lx pte=0x%lx\n",
+           (unsigned long)tramp_va, (unsigned long)(pte != NULL ? *pte : 0));
+
+    /* 高 VA 映射：trampoline 末尾 jr 过去的目标 */
+    virAddr_t sv_va = pa_to_kva((phyAddr_t)_start_virtual);
+    pte = get_pte(vmm_kernel_pgd_ppn, sv_va, false, false);
+    printf("mmu: startv va=0x%lx pte=0x%lx\n",
+           (unsigned long)sv_va, (unsigned long)(pte != NULL ? *pte : 0));
+}
+#endif
+
 /**
  * @brief 在进程地址空间中查找包含给定虚拟地址的 VMA
  * @param[in] mm 进程地址空间描述符

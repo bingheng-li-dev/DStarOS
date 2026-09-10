@@ -41,6 +41,10 @@ void os_init_before_mmu_enable(void)
     cpu_probe_harts();
     pmm_init();
     vmm_init();
+#if DEBUG_BRINGUP
+    vmm_dump_boot_mappings();
+    printf("mmu: about to write satp\n");
+#endif
 }
 
 /* 从核报到标志，按**逻辑 cpu 号**索引；每个从核只写自己那一格，引导核只读，
@@ -57,6 +61,16 @@ void os_init_after_mmu_enable(uint64_t cpu_id)
     cpu_set_core_id(cpu_id);
     if (cpu_id == 0)
     {
+#if DEBUG_BRINGUP
+        /* 这一行**必须绕开 printf**：init_printf 存的 stdout_putc 还是物理地址，
+         * 而恒等映射只覆盖 trampoline 那一页，经函数指针调过去当场就 fault。
+         * sbi_console_putchar 是直接调用、链接在高 VA，此刻可用。
+         * 只让引导核打：这里还没有 ConsoleLock，多核逐字符输出会交错成乱码。 */
+        for (const char *p = "mmu: high VA reached\n"; *p != '\0'; p++)
+        {
+            sbi_console_putchar((int)*p);
+        }
+#endif
         /* init_printf先前存放了stdout_putc函数的物理绝对地址，更新为高虚拟地址 */
         console_init();
         pmm_init_after_mmu_enable();

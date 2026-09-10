@@ -69,4 +69,8 @@ void   vmm_page_fault_handler(virAddr_t badva, int fault_type);
 void   vmm_probe_pte_ad(void);
 #endif
 
+#if DEBUG_BRINGUP
+void   vmm_dump_boot_mappings(void);
+#endif
+
 #endif

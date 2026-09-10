@@ -87,11 +87,18 @@ fi
 cp "$BIN" "$OUT"
 echo "build_vf2_image: 完成 -> $OUT（$(stat -c %s "$OUT") 字节）"
 echo
-echo "U-Boot 侧用法（地址已按实机 printenv 逐条核对）："
-echo "  # 先把 build/vf2-kernel.img 与 build/rootfs.img 拷进 SD 卡的 FAT32 分区"
-echo "  fatload mmc 1:1 0x40200000 vf2-kernel.img"
-echo "  fatload mmc 1:1 0x47000000 rootfs.img"
+echo "U-Boot 侧用法（走 TFTP，地址已按实机 printenv 逐条核对）："
+echo "  tftpboot 0x40200000 vf2-kernel.img"
+echo "  tftpboot 0x47000000 rootfs.img"
 echo "  booti 0x40200000 - \${fdtcontroladdr}"
+echo
+echo "存成一条命令，之后每轮迭代只敲 run dstar："
+echo "  setenv tftpwindowsize 8"
+echo "  setenv dstar 'tftpboot 0x40200000 vf2-kernel.img; tftpboot 0x47000000 rootfs.img; booti 0x40200000 - \${fdtcontroladdr}'"
+echo "  saveenv"
+echo
+echo "选 TFTP 而不是 SD 卡，是因为换卡要断电、拆卡、占用读卡器的 USB 口——"
+echo "而那个口往往就是串口转接头在用的，等于每轮迭代都要拔掉唯一的观测手段。"
 echo
 echo "⚠️ 三个地址都是写死的，**不要**换成 U-Boot 的同名默认变量："
 echo "   fdt_addr_r=0x46000000 与 ramdisk_addr_r=0x46100000 都落在 PMM 页帧池"

@@ -204,6 +204,12 @@
  * 串口应看到 "pte_ad_probe: RESULT = ..."。 */
 #define DEBUG_PTE_AD_PROBE 0
 
+/* 上板 bring-up 诊断：置 1 时打印 MMU 开启所依赖的两条关键映射，并在 PC 真正
+ * 落到高 VA 之后立刻吐一行。用来切开"vmm_init 卡住 / satp 写完跑飞 /
+ * os_init_after_mmu_enable 早期挂掉"这三段——它们的表现都是"pmm inited 之后没声了"。
+ * 主线在板子上跑通之后置 0。 */
+#define DEBUG_BRINGUP 0
+
 #define DEBUG_TRACK_LINE() printf("DEBUG_TRACK_LINE: %s:%d\n", __FILE__, __LINE__)
 
 #endif /* DEBUG */
