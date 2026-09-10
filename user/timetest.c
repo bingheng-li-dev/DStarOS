@@ -301,7 +301,15 @@ static void test_clock_gettime(void)
 
     struct timespec res;
     expect(sys_clock_getres(CLOCK_MONOTONIC, &res) == 0, "clock_getres ok");
-    expect(res.tv_sec == 0 && res.tv_nsec == 100, "resolution is 100 ns (10 MHz timebase)");
+    /* 分辨率 = 1e9 / 时基频率，**随平台变**：QEMU virt 10 MHz → 100 ns，
+     * JH7110 4 MHz → 250 ns。所以只断言它落在合理区间，不写死具体数值——
+     * 写死等于把某一块板子的参数焊进用例，换块板子就凭空多一条假失败，
+     * 而那条假失败长得和真 bug 一模一样。实际值照旧打出来供人工核对。 */
+    expect(res.tv_sec == 0 && res.tv_nsec > 0 && res.tv_nsec <= 1000000,
+           "resolution is non-zero and sub-millisecond");
+    puts_fd(1, "        (clock_getres = ");
+    put_long(res.tv_nsec);
+    puts_fd(1, " ns)\n");
 
     expect(sys_clock_gettime(99, &a) == -EINVAL, "unknown clock id gives EINVAL");
 
