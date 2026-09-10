@@ -121,8 +121,31 @@ typedef uint64_t ppn_t;
 typedef uint64_t pte_t;
 typedef uint16_t pteflg_t;
 
+/* 叶 PTE 一律补上 A 位，可写的再补 D 位。
+ *
+ * **A/D 的硬件自动置位是可选特性（Svadu 扩展），不能假定存在。**
+ * QEMU 8.2 的 virt 带 svadu（isa 串里能看到），访问 A=0 的页硬件会自己补上；
+ * VF2 的 U74 没有（`rv64imafdcbsux`），访问 A=0 的页**直接抛 page fault**。
+ * 后果在开机时最致命：建内核页表时若不带 A，satp 一写就是取指 fault，
+ * 而那一刻 stvec 还是 0、trap_init 尚未运行，于是 fault→跳 0→再 fault，
+ * 串口连一个字都出不来，从现象上完全看不出是 A 位的问题。
+ *
+ * 判据取 R/W/X 是否有任一置位：Sv39 里这三位全 0 的 PTE 指向下一级页表，
+ * 那种非叶 PTE 的 A/D 位没有意义，不能乱补。
+ *
+ * 代价是**放弃 A/D 位的语义**——将来若要做时钟置换算法，靠"清 A 位再看硬件是否
+ * 重新置位"这条路在本平台上本来就走不通（见 vmm_probe_pte_ad 的探针），
+ * 需要改用软件方式在缺页处理里维护。 */
 static inline pte_t pte_create(ppn_t ppn, pteflg_t pteFlag)
 {
+    if ((pteFlag & (PTE_R | PTE_W | PTE_X)) != 0)
+    {
+        pteFlag |= PTE_A;
+        if ((pteFlag & PTE_W) != 0)
+        {
+            pteFlag |= PTE_D;
+        }
+    }
     return (pte_t)((ppn << PTE_PPN_OFFSET) | pteFlag | PTE_V);
 }
 
