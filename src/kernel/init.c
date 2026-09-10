@@ -106,14 +106,6 @@ void os_init_after_mmu_enable(uint64_t cpu_id)
          * hart 探测本身已挪到 os_init_before_mmu_enable()——它要读设备树，
          * 而 DTB 只在 MMU 开启之前可访问。 */
         int started = 0;
-#if defined(VF2)
-        /* ⚑ 首次上板的临时措施：先只跑引导核。
-         * 这次上板要同时验证串口、booti 搬运、内存布局、rootfs 预载，再叠一个多核
-         * 启动，黑屏时无从判断该怪哪一环。cpu_probe_harts() 照常跑并打印完整的
-         * hart 探测结果，等实机日志确认 S7 被正确排除之后，删掉这个 #if 即可开多核。 */
-        printf("core 0: secondary harts held off (first bring-up), %d probed\n",
-               cpu_get_present_count() - 1);
-#else
         for (int id = 1; id < cpu_get_present_count(); id++)
         {
             if (cpu_start_secondary_hart((uint16_t)id) == SBI_SUCCESS)
@@ -121,7 +113,6 @@ void os_init_after_mmu_enable(uint64_t cpu_id)
                 started += 1;
             }
         }
-#endif
 
         /* 有界等待：SBI 报了 SUCCESS 不代表从核真的活着走到了高 VA。
          * 死等的代价是整机停住、串口再无一个字（这个卡死曾经真实发生过），
