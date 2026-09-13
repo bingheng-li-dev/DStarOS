@@ -6,7 +6,7 @@
  * 设计映射关系：
  *   VFS 抽象          FatFS 对应           实现方式
  *   ─────────────────────────────────────────────────────
- *   super_block_t  ←→  FATFS 对象          FATFS* 存入 sb->s_private
+ *   super_block_t  ←→  FatFS 卷            fatfs_volume_t*（FATFS + 卷前缀）存入 sb->s_private
  *   inode_t        ←→  路径字符串          由 fatfs_build_path() 沿 dentry 链现推（不缓存）
  *   dentry_t       ←→  路径分量            由 VFS dentry_create 管理
  *   file_t         ←→  FIL 对象            FIL* 存入 file->f_private
@@ -70,15 +70,17 @@ typedef struct
     char     lfn_buf[_MAX_LFN + 1];
 } fatfs_dir_priv_t;
 
-/* 全局 FATFS 对象（f_mount 要求持久存在直至卸载）*/
-static FATFS fatfs_obj;  // @todo 全局变量命名风格统一
+/* 每个 FatFS 卷一份，挂在 sb->s_private：f_mount 要求 FATFS 对象持久存在直至卸载，
+ * 卷前缀 "N:" 决定一次 FatFS 调用落在哪个物理驱动器上（0 = RAM 盘，1 = SD 卡）。 */
+typedef struct fatfs_volume
+{
+    FATFS fs;
+    char  prefix[3];
+} fatfs_volume_t;
 
 static super_block_operations_t fatfs_sb_ops;
 static inode_operations_t       fatfs_inode_ops;
 static file_operations_t        fatfs_file_ops;
-
-/* diskio.c 中导出的扇区总数查询函数 */
-extern unsigned int ramdisk_get_sector_count(void);
 
 /* ============================================================
  * FatFS 内存分配钩子（_USE_LFN=3 需要，见 ffconf.h）
@@ -134,34 +136,34 @@ WCHAR ff_convert(WCHAR chr, UINT dir)
  * ============================================================ */
 
 /**
- * @brief 将 VFS 绝对路径转换为 FatFS 卷路径
- * @param[in]  vfs_path VFS 绝对路径（"" 表示根，"/dir/f" 表示普通路径）
+ * @brief 将 VFS 卷内路径转换为 FatFS 路径（带卷前缀）
+ * @param[in]  sb       路径所在卷的超级块，前缀取自它的 fatfs_volume_t
+ * @param[in]  vfs_path 卷内绝对路径（"" 表示卷根，"/dir/f" 表示普通路径）
  * @param[out] buf      输出缓冲区
  * @param[in]  bufsz    缓冲区大小
- * @note "" → "0:/"；"/dir/f" → "0:/dir/f"
+ * @note "" → "N:/"；"/dir/f" → "N:/dir/f"。缓冲区不够时输出空串。
  */
-static void vfs_to_fatfs_path(const char *vfs_path, char *buf, int bufsz)
+static void vfs_to_fatfs_path(const super_block_t *sb, const char *vfs_path, char *buf, int bufsz)
 {
-    if (!vfs_path || vfs_path[0] == '\0')
-    {
-        /* 根目录 */
-        if (bufsz >= 4)
-        {
-            buf[0] = '0'; buf[1] = ':'; buf[2] = '/'; buf[3] = '\0';
-        }
-        return;
-    }
+    const fatfs_volume_t *vol = (const fatfs_volume_t *)sb->s_private;
+    int plen = (vfs_path != NULL) ? (int)strlen(vfs_path) : 0;
 
-    /* "0:" + vfs_path（已以 '/' 开头）*/
-    int plen = (int)strlen(vfs_path);
-    if (2 + plen + 1 > bufsz)
+    if (2 + (plen > 0 ? plen : 1) + 1 > bufsz)
     {
         buf[0] = '\0';
         return;
     }
-    buf[0] = '0';
+    buf[0] = vol->prefix[0];
     buf[1] = ':';
-    memcpy(buf + 2, vfs_path, plen + 1);
+    if (plen == 0)
+    {
+        buf[2] = '/';
+        buf[3] = '\0';
+    }
+    else
+    {
+        memcpy(buf + 2, vfs_path, plen + 1);
+    }
 }
 
 /**
@@ -209,6 +211,7 @@ static void fatfs_make_child_path(const char *parent_path,
  * @param[in]  d     目标目录项
  * @param[out] buf   输出缓冲区
  * @param[in]  bufsz 缓冲区大小
+ * @param[out] sb_out 非 NULL 时写入该目录项所在卷的超级块（取自卷根 inode）
  * @retval ENO0_NO_ERROR     成功；卷根本身得到空字符串 ""（与 vfs_to_fatfs_path 的约定一致）
  * @retval ENO5_NOSUCH_ENTRY 这条链上有目录项已被 unlink/rmdir 脱链，路径无意义
  * @retval ENO11_NAME_TOO_LONG 拼出来超过 bufsz
@@ -217,7 +220,7 @@ static void fatfs_make_child_path(const char *parent_path,
  * @note 终点必须是本文件系统的根 inode。脱链的目录项同样以"d_parent 指向自身"
  *   标记，光看循环退出条件区分不了，不检查的话会把一条张冠李戴的路径交给 FatFS。
  */
-static int fatfs_build_path(const dentry_t *d, char *buf, int bufsz)
+static int fatfs_build_path(const dentry_t *d, char *buf, int bufsz, super_block_t **sb_out)
 {
     if (d == NULL || bufsz < 1)
     {
@@ -246,12 +249,16 @@ static int fatfs_build_path(const dentry_t *d, char *buf, int bufsz)
         return ENO5_NOSUCH_ENTRY;
     }
 
+    if (sb_out != NULL)
+    {
+        *sb_out = d->d_inode->i_sb;
+    }
     memmove(buf, buf + pos, bufsz - pos);
     return ENO0_NO_ERROR;
 }
 
 /**
- * @brief 拼出 inode 对应的 FatFS 卷路径（"0:/dir/f"）
+ * @brief 拼出 inode 对应的 FatFS 卷路径（"N:/dir/f"）
  * @param[in]  inode 目标 inode
  * @param[out] buf   输出缓冲区，容量需 >= VFS_PATH_MAX + 4
  * @param[in]  bufsz 缓冲区大小
@@ -265,12 +272,13 @@ static int fatfs_inode_fatfs_path(const inode_t *inode, char *buf, int bufsz)
     {
         return ENO8_NULL_POINTER;
     }
-    int ret = fatfs_build_path(inode->i_dentry, vfs_path, sizeof(vfs_path));
+    super_block_t *sb = NULL;
+    int ret = fatfs_build_path(inode->i_dentry, vfs_path, sizeof(vfs_path), &sb);
     if (ret != ENO0_NO_ERROR)
     {
         return ret;
     }
-    vfs_to_fatfs_path(vfs_path, buf, bufsz);
+    vfs_to_fatfs_path(sb, vfs_path, buf, bufsz);
     return ENO0_NO_ERROR;
 }
 
@@ -353,8 +361,10 @@ static int fatfs_sync_fs_cb(super_block_t *sb)
 
 static int fatfs_unmount_cb(super_block_t *sb)
 {
-    (void)sb;
-    f_mount(NULL, "0:", 0);  /* 卸载 FatFS 卷，释放内部状态 */
+    fatfs_volume_t *vol = (fatfs_volume_t *)sb->s_private;
+    f_mount(NULL, vol->prefix, 0);  /* 卸载 FatFS 卷，释放内部状态 */
+    kfree(vol);                     /* destroy_super_block 只释放超级块本身 */
+    sb->s_private = NULL;
     return ENO0_NO_ERROR;
 }
 
@@ -372,11 +382,15 @@ static super_block_operations_t fatfs_sb_ops = {
 /**
  * @brief FatFS 挂载回调入口
  * @param[in] fst    文件系统类型描述符（未使用）
- * @param[in] source 设备路径（未使用，驱动号固定为 0）
- * @param[in] data   额外挂载参数（未使用）
+ * @param[in] source 挂载路径（vfs_mount 原样传入，未使用）
+ * @param[in] data   卷号字符串，"1" 表示 1 号物理驱动器（VF2 的 SD 卡）；NULL 表示 0 号（RAM 盘）
  * @return 根目录的 dentry 指针；失败返回 NULL
- * @details 步骤：disk_initialize → f_mount（无 FAT 时先 f_mkfs）
+ * @details 步骤：解析卷号 → disk_initialize → f_mount（仅 0 号卷无 FAT 时先 f_mkfs）
  *          → alloc_super_block → 分配根 inode → dentry_create。
+ *
+ *   **只有 0 号卷允许自动格式化**：RAM 盘没装镜像时本来就是一片零，格式化是预期行为；
+ *   对 SD 卡，"读不到 FAT"更可能是驱动或寻址出了错，此时 f_mkfs 等于亲手抹掉整张卡。
+ * @note f_mount(opt=1) 失败时 FatFS 已把 FATFS 指针登记进卷表，释放前必须先注销。
  */
 static dentry_t *fatfs_mount_cb(file_system_type_t *fst,
                                  const char *source,
@@ -384,49 +398,80 @@ static dentry_t *fatfs_mount_cb(file_system_type_t *fst,
 {
     (void)fst;
     (void)source;
-    (void)data;
+
+    BYTE pdrv = 0;
+    if (data != NULL)
+    {
+        const char *s = (const char *)data;
+        if (s[0] < '0' || s[0] >= '0' + _VOLUMES || s[1] != '\0')
+        {
+            printf("fatfs_mount: bad volume \"%s\"\n", s);
+            return NULL;
+        }
+        pdrv = (BYTE)(s[0] - '0');
+    }
+
+    fatfs_volume_t *vol = (fatfs_volume_t *)kmalloc(sizeof(fatfs_volume_t));
+    if (!vol)
+    {
+        return NULL;
+    }
+    memset(vol, 0, sizeof(*vol));
+    vol->prefix[0] = (char)('0' + pdrv);
+    vol->prefix[1] = ':';
+    vol->prefix[2] = '\0';
 
     /* 1. 初始化磁盘驱动 */
-    DSTATUS dstat = disk_initialize(0);
+    DSTATUS dstat = disk_initialize(pdrv);
     if (dstat & STA_NOINIT)
     {
-        printf("fatfs_mount: disk init failed, dstat=0x%x\n", (unsigned)dstat);
+        printf("fatfs_mount: disk %u init failed, dstat=0x%x\n", (unsigned)pdrv, (unsigned)dstat);
+        kfree(vol);
         return NULL;
     }
 
     /* 2. 挂载 FatFS 卷（opt=1：立即强制挂载，读取 BPB）*/
-    FRESULT fr = f_mount(&fatfs_obj, "0:", 1);
-    if (fr == FR_NO_FILESYSTEM)
+    FRESULT fr = f_mount(&vol->fs, vol->prefix, 1);
+    if (fr == FR_NO_FILESYSTEM && pdrv == 0)
     {
         /* 无有效 FAT 文件系统，格式化 ramdisk */
         printf("fatfs_mount: no filesystem, formatting ramdisk...\n");
         BYTE work[512];
-        fr = f_mkfs("0:", 0, sizeof(work));
+        fr = f_mkfs(vol->prefix, 0, sizeof(work));
         if (fr != FR_OK)
         {
             printf("fatfs_mount: f_mkfs failed, fr=%d\n", (int)fr);
+            f_mount(NULL, vol->prefix, 0);
+            kfree(vol);
             return NULL;
         }
         /* 重新挂载格式化后的卷 */
-        fr = f_mount(&fatfs_obj, "0:", 1);
+        fr = f_mount(&vol->fs, vol->prefix, 1);
     }
     if (fr != FR_OK)
     {
-        printf("fatfs_mount: f_mount failed, fr=%d\n", (int)fr);
+        printf("fatfs_mount: disk %u f_mount failed, fr=%d\n", (unsigned)pdrv, (int)fr);
+        f_mount(NULL, vol->prefix, 0);
+        kfree(vol);
         return NULL;
     }
 
-    /* 3. 创建超级块 */
-    unsigned int sector_count = ramdisk_get_sector_count();
+    /* 3. 创建超级块。拿不到扇区数（SD 卡只读挂载不提供）时记 0，只影响 statfs 类信息 */
+    DWORD sector_count = 0;
+    if (disk_ioctl(pdrv, GET_SECTOR_COUNT, &sector_count) != RES_OK)
+    {
+        sector_count = 0;
+    }
     super_block_t *sb = alloc_super_block(
         "fatfs",
         512,
         (uint64_t)sector_count,
         &fatfs_sb_ops,
-        &fatfs_obj);
+        vol);
     if (!sb)
     {
-        f_mount(NULL, "0:", 0);
+        f_mount(NULL, vol->prefix, 0);
+        kfree(vol);
         return NULL;
     }
 
@@ -435,7 +480,8 @@ static dentry_t *fatfs_mount_cb(file_system_type_t *fst,
     if (!root_inode)
     {
         destroy_super_block(sb);
-        f_mount(NULL, "0:", 0);
+        f_mount(NULL, vol->prefix, 0);
+        kfree(vol);
         return NULL;
     }
     root_inode->i_mode = S_IFDIR | 0755;
@@ -448,13 +494,22 @@ static dentry_t *fatfs_mount_cb(file_system_type_t *fst,
     {
         fatfs_destroy_inode_cb(root_inode);
         destroy_super_block(sb);
-        f_mount(NULL, "0:", 0);
+        f_mount(NULL, vol->prefix, 0);
+        kfree(vol);
         return NULL;
     }
     root_inode->i_dentry = root_dentry;
     sb->s_root_inode     = root_inode;
 
-    printf("fatfs_mount: mounted ok (%u sectors)\n", sector_count);
+    if (pdrv == 0)
+    {
+        printf("fatfs_mount: mounted ok (%u sectors)\n", (unsigned)sector_count);
+    }
+    else
+    {
+        printf("fatfs_mount: disk %u mounted ok%s\n", (unsigned)pdrv,
+               (dstat & STA_PROTECT) ? " (read-only)" : "");
+    }
     return root_dentry;
 }
 
@@ -475,12 +530,13 @@ static dentry_t *fatfs_lookup_cb(inode_t *dir, const char *name)
     char dir_vfs[VFS_PATH_MAX];
     char child_vfs[VFS_PATH_MAX];
     char child_fatfs[VFS_PATH_MAX + 4];
-    if (fatfs_build_path(dir->i_dentry, dir_vfs, sizeof(dir_vfs)) != ENO0_NO_ERROR)
+    super_block_t *sb = NULL;
+    if (fatfs_build_path(dir->i_dentry, dir_vfs, sizeof(dir_vfs), &sb) != ENO0_NO_ERROR)
     {
         return NULL;
     }
     fatfs_make_child_path(dir_vfs, name, child_vfs, VFS_PATH_MAX);
-    vfs_to_fatfs_path(child_vfs, child_fatfs, sizeof(child_fatfs));
+    vfs_to_fatfs_path(sb, child_vfs, child_fatfs, sizeof(child_fatfs));
 
     /* 查询文件/目录是否存在。_USE_LFN 开启后 FILINFO 多出 lfname/lfsize 两个字段，
      * f_stat 内部按 "if (fno->lfname)" 判断是否要取长文件名——这里用不到长名
@@ -536,12 +592,13 @@ static int fatfs_create_cb(inode_t *dir, dentry_t *dentry, mode_t mode)
     /* dentry 此刻已由 dentry_create 挂进 dir 的子链表，直接从它上溯即可 */
     char child_vfs[VFS_PATH_MAX];
     char child_fatfs[VFS_PATH_MAX + 4];
-    int pret = fatfs_build_path(dentry, child_vfs, sizeof(child_vfs));
+    super_block_t *sb = NULL;
+    int pret = fatfs_build_path(dentry, child_vfs, sizeof(child_vfs), &sb);
     if (pret != ENO0_NO_ERROR)
     {
         return pret;
     }
-    vfs_to_fatfs_path(child_vfs, child_fatfs, sizeof(child_fatfs));
+    vfs_to_fatfs_path(sb, child_vfs, child_fatfs, sizeof(child_fatfs));
 
     /* 在磁盘上创建文件 */
     FIL fil;
@@ -584,12 +641,13 @@ static int fatfs_mkdir_cb(inode_t *dir, dentry_t *dentry, mode_t mode)
 
     char child_vfs[VFS_PATH_MAX];
     char child_fatfs[VFS_PATH_MAX + 4];
-    int pret = fatfs_build_path(dentry, child_vfs, sizeof(child_vfs));
+    super_block_t *sb = NULL;
+    int pret = fatfs_build_path(dentry, child_vfs, sizeof(child_vfs), &sb);
     if (pret != ENO0_NO_ERROR)
     {
         return pret;
     }
-    vfs_to_fatfs_path(child_vfs, child_fatfs, sizeof(child_fatfs));
+    vfs_to_fatfs_path(sb, child_vfs, child_fatfs, sizeof(child_fatfs));
 
     FRESULT fr = f_mkdir(child_fatfs);
     if (fr != FR_OK)
@@ -624,12 +682,13 @@ static int fatfs_unlink_cb(inode_t *dir, dentry_t *dentry)
 
     char vfs_path[VFS_PATH_MAX];
     char fatfs_path[VFS_PATH_MAX + 4];
-    int pret = fatfs_build_path(dentry, vfs_path, sizeof(vfs_path));
+    super_block_t *sb = NULL;
+    int pret = fatfs_build_path(dentry, vfs_path, sizeof(vfs_path), &sb);
     if (pret != ENO0_NO_ERROR)
     {
         return pret;
     }
-    vfs_to_fatfs_path(vfs_path, fatfs_path, sizeof(fatfs_path));
+    vfs_to_fatfs_path(sb, vfs_path, fatfs_path, sizeof(fatfs_path));
 
     return fresult_to_vfs(f_unlink(fatfs_path));
 }
@@ -666,18 +725,20 @@ static int fatfs_rename_cb(inode_t *old_dir, dentry_t *old_dentry,
     char old_fatfs[VFS_PATH_MAX + 4];
     char new_fatfs[VFS_PATH_MAX + 4];
 
-    int pret = fatfs_build_path(old_dentry, old_vfs, sizeof(old_vfs));
+    super_block_t *old_sb = NULL;
+    super_block_t *new_sb = NULL;
+    int pret = fatfs_build_path(old_dentry, old_vfs, sizeof(old_vfs), &old_sb);
     if (pret != ENO0_NO_ERROR)
     {
         return pret;
     }
-    pret = fatfs_build_path(new_dentry, new_vfs, sizeof(new_vfs));
+    pret = fatfs_build_path(new_dentry, new_vfs, sizeof(new_vfs), &new_sb);
     if (pret != ENO0_NO_ERROR)
     {
         return pret;
     }
-    vfs_to_fatfs_path(old_vfs, old_fatfs, sizeof(old_fatfs));
-    vfs_to_fatfs_path(new_vfs, new_fatfs, sizeof(new_fatfs));
+    vfs_to_fatfs_path(old_sb, old_vfs, old_fatfs, sizeof(old_fatfs));
+    vfs_to_fatfs_path(new_sb, new_vfs, new_fatfs, sizeof(new_fatfs));
 
     FRESULT fr = f_rename(old_fatfs, new_fatfs);
     if (fr != FR_OK)
