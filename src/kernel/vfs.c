@@ -1337,21 +1337,37 @@ int vfs_unmount(const char *path)
  * ============================================================ */
 
 /**
+ * @brief vfs_open 的失败出口：记下原因并返回 NULL
+ * @param[out] err  非 NULL 时写入 code
+ * @param[in]  code 负的 ENO* 错误码
+ * @return 恒为 NULL
+ */
+static file_t *vfs_open_fail(int *err, int code)
+{
+    if (err != NULL)
+    {
+        *err = code;
+    }
+    return NULL;
+}
+
+/**
  * @brief 打开（或创建）文件
  * @param[in] path 文件路径
  * @param[in] mode 打开模式标志（O_RDONLY/O_WRONLY/O_RDWR/O_CREAT 等）
- * @return 成功返回打开的 file_t 指针；失败返回 NULL
+ * @param[out] err  非 NULL 时写入结果：成功为 ENO0_NO_ERROR，失败为负的 ENO* 错误码
+ * @return 成功返回打开的 file_t 指针；失败返回 NULL，原因见 err
  * @note 流程：路径解析 → O_CREAT 时创建文件 → 分配 file_t → 调用底层 open 回调
  */
-file_t *vfs_open(const char *path, int mode)
+file_t *vfs_open(const char *path, int mode, int *err)
 {
     if (!path)
     {
-        return NULL;
+        return vfs_open_fail(err, ENO8_NULL_POINTER);
     }
     if (!vfs_root_dentry)
     {
-        return NULL;
+        return vfs_open_fail(err, ENO13_NO_FS);
     }
 
     dentry_t *target = vfs_lookup(path);
@@ -1361,26 +1377,26 @@ file_t *vfs_open(const char *path, int mode)
         /* 文件不存在 */
         if (!(mode & O_CREAT))
         {
-            return NULL;
+            return vfs_open_fail(err, ENO5_NOSUCH_ENTRY);
         }
 
         /* 分离父目录路径和文件名 */
         char ppath[VFS_PATH_MAX], fname[VFS_NAME_MAX];
         if (split_path(path, ppath, VFS_PATH_MAX, fname, VFS_NAME_MAX) < 0)
         {
-            return NULL;
+            return vfs_open_fail(err, ENO11_NAME_TOO_LONG);
         }
 
         /* 查找父目录 */
         dentry_t *parent = vfs_lookup(ppath);
         if (!parent)
         {
-            return NULL;
+            return vfs_open_fail(err, ENO5_NOSUCH_ENTRY);
         }
         if (!parent->d_inode || !S_ISDIR(parent->d_inode->i_mode))
         {
             dentry_put(parent);
-            return NULL;
+            return vfs_open_fail(err, ENO9_NOT_DIR);
         }
 
         /* 创建负目录项（d_inode = NULL），然后调底层 create */
@@ -1388,14 +1404,14 @@ file_t *vfs_open(const char *path, int mode)
         if (!new_d)
         {
             dentry_put(parent);
-            return NULL;
+            return vfs_open_fail(err, ENO1_NOMORE_MEM);
         }
 
         if (!parent->d_inode->i_op || !parent->d_inode->i_op->create)
         {
             dentry_put(new_d);
             dentry_put(parent);
-            return NULL;
+            return vfs_open_fail(err, ENO16_PERM);
         }
 
         int ret = parent->d_inode->i_op->create(
@@ -1404,7 +1420,7 @@ file_t *vfs_open(const char *path, int mode)
         if (ret != ENO0_NO_ERROR)
         {
             dentry_put(new_d);
-            return NULL;
+            return vfs_open_fail(err, ret);
         }
 
         target = new_d;
@@ -1416,7 +1432,7 @@ file_t *vfs_open(const char *path, int mode)
         {
             /* O_CREAT | O_EXCL：文件已存在则失败 */
             dentry_put(target);
-            return NULL;
+            return vfs_open_fail(err, ENO7_EXISTS);
         }
     }
 
@@ -1424,7 +1440,7 @@ file_t *vfs_open(const char *path, int mode)
     if (!target->d_inode)
     {
         dentry_put(target);
-        return NULL;
+        return vfs_open_fail(err, ENO5_NOSUCH_ENTRY);
     }
 
     /* 目录只允许只读打开（供 getdents64 遍历）；任何写意图一律拒绝。
@@ -1435,14 +1451,14 @@ file_t *vfs_open(const char *path, int mode)
         if (acc == O_WRONLY || acc == O_RDWR || (mode & O_TRUNC))
         {
             dentry_put(target);
-            return NULL;
+            return vfs_open_fail(err, ENO10_IS_DIR);
         }
     }
     /* 反过来：带 O_DIRECTORY 却指向普通文件，按 POSIX 应失败（ENOTDIR） */
     else if (mode & O_DIRECTORY)
     {
         dentry_put(target);
-        return NULL;
+        return vfs_open_fail(err, ENO9_NOT_DIR);
     }
 
     /* 分配 file_t */
@@ -1450,7 +1466,7 @@ file_t *vfs_open(const char *path, int mode)
     if (!file)
     {
         dentry_put(target);
-        return NULL;
+        return vfs_open_fail(err, ENO1_NOMORE_MEM);
     }
 
     /* 复制路径字符串（调试用）*/
@@ -1460,7 +1476,7 @@ file_t *vfs_open(const char *path, int mode)
     {
         kfree(file);
         dentry_put(target);
-        return NULL;
+        return vfs_open_fail(err, ENO1_NOMORE_MEM);
     }
     memcpy(file->f_path, path, pathlen + 1);
 
@@ -1492,7 +1508,7 @@ file_t *vfs_open(const char *path, int mode)
             kfree(file->f_path);
             kfree(file);
             dentry_put(target);
-            return NULL;
+            return vfs_open_fail(err, ret);
         }
     }
 
@@ -1503,6 +1519,10 @@ file_t *vfs_open(const char *path, int mode)
         file->f_pos = 0;
     }
 
+    if (err != NULL)
+    {
+        *err = ENO0_NO_ERROR;
+    }
     return file;
 }
 

@@ -59,7 +59,7 @@ static void drain_all(void)
 /* 建一个内容为 text 的文件；返回是否成功 */
 static bool make_file(const char *path, const char *text)
 {
-    file_t *f = vfs_open(path, O_CREAT | O_RDWR | O_TRUNC);
+    file_t *f = vfs_open(path, O_CREAT | O_RDWR | O_TRUNC, NULL);
     if (f == NULL)
     {
         return false;
@@ -224,7 +224,7 @@ static void test_rename_subtree(void)
     expect(vfs_rename("/dctest/rn", "/dctest/rn2") == ENO0_NO_ERROR, "rename dir");
 
     stats_of(&before);
-    file_t *f = vfs_open("/dctest/rn2/c.txt", O_RDONLY);
+    file_t *f = vfs_open("/dctest/rn2/c.txt", O_RDONLY, NULL);
     stats_of(&after);
     expect(f != NULL, "open child through the new directory name");
     /* 后代没有被改名连累：仍在缓存里，这一次解析一个 miss 都不该有 */
@@ -245,7 +245,7 @@ static void test_rename_subtree(void)
     /* 第二种情形：改名的时候后代**正被打开**（d_ref > 0）。这种后代剪枝够不着，
      * 只有"路径不再存进 inode"才治得了。ftruncate 走 i_op->truncate，会重新推导
      * 一次路径——若还是旧路径，f_open 根本找不到这个文件。 */
-    file_t *held = vfs_open("/dctest/rn2/c.txt", O_RDWR);
+    file_t *held = vfs_open("/dctest/rn2/c.txt", O_RDWR, NULL);
     expect(held != NULL, "open descendant before renaming its directory");
     expect(vfs_rename("/dctest/rn2", "/dctest/rn3") == ENO0_NO_ERROR,
            "rename a directory that has an open descendant");
@@ -256,7 +256,7 @@ static void test_rename_subtree(void)
         vfs_close(held);
     }
 
-    file_t *re = vfs_open("/dctest/rn3/c.txt", O_RDONLY);
+    file_t *re = vfs_open("/dctest/rn3/c.txt", O_RDONLY, NULL);
     expect(re != NULL, "reopen through the second new directory name");
     if (re != NULL)
     {
@@ -323,7 +323,7 @@ static void test_watermark(void)
 
     /* 回收之后再访问同一批路径仍然功能正确，只是变成 miss */
     memcpy(path, "/dctest/f000", 13);
-    file_t *f = vfs_open(path, O_RDONLY);
+    file_t *f = vfs_open(path, O_RDONLY, NULL);
     expect(f != NULL, "file still openable after its dentry was evicted");
     if (f != NULL)
     {

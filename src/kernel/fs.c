@@ -38,7 +38,7 @@ static uint32_t fs_crc32_update(uint32_t crc, const uint8_t *p, size_t n)
  */
 static void fs_verify_file_crc32(const char *path)
 {
-    file_t *f = vfs_open(path, O_RDONLY);
+    file_t *f = vfs_open(path, O_RDONLY, NULL);
     if (f == NULL)
     {
         printf("sdcheck: cannot open %s\n", path);

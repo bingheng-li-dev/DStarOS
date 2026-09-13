@@ -289,9 +289,8 @@ static long sys_readv(int fd, const struct iovec *uiov, int iovcnt)
  * @note `dirfd` 只支持 `AT_FDCWD` 或路径本身是绝对路径这两种情况（此时 dirfd 被忽略）；
  *   传入其它 dirfd 值一律返回 `-EBADF`——真正的"相对某个已打开目录 fd 解析路径"需要
  *   `vfs_lookup` 支持从任意 dentry 起点解析，当前 VFS 没有这个能力，留给以后实测撞上再补。
- * @note `vfs_open` 目前失败时统一返回 NULL，无法区分"文件不存在"/"是目录却按文件打开"/
- *   "权限不足"等具体原因，这里统一按最常见的 ENOENT 处理——已知不精确，是 vfs_open
- *   自身尚未做错误码细分导致的限制，不是本函数引入的新问题。
+ * @note 失败原因取自 vfs_open 带出的错误码（EROFS / EEXIST / EISDIR / ENOTDIR 等），
+ *   不再一律按 ENOENT 回填。
  */
 static long sys_openat(int dirfd, const char *upath, int flags, int mode)
 {
@@ -309,12 +308,13 @@ static long sys_openat(int dirfd, const char *upath, int flags, int mode)
         return ENO19_BAD_FD;
     }
 
+    int open_err = ENO0_NO_ERROR;
     vfs_lock();
-    file_t *f = vfs_open(kpath, flags);
+    file_t *f = vfs_open(kpath, flags, &open_err);
     vfs_unlock();
     if (!f)
     {
-        return ENO5_NOSUCH_ENTRY;
+        return open_err;
     }
 
     int fd = proc_fd_alloc();

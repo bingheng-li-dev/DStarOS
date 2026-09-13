@@ -328,7 +328,7 @@ int vfs_mount(const char *path, const char *fs_type, void *data);
 int vfs_unmount(const char *path);
 
 /* 文件操作 */
-file_t *vfs_open        (const char *path, int mode);
+file_t *vfs_open        (const char *path, int mode, int *err);
 int     vfs_close       (file_t *file);
 ssize_t vfs_read        (file_t *file, void *buf, size_t len);
 ssize_t vfs_write       (file_t *file, const void *buf, size_t len);

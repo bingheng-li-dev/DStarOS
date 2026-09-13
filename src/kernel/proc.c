@@ -663,7 +663,7 @@ int do_exec(intstkf_t *sp, const char *path, char *const *argv, char *const *env
 
     /* 2) 打开并把整个 ELF 读进内核堆 */
     vfs_lock();
-    file_t *f = vfs_open(kpath, O_RDONLY);
+    file_t *f = vfs_open(kpath, O_RDONLY, NULL);
     if (f == NULL)
     {
         vfs_unlock();
@@ -1235,7 +1235,7 @@ static void run_user_program(const char *path, const char *const argv[], int arg
 
     /* 3) 从根文件系统读出整个 ELF，解析：按 PT_LOAD 段建 VMA、映射、拷贝内容 */
     vfs_lock();
-    file_t *f = vfs_open(path, O_RDONLY);
+    file_t *f = vfs_open(path, O_RDONLY, NULL);
     if (f == NULL)
     {
         vfs_unlock();

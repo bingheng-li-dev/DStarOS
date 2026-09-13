@@ -66,7 +66,7 @@ static void vfs_dir_test(void)
     }
 
     /* ---- 打开目录并读取全部条目 ---- */
-    file_t *d = vfs_open("/testdir", O_RDONLY);
+    file_t *d = vfs_open("/testdir", O_RDONLY, NULL);
     check("open /testdir O_RDONLY", d != NULL);
     if (!d)
     {
@@ -155,13 +155,13 @@ static void vfs_dir_test(void)
      * _USE_LFN 从 0 改成 3，唯一的动机就是"getdents64 一做出来长名就会暴露"：
      * 8.3 短名方案下这个名字会被截断成 A_VERY~1.TXT。这里验证 LFN 生效。 */
     const char *lname = "a_very_long_filename.txt";
-    file_t *lf = vfs_open("/testdir/a_very_long_filename.txt", O_RDWR | O_CREAT);
+    file_t *lf = vfs_open("/testdir/a_very_long_filename.txt", O_RDWR | O_CREAT, NULL);
     check("create long-named file", lf != NULL);
     if (lf)
     {
         vfs_close(lf);
 
-        d = vfs_open("/testdir", O_RDONLY);
+        d = vfs_open("/testdir", O_RDONLY, NULL);
         if (d)
         {
             memset(buf, 0, 1024);
@@ -174,7 +174,7 @@ static void vfs_dir_test(void)
     }
 
     /* ---- 打开普通文件带 O_DIRECTORY 应失败 ---- */
-    file_t *bad = vfs_open("/testdir/sub.txt", O_RDONLY | O_DIRECTORY);
+    file_t *bad = vfs_open("/testdir/sub.txt", O_RDONLY | O_DIRECTORY, NULL);
     check("open regular file with O_DIRECTORY -> fail", bad == NULL);
     if (bad)
     {
@@ -272,7 +272,7 @@ static void vfs_unmount_test(void)
     /* 还有活引用的文件系统必须被拒绝，而不是把超级块从活着的 inode 脚下抽掉。
      * devfs 的四个设备条目各持根目录项一个引用，正好是这个场景。 */
     check("unmount a busy fs -> BUSY", vfs_unmount("/dev") == ENO4_BUSY);
-    file_t *con = vfs_open("/dev/console", O_WRONLY);
+    file_t *con = vfs_open("/dev/console", O_WRONLY, NULL);
     check("busy fs still usable after the refusal", con != NULL);
     if (con)
     {
@@ -295,7 +295,7 @@ void vfs_test(void)
     vfs_lock();
 
     /* ---- write + read roundtrip ---- */
-    file_t *f = vfs_open("/hello.txt", O_RDWR | O_CREAT);
+    file_t *f = vfs_open("/hello.txt", O_RDWR | O_CREAT, NULL);
     check("open /hello.txt O_CREAT", f != NULL);
     if (f) {
         ssize_t w = vfs_write(f, "hello DStarOS", 13);
@@ -305,7 +305,7 @@ void vfs_test(void)
 
     char buf[32];
     memset(buf, 0, sizeof(buf));
-    f = vfs_open("/hello.txt", O_RDONLY);
+    f = vfs_open("/hello.txt", O_RDONLY, NULL);
     check("open /hello.txt O_RDONLY", f != NULL);
     if (f) {
         ssize_t r = vfs_read(f, buf, 13);
@@ -329,7 +329,7 @@ void vfs_test(void)
     check("stat: is directory", S_ISDIR(st.st_mode));
 
     /* ---- file in subdir ---- */
-    f = vfs_open("/testdir/sub.txt", O_RDWR | O_CREAT);
+    f = vfs_open("/testdir/sub.txt", O_RDWR | O_CREAT, NULL);
     check("open /testdir/sub.txt O_CREAT", f != NULL);
     if (f) {
         ssize_t w = vfs_write(f, "sub", 3);
@@ -358,7 +358,7 @@ void vfs_test(void)
     check("stat deleted file -> NOSUCH", ret == ENO5_NOSUCH_ENTRY);
 
     /* ---- ftruncate（按已打开的 file 截断，不经路径）---- */
-    f = vfs_open("/testdir/sub.txt", O_RDWR);
+    f = vfs_open("/testdir/sub.txt", O_RDWR, NULL);
     check("reopen sub.txt for ftruncate", f != NULL);
     if (f)
     {
@@ -369,7 +369,7 @@ void vfs_test(void)
         check("ftruncate: size == 1", ret == ENO0_NO_ERROR && st.st_size == 1);
     }
     /* 目录上 ftruncate 必须被拒 */
-    f = vfs_open("/testdir", O_RDONLY);
+    f = vfs_open("/testdir", O_RDONLY, NULL);
     if (f)
     {
         check("ftruncate on dir -> IS_DIR", vfs_ftruncate(f, 0) == ENO10_IS_DIR);
