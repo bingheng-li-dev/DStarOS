@@ -93,6 +93,9 @@ void os_init_after_mmu_enable(uint64_t cpu_id)
 #if defined(VF2) && DEBUG_SDMMC_PROBE
         sdmmc_probe();
 #endif
+#if defined(VF2) && DEBUG_SDMMC_WRITE_TEST
+        sdmmc_write_test();
+#endif
 #if DEBUG_PTE_AD_PROBE
         vmm_probe_pte_ad();
 #endif

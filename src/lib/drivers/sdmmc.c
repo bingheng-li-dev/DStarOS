@@ -34,6 +34,7 @@
 #define SDMMC_CMD_USE_HOLD_REG      (1U << 29)
 #define SDMMC_CMD_PRV_DAT_WAIT      (1U << 13)
 #define SDMMC_CMD_DATA_EXP          (1U << 9)
+#define SDMMC_CMD_WRITE             (1U << 10)
 #define SDMMC_CMD_RESP_CRC          (1U << 8)
 #define SDMMC_CMD_RESP_EXP          (1U << 6)
 
@@ -58,10 +59,15 @@
 
 #define SD_CMD_SET_BLOCKLEN         16
 #define SD_CMD_READ_SINGLE_BLOCK    17
+#define SD_CMD_WRITE_BLOCK          24
 #define SD_BLOCK_SIZE               512
 #define SD_BLOCK_WORDS              (SD_BLOCK_SIZE / 4)
 #define SD_R1_STATE(r1)             (((r1) >> 9) & 0xf)
 #define SD_R1_STATE_TRAN            4
+/* R1 里表示命令执行出错的位：OUT_OF_RANGE .. ERROR（不含 CARD_IS_LOCKED 这类状态位） */
+#define SD_R1_ERROR_MASK            0xfdf80000U
+/* 数据 FIFO 深度，单位是字。实测自 /soc/sdio1@16020000 的 fifo-depth */
+#define SDMMC_FIFO_DEPTH            32U
 
 /* 只要远大于一条命令 / 一个块的正常耗时即可 */
 #define SDMMC_SPIN_LIMIT            20000000U
@@ -390,6 +396,187 @@ void sdmmc_probe(void)
         }
         sdmmc_block_addressing = false;
     }
+}
+#endif
+
+
+/**
+ * @brief 用 CMD24 写一个块（PIO）
+ * @param[in] lba 块号
+ * @param[in] buf 512 字节
+ * @retval ENO0_NO_ERROR  写满 512 字节、卡回的 CRC 状态正确，且卡已编程完成
+ * @retval ENO29_IO       R1 报错，或数据层错误（写方向的 DCRC 表示卡回的 CRC 状态令牌出错）
+ * @retval ENO30_TIMEDOUT 等不到传输结束，或卡一直忙
+ * @details 与读对称：FIFO 深度 32 个字，按 STATUS 里的 FIFO 计数算剩余空间，有多少填多少。
+ *   DTO 之后卡还在内部编程，数据线保持忙——**必须等忙结束才算写完**，
+ *   否则紧接着断电，这一块可能根本没落盘。
+ */
+static int sdmmc_write_block(uint64_t lba, const uint8_t *buf)
+{
+    uint32_t arg = sdmmc_block_addressing ? (uint32_t)lba : (uint32_t)(lba * SD_BLOCK_SIZE);
+
+    sdmmc_write(SDMMC_CTRL, sdmmc_read(SDMMC_CTRL) | SDMMC_CTRL_FIFO_RESET);
+    if (!sdmmc_wait_clear(SDMMC_CTRL, SDMMC_CTRL_FIFO_RESET))
+    {
+        return ENO30_TIMEDOUT;
+    }
+    sdmmc_write(SDMMC_BLKSIZ, SD_BLOCK_SIZE);
+    sdmmc_write(SDMMC_BYTCNT, SD_BLOCK_SIZE);
+
+    uint32_t r1 = 0;
+    int ret = sdmmc_send_cmd(SD_CMD_WRITE_BLOCK, arg,
+                             SDMMC_CMD_RESP_EXP | SDMMC_CMD_RESP_CRC | SDMMC_CMD_DATA_EXP |
+                             SDMMC_CMD_WRITE, &r1);
+    if (ret != ENO0_NO_ERROR)
+    {
+        return ret;
+    }
+    if ((r1 & SD_R1_ERROR_MASK) != 0)
+    {
+        return ENO29_IO;
+    }
+
+    uint32_t put = 0;
+    uint32_t st = 0;
+    for (uint32_t n = 0; n < SDMMC_SPIN_LIMIT; n++)
+    {
+        st = sdmmc_read(SDMMC_RINTSTS);
+        if ((st & SDMMC_INT_DATA_ERR) != 0)
+        {
+            break;
+        }
+        for (uint32_t space = SDMMC_FIFO_DEPTH - SDMMC_STATUS_FCNT(sdmmc_read(SDMMC_STATUS));
+             space > 0 && put < SD_BLOCK_WORDS; space--, put++)
+        {
+            const uint8_t *b = buf + put * 4;
+            sdmmc_write(SDMMC_DATA, (uint32_t)b[0] | ((uint32_t)b[1] << 8) |
+                                    ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24));
+        }
+        if ((st & SDMMC_INT_DTO) != 0 && put == SD_BLOCK_WORDS)
+        {
+            break;
+        }
+    }
+    sdmmc_last_rintsts = st;
+    sdmmc_write(SDMMC_RINTSTS, 0xffffffffU);
+
+    if ((st & SDMMC_INT_DATA_ERR) != 0 || put != SD_BLOCK_WORDS)
+    {
+        return ENO29_IO;
+    }
+    if ((st & SDMMC_INT_DTO) == 0)
+    {
+        return ENO30_TIMEDOUT;
+    }
+    return sdmmc_wait_clear(SDMMC_STATUS, SDMMC_STATUS_DATA_BUSY) ? ENO0_NO_ERROR : ENO30_TIMEDOUT;
+}
+
+/**
+ * @brief 写连续若干块
+ * @param[in] lba   起始块号
+ * @param[in] buf   count * 512 字节
+ * @param[in] count 块数
+ * @return 同 sdmmc_write_block()，遇到第一个失败的块即返回
+ * @note 先用 CMD24 逐块写；多块连续写（CMD25）留到脏块合并那一步再加。
+ */
+int sdmmc_write_blocks(uint64_t lba, const uint8_t *buf, uint32_t count)
+{
+    for (uint32_t i = 0; i < count; i++)
+    {
+        int ret = sdmmc_write_block(lba + i, buf + (uint64_t)i * SD_BLOCK_SIZE);
+        if (ret != ENO0_NO_ERROR)
+        {
+            return ret;
+        }
+    }
+    return ENO0_NO_ERROR;
+}
+
+#if DEBUG_SDMMC_WRITE_TEST
+/**
+ * @brief 写通路的上板回环测试：只碰分区之前的空闲扇区，不碰任何文件系统
+ * @details 目标是 MBR 与第一个分区之间的空洞里的 LBA 4096（本卡第一个分区从 8192 起，FAT 用不到这里）。
+ *   1. 确认 LBA0 是 MBR（不是 GPT）且第一个分区起点在目标之后，否则放弃；
+ *   2. 读出目标块，**不是全零立即放弃**——说明被别的东西用着，不能覆盖；
+ *   3. 写测试图案 → 读回逐字节比对；
+ *   4. 写回全零 → 读回确认全零，恢复原状。
+ * @note 任何一步失败都停下，不再继续写。必须在 trap_init() 之后调用。
+ */
+void sdmmc_write_test(void)
+{
+    static uint8_t pat[SD_BLOCK_SIZE];
+    static uint8_t back[SD_BLOCK_SIZE];
+    const uint64_t lba = 4096;
+
+    int ret = sdmmc_init();
+    printf("sdwrite: init ret=%d\n", ret);
+    if (ret != ENO0_NO_ERROR)
+    {
+        return;
+    }
+
+    ret = sdmmc_read_block(0, back);
+    uint32_t part_start = (uint32_t)back[454] | ((uint32_t)back[455] << 8) |
+                          ((uint32_t)back[456] << 16) | ((uint32_t)back[457] << 24);
+    if (ret != ENO0_NO_ERROR || back[510] != 0x55 || back[511] != 0xaa || back[450] == 0xee ||
+        part_start <= lba)
+    {
+        printf("sdwrite: SKIP (ret=%d ptype=0x%02x part_start=%u) - lba %lu not provably unused\n",
+               ret, back[450], part_start, (unsigned long)lba);
+        return;
+    }
+
+    ret = sdmmc_read_block(lba, back);
+    for (int i = 0; ret == ENO0_NO_ERROR && i < SD_BLOCK_SIZE; i++)
+    {
+        if (back[i] != 0)
+        {
+            printf("sdwrite: SKIP - lba %lu not all zero (byte %d = 0x%02x)\n",
+                   (unsigned long)lba, i, back[i]);
+            return;
+        }
+    }
+    if (ret != ENO0_NO_ERROR)
+    {
+        printf("sdwrite: FAIL read original ret=%d\n", ret);
+        return;
+    }
+
+    for (int i = 0; i < SD_BLOCK_SIZE; i++)
+    {
+        pat[i] = (uint8_t)(i * 7 + 0x5a);
+    }
+    ret = sdmmc_write_block(lba, pat);
+    printf("sdwrite: write pattern ret=%d rintsts=0x%08x\n", ret, sdmmc_last_rintsts);
+    if (ret != ENO0_NO_ERROR)
+    {
+        return;
+    }
+    ret = sdmmc_read_block(lba, back);
+    int mismatch = -1;
+    for (int i = 0; ret == ENO0_NO_ERROR && i < SD_BLOCK_SIZE; i++)
+    {
+        if (back[i] != pat[i])
+        {
+            mismatch = i;
+            break;
+        }
+    }
+    printf("sdwrite: read back ret=%d %s (first mismatch %d)\n", ret,
+           (ret == ENO0_NO_ERROR && mismatch < 0) ? "MATCH" : "MISMATCH", mismatch);
+
+    memset(pat, 0, sizeof(pat));
+    int rret = sdmmc_write_block(lba, pat);
+    int zero = (rret == ENO0_NO_ERROR) ? sdmmc_read_block(lba, back) : rret;
+    for (int i = 0; zero == ENO0_NO_ERROR && i < SD_BLOCK_SIZE; i++)
+    {
+        if (back[i] != 0)
+        {
+            zero = ENO29_IO;
+        }
+    }
+    printf("sdwrite: restore zeros write=%d verify=%d\n", rret, zero);
+    printf("sdwrite: %s\n", (ret == ENO0_NO_ERROR && mismatch < 0 && zero == ENO0_NO_ERROR) ? "PASS" : "FAIL");
 }
 #endif
 
