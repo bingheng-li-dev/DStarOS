@@ -219,6 +219,11 @@
  * **只读，且避开有副作用的寄存器**。 */
 #define DEBUG_MMIO_PROBE 0
 
+/* 外部中断追踪：置 1 时每次 claim 到外部中断都打印 "extirq: irq N on cpu C (#K)"。
+ * 用来确认 PLIC 路由与 context 编号：只应出现在 cpu 0 上，且 irq 等于 UART_IRQ。
+ * 打字会刷屏，只在验证时打开。 */
+#define DEBUG_EXT_IRQ 0
+
 #define DEBUG_TRACK_LINE() printf("DEBUG_TRACK_LINE: %s:%d\n", __FILE__, __LINE__)
 
 #endif /* DEBUG */

@@ -10,6 +10,7 @@
 #include "fs.h"
 #include "sync.h"
 #include "plic.h"
+#include "uart.h"
 #include "sched.h"
 #include "tty.h"
 #include "slab.h"
@@ -93,7 +94,8 @@ void os_init_after_mmu_enable(uint64_t cpu_id)
                           * proc_init 会给 init 装 fd 0/1/2，届时 tty 必须已经能用 */
         signal_init();   /* sigpage 的物理页；必须早于任何 create_user_mm() */
 
-        // plicInit();
+        plic_init();          /* 必须晚于 tty_init()：中断一来就会往 tty 里推字符 */
+        uart_enable_rx_irq();
         fs_init();
         sched_init();   /* 全局就绪队列只能由 hart 0 初始化一次，否则 hart 1 会把 init 冲掉 */
         proc_early_init(); /* proc_list / proc_list_lock / pid_stack，必须早于启动 hart 1 */

@@ -67,6 +67,19 @@ void uart_putc(char c)
 }
 
 /**
+ * @brief 打开 UART 的接收中断（IER.ERBFI）
+ * @details 驱动里唯一一次写配置寄存器，先读后写，只动接收位。
+ *   发送仍是轮询、不开 THRE 中断：那需要发送缓冲，而控制台输出必须在关中断的
+ *   上下文里（panic、持锁路径）也能工作。
+ * @note 必须在 PLIC 已把 UART 中断路由到 cpu0、且 tty 已初始化之后调用——
+ *   中断一来就会经 tty_poll_input() 把字符推进 tty。
+ */
+void uart_enable_rx_irq(void)
+{
+    uart_write(UART_IER, uart_read(UART_IER) | UART_IER_ERBFI);
+}
+
+/**
  * @brief 非阻塞地取一个接收到的字节
  * @retval -1 接收缓冲为空
  * @return 其余情况返回 0~255 的字节值

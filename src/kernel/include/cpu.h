@@ -24,10 +24,11 @@ struct os_cpu
 
 /* 注意：以下接口里的 "core id" 一律是**逻辑 cpu 号**（引导核恒为 0、连续编号），
  * 不是 hartid。两者在 QEMU 上碰巧相等，在 VF2 上不相等——JH7110 的 hart 0 是
- * 不支持 S 态的 S7 监控核，引导核是某个 U74。需要真 hartid 的只有 SBI 调用，
- * 由 cpu.c 内部经 cpu_to_hart[] 反查。 */
+ * 不支持 S 态的 S7 监控核，引导核是某个 U74。需要真 hartid 的只有 SBI 调用与 PLIC context，
+ * 经 cpu_get_hartid() 反查。 */
 void cpu_probe_harts(void);
 int cpu_get_present_count(void);
+uint64_t cpu_get_hartid(int cpu_id);
 int cpu_start_secondary_hart(uint16_t cpu_id);
 uint64_t cpu_get_core_id(void);
 void cpu_set_core_id(uint64_t core_id);

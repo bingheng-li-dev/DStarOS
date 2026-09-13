@@ -1,21 +1,18 @@
 #ifndef __PLIC_H
-#define __PLIC_H 
+#define __PLIC_H
 
 #include <stdint.h>
-#include <stddef.h>
 
-/* PLIC 外部中断号。QEMU virt 的取值来自 qemu hw/riscv/virt.c；
- * VF2(JH7110) 的中断号待上板核对，届时按 PLATFORM 分支补。
- * 注：PLIC 目前尚未真正启用（init.c 里 plicInit() 仍是注释），
- * TTY 输入走的是 tick 轮询，见 tty_poll_input()。 */
+/* UART0 的 PLIC 中断号。QEMU virt 取自 qemu hw/riscv/virt.c；
+ * VF2 实测自 /soc/serial@10000000 的 interrupts = <0x20>。 */
+#if defined(VF2)
+#define UART_IRQ    32
+#else
 #define UART_IRQ    10
-#define DISK_IRQ    1
+#endif
 
-/* Enable PLIC for each hart. */
-void plicInit(void);
-/* Ask PLIC what interrupt we should serve. */
-int plicClaim(void);
-/* Tell PLIC that we've served this IRQ. */
-void plicComplete(int irq);
+void     plic_init(void);
+uint32_t plic_claim(void);
+void     plic_complete(uint32_t irq);
 
-#endif 
+#endif

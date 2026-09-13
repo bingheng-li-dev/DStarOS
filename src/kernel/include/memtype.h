@@ -115,7 +115,7 @@ extern char ebss[];      /* .bss 段结束 */
 
 /* 设备寄存器区（MMIO）。内核偏移映射只覆盖 RAM，一个外设寄存器都够不着，
  * 这个窗口把设备段也纳进内核高半区，于是 pa_to_kva() 对设备地址直接可用，
- * 不需要第二套换算（对比 periph_layout.h 里那套从未被落实的 VIRT_OFFSET）。
+ * 不需要第二套换算。
  *
  * 不分平台：两个平台的外设都落在这个窗口里（QEMU virt 的 CLINT 0x02000000 /
  * PLIC 0x0c000000 / UART0 0x10000000；JH7110 的 PLIC 0x0c000000 /

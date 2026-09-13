@@ -18,7 +18,7 @@ static cpu_t cpus[CORE_NUMBER];
 
 /* 逻辑 cpu 号 → hartid。cpu_to_hart[0] 恒为引导核。
  * 这张表是"hartid 与逻辑 cpu 号解耦"的全部内容：内核其余部分一律只认逻辑号，
- * 只有 SBI 调用（HSM 启核、IPI）需要真 hartid，从这里反查。 */
+ * 只有 SBI 调用（HSM 启核、IPI）与 PLIC 的 context 编号需要真 hartid，从这里反查。 */
 static uint64_t cpu_to_hart[CORE_NUMBER];
 static int cpu_present_count = 1;
 
@@ -152,6 +152,18 @@ void cpu_probe_harts(void)
 int cpu_get_present_count(void)
 {
     return cpu_present_count;
+}
+
+/**
+ * @brief 逻辑 cpu 号 → hartid
+ * @param[in] cpu_id 逻辑 cpu 号，必须小于 cpu_get_present_count()
+ * @return 该 cpu 的真 hartid
+ * @note 内核其余部分只认逻辑号；要 hartid 的只有直接和固件/硬件打交道的地方
+ *   （SBI 调用、按 hart 排列的 PLIC context）。
+ */
+uint64_t cpu_get_hartid(int cpu_id)
+{
+    return cpu_to_hart[cpu_id];
 }
 
 /**

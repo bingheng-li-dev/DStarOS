@@ -3,6 +3,7 @@
 #include "console.h"
 #include "sync.h"
 #include "plic.h"
+#include "tty.h"
 #include "sbi.h"
 #include "vmm.h"
 #include "syscall.h"
@@ -39,34 +40,34 @@ static void trap_user_exception(intstkf_t *sp, const char *what, int sig)
 }
 
 
-static void kernelExternIrqHandler(void)
+/**
+ * @brief S 态外部中断：从 PLIC 领取、分发、交还
+ * @details 目前唯一路由过来的是 UART 接收中断，且只路由给 cpu0（见 plic_init()）。
+ *   处理复用 tick 轮询的同一个 tty_poll_input()：它循环把接收 FIFO 取空，电平触发的
+ *   UART 中断因此得以撤销。tick 轮询保留作兜底，两条路径共用 tty 锁。
+ * @note 领到 0 表示中断已撤销（例如 tick 轮询先一步把 FIFO 取空），无需交还。
+ */
+static void trap_external_irq(void)
 {
-    /* 如果确实是有外部中断。理论上这个if语句可以去掉。 */
-    if (read_csr(sip) & MIP_SEIP)
+    uint32_t irq = plic_claim();
+    if (irq == 0)
     {
-        uint64_t irq = plicClaim();
-        if (UART_IRQ == irq)
-        {
-            int c = sbi_console_getchar();
-            if (-1 != c)
-            {
-                //Sth to do on console...
-                printf("%c\n", c);
-            }
-        }
-        else if (DISK_IRQ == irq)
-        {
-            //disk_intr();
-        }
-        else if (irq)
-        {
-            printf("unexpected interrupt irq = %d\n", irq);
-        }
-        if (irq)
-        {
-            plicComplete(irq);
-        }
+        return;
     }
+#if DEBUG_EXT_IRQ
+    static uint64_t ext_irq_count;
+    ext_irq_count += 1;
+    printf("extirq: irq %u on cpu %ld (#%ld)\n", irq, (long)cpu_get_core_id(), (long)ext_irq_count);
+#endif
+    if (irq == UART_IRQ)
+    {
+        tty_poll_input();
+    }
+    else
+    {
+        printf("trap: unexpected external irq %u\n", irq);
+    }
+    plic_complete(irq);
 }
 
 void trap_init(void)
@@ -144,21 +145,14 @@ static void trap_dispatch(intstkf_t *sp)
             // printf("Supervisor timer interrupt\n");s
             tick_int_handler();
             break;
-        // case IRQ_S_EXT:
-        //     printf("Supervisor external interrupt\n");
-        //     kernelExternIrqHandler();
-        // break;
+        case IRQ_S_EXT:
+            trap_external_irq();
+            break;
         default:
 #if DEBUG_INTSTACK
             print_intstk(sp);
 #endif
-            if (0x8000000000000001L == sp->scause && 9 == read_csr(stval))
-            {
-                printf("Supervisor external interrupt\n");
-                kernelExternIrqHandler();
-            }
-            else
-                printf("Unknown interrupt\n");
+            printf("Unknown interrupt\n");
             break;
         }
     }
