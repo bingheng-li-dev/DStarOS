@@ -224,9 +224,11 @@
  * 打字会刷屏，只在验证时打开。 */
 #define DEBUG_EXT_IRQ 0
 
-/* SD 卡读通路探针（仅 VF2）：置 1 时在 trap_init() 之后切到 PIO、发 CMD16 确认卡处于传输态，
- * 再读 LBA 0（MBR/GPT）与第一个分区的首扇区并打印。**只发读命令，不写卡**。
- * 判据：CMD16 的 state=4；lba0 的 sig=55aa；part1 的 fat=1。 */
+/* SD 卡探针（仅 VF2），置 1 时：
+ * 1. trap_init() 之后切到 PIO、发 CMD16 确认卡处于传输态，读 LBA 0 与第一个分区的首扇区并打印（只读）；
+ * 2. /sd 挂载后对比单块 / 多块传输：copy.img 逐块冷读、rootfs.img 多块冷读并再读一遍（缓存），
+ *    冷读上次开机写下的 wsingle.bin / wmulti.bin，再分别以逐块 / 多块重写这两个 2 MB 文件（**会写卡**）。
+ * 判据：CMD16 的 state=4；part1 的 fat=1；各 sdcheck 行 crc32 一致；sdwrite 行多块模式的 cmd25 远少于块数。 */
 #define DEBUG_SDMMC_PROBE 0
 
 /* SD 卡写通路回环测试（仅 VF2）：置 1 时在 trap_init() 之后，对 MBR 与第一个分区之间空洞里的

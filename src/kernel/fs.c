@@ -13,6 +13,10 @@
 #include "ktime.h"
 
 #if defined(VF2) && DEBUG_SDMMC_PROBE
+#include "sdmmc.h"
+
+#define FS_PATTERN_FILE_SIZE (2U * 1024 * 1024)
+
 /**
  * @brief 按 zlib.crc32 的算法累加 CRC32（反射多项式 0xEDB88320，逐位计算）
  * @param[in] crc 当前累加值（首次传 0xffffffff）
@@ -59,6 +63,8 @@ static void fs_verify_file_crc32(const char *path)
 
     bio_stats_t before;
     bio_get_stats(&before);
+    sdmmc_stats_t sd_before;
+    sdmmc_get_stats(&sd_before);
     uint64_t t0 = ktime_get_ns();
 
     uint32_t crc = 0xffffffffU;
@@ -82,12 +88,77 @@ static void fs_verify_file_crc32(const char *path)
     uint64_t ms = (ktime_get_ns() - t0) / 1000000;
     bio_stats_t after;
     bio_get_stats(&after);
+    sdmmc_stats_t sd_after;
+    sdmmc_get_stats(&sd_after);
     kfree(buf);
     vfs_close(f);
-    printf("sdcheck: %s size=%lu crc32=%08x time=%lums cache hits=%lu misses=%lu dev_reads=%lu\n",
+    printf("sdcheck: %s size=%lu crc32=%08x time=%lums cache hits=%lu misses=%lu dev_reads=%lu cmd17=%lu cmd18=%lu\n",
            path, (unsigned long)total, crc ^ 0xffffffffU, (unsigned long)ms,
            (unsigned long)(after.hits - before.hits), (unsigned long)(after.misses - before.misses),
-           (unsigned long)(after.dev_reads - before.dev_reads));
+           (unsigned long)(after.dev_reads - before.dev_reads),
+           (unsigned long)(sd_after.cmd17 - sd_before.cmd17), (unsigned long)(sd_after.cmd18 - sd_before.cmd18));
+}
+
+/**
+ * @brief 写通路对比：经 VFS 截断重写一个 2 MB 的确定图案文件，打印写耗时与实际发出的写命令数
+ * @param[in] path 目标文件
+ * @details 每次写 4 KB，FatFS 把整扇区部分一次交给 disk_write（8 块）：单块模式下是 8 条 CMD24，
+ *   多块模式下是 1 条 CMD25。耗时只计 vfs_write 与 vfs_close，不含生成图案和算 CRC。
+ *   打印的 CRC 是写入内容的 CRC；下次开机 fs_verify_file_crc32() 冷读同一文件应得到同一个值，
+ *   以此确认数据真的落了盘。
+ */
+static void fs_write_pattern_file(const char *path)
+{
+    int err = 0;
+    file_t *f = vfs_open(path, O_WRONLY | O_CREAT | O_TRUNC, &err);
+    if (f == NULL)
+    {
+        printf("sdwrite: cannot create %s, err=%d\n", path, err);
+        return;
+    }
+    uint8_t *buf = (uint8_t *)kmalloc(4096);
+    if (buf == NULL)
+    {
+        vfs_close(f);
+        printf("sdwrite: no memory\n");
+        return;
+    }
+
+    sdmmc_stats_t before;
+    sdmmc_get_stats(&before);
+    uint64_t write_ns = 0;
+    uint32_t crc = 0xffffffffU;
+    uint64_t total = 0;
+    while (total < FS_PATTERN_FILE_SIZE)
+    {
+        for (uint32_t i = 0; i < 4096; i++)
+        {
+            uint64_t x = total + i;
+            buf[i] = (uint8_t)(x ^ (x >> 7) ^ (x >> 13));
+        }
+        uint64_t t = ktime_get_ns();
+        ssize_t n = vfs_write(f, buf, 4096);
+        write_ns += ktime_get_ns() - t;
+        if (n != 4096)
+        {
+            printf("sdwrite: write error %ld at offset %lu\n", (long)n, (unsigned long)total);
+            break;
+        }
+        crc = fs_crc32_update(crc, buf, 4096);
+        total += 4096;
+    }
+    uint64_t t = ktime_get_ns();
+    vfs_close(f);
+    write_ns += ktime_get_ns() - t;
+    kfree(buf);
+
+    sdmmc_stats_t after;
+    sdmmc_get_stats(&after);
+    printf("sdwrite: %s size=%lu crc32=%08x time=%lums cmd24=%lu cmd25=%lu blocks=%lu cmd12_manual=%lu\n",
+           path, (unsigned long)total, crc ^ 0xffffffffU, (unsigned long)(write_ns / 1000000),
+           (unsigned long)(after.cmd24 - before.cmd24), (unsigned long)(after.cmd25 - before.cmd25),
+           (unsigned long)(after.blocks_written - before.blocks_written),
+           (unsigned long)(after.cmd12_manual - before.cmd12_manual));
 }
 #endif
 
@@ -155,9 +226,19 @@ void fs_init(void)
     }
     printf("fs_init: sd card mounted at /sd\n");
 #if DEBUG_SDMMC_PROBE
-    fs_verify_file_crc32("/sd/rootfs.img");
-    fs_verify_file_crc32("/sd/rootfs.img");
+    /* copy.img 与 rootfs.img 内容相同、各占不同的块：分别以逐块 / 多块冷读，再读一遍看缓存 */
+    sdmmc_set_multiblock(false);
     fs_verify_file_crc32("/sd/copy.img");
+    sdmmc_set_multiblock(true);
+    fs_verify_file_crc32("/sd/rootfs.img");
+    fs_verify_file_crc32("/sd/rootfs.img");
+    /* 先冷读上次开机写下的文件确认落盘，再分别以逐块 / 多块重写 */
+    fs_verify_file_crc32("/sd/wsingle.bin");
+    fs_verify_file_crc32("/sd/wmulti.bin");
+    sdmmc_set_multiblock(false);
+    fs_write_pattern_file("/sd/wsingle.bin");
+    sdmmc_set_multiblock(true);
+    fs_write_pattern_file("/sd/wmulti.bin");
 #endif
 #endif
 }
