@@ -133,6 +133,7 @@ void fs_init(void)
     printf("fs_init: sd card mounted at /sd\n");
 #if DEBUG_SDMMC_PROBE
     fs_verify_file_crc32("/sd/rootfs.img");
+    fs_verify_file_crc32("/sd/copy.img");
 #endif
 #endif
 }

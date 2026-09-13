@@ -4,7 +4,7 @@
  * 0 号驱动器（两个平台）：内存 ramdisk，落在 memtype.h 划出的 rootfs 预留区上
  *            （ROOTFS_PHYS_BASE，PMM 页帧池之外）。QEMU 由 -device loader、VF2 由 U-Boot
  *            在启动前把镜像原样写进去；没装载镜像时那块是零，fatfs_mount 会退回 f_mkfs。
- * 1 号驱动器（仅 VF2）：SD 卡第一个分区，**只读**。经 sdmmc 驱动按块读，
+ * 1 号驱动器（仅 VF2）：SD 卡第一个分区，可读写。经 sdmmc 驱动按块读写，
  *            扇区号加上分区起始 LBA 后下发——FatFS 看到的是"0 号扇区就是 FAT 引导扇区"的盘。
  */
 
@@ -42,10 +42,11 @@ static int ramdisk_initialized = 0;
 
 #if defined(VF2)
 /* ================================================================
- * 1 号驱动器：SD 卡第一个分区（只读）
+ * 1 号驱动器：SD 卡第一个分区（可读写）
  * ================================================================ */
 
 static uint64_t sdcard_part_start;
+static uint64_t sdcard_part_sectors;
 static DSTATUS sdcard_stat = STA_NOINIT;
 static uint8_t sdcard_sector[512];
 
@@ -62,6 +63,7 @@ static inline uint64_t sdcard_le64(const uint8_t *p)
 /**
  * @brief 找 SD 卡第一个分区的起始 LBA
  * @param[out] start 分区起始块号
+ * @param[out] sectors 分区扇区数
  * @retval ENO0_NO_ERROR 找到
  * @retval ENO13_NO_FS   LBA0 不是有效的 MBR / GPT，或第一个分区为空
  * @return 其余为 sdmmc_read_blocks() 的错误码
@@ -69,7 +71,7 @@ static inline uint64_t sdcard_le64(const uint8_t *p)
  *   会报"没有文件系统"。0xee 表示 GPT，取 GPT 头里的分区表位置，再取第一项的起始 LBA。
  * @note 只支持第一个分区。U-Boot 的 `fatls mmc 1:1` 能列出内容，说明本板的卡满足这一点。
  */
-static int sdcard_find_first_partition(uint64_t *start)
+static int sdcard_find_first_partition(uint64_t *start, uint64_t *sectors)
 {
     int ret = sdmmc_read_blocks(0, sdcard_sector, 1);
     if (ret != ENO0_NO_ERROR)
@@ -84,6 +86,7 @@ static int sdcard_find_first_partition(uint64_t *start)
     if (sdcard_sector[450] != 0xee)
     {
         *start = sdcard_le32(sdcard_sector + 454);
+        *sectors = sdcard_le32(sdcard_sector + 458);
         return (*start != 0) ? ENO0_NO_ERROR : ENO13_NO_FS;
     }
 
@@ -103,12 +106,14 @@ static int sdcard_find_first_partition(uint64_t *start)
         return ret;
     }
     *start = sdcard_le64(sdcard_sector + 32);
+    uint64_t last_lba = sdcard_le64(sdcard_sector + 40);
+    *sectors = (last_lba >= *start) ? last_lba - *start + 1 : 0;
     return (*start != 0) ? ENO0_NO_ERROR : ENO13_NO_FS;
 }
 
 /**
  * @brief 初始化 1 号驱动器：接手 SD 卡并定位第一个分区
- * @return STA_PROTECT 表示可读（只读）；STA_NOINIT 表示失败
+ * @return 0 表示就绪；STA_NOINIT 表示失败
  * @note 幂等。FatFS 首次挂载时 find_volume 自己也会调 disk_initialize，
  *   而 fatfs_mount_cb 已经先调过一次——不短路的话会重复接手卡、重复解析分区表
  *   （板上实测分区信息打印了两次）。
@@ -127,15 +132,16 @@ static DSTATUS sdcard_initialize(void)
         sdcard_stat = STA_NOINIT;
         return sdcard_stat;
     }
-    ret = sdcard_find_first_partition(&sdcard_part_start);
+    ret = sdcard_find_first_partition(&sdcard_part_start, &sdcard_part_sectors);
     if (ret != ENO0_NO_ERROR)
     {
         printf("sdcard: no usable partition, err=%d\n", ret);
         sdcard_stat = STA_NOINIT;
         return sdcard_stat;
     }
-    printf("sdcard: partition 1 at lba %lu\n", (unsigned long)sdcard_part_start);
-    sdcard_stat = STA_PROTECT;
+    printf("sdcard: partition 1 at lba %lu, %lu sectors, read-write\n", (unsigned long)sdcard_part_start,
+           (unsigned long)sdcard_part_sectors);
+    sdcard_stat = 0;
     return sdcard_stat;
 }
 #endif
@@ -226,7 +232,7 @@ DRESULT disk_read(BYTE pdrv, BYTE *buff, DWORD sector, UINT count)
  * @buff:   待写入数据的源缓冲区
  * @sector: 起始扇区地址（LBA）
  * @count:  写入的扇区数量
- * 注：SD 卡当前只读，一律返回 RES_WRPRT。
+ * 注：SD 卡每块写完都会等卡内部编程结束才返回，写入即落盘。
  */
 DRESULT disk_write(BYTE pdrv, const BYTE *buff, DWORD sector, UINT count)
 {
@@ -248,7 +254,12 @@ DRESULT disk_write(BYTE pdrv, const BYTE *buff, DWORD sector, UINT count)
 #if defined(VF2)
     if (pdrv == SDCARD_PDRV)
     {
-        return RES_WRPRT;
+        if (sdcard_stat & STA_NOINIT)
+        {
+            return RES_NOTRDY;
+        }
+        return (sdmmc_write_blocks(sdcard_part_start + sector, buff, count) == ENO0_NO_ERROR)
+               ? RES_OK : RES_ERROR;
     }
 #endif
     return RES_PARERR;
@@ -286,8 +297,23 @@ DRESULT disk_ioctl(BYTE pdrv, BYTE cmd, void *buff)
 #if defined(VF2)
     if (pdrv == SDCARD_PDRV)
     {
-        /* 只读挂载用不到扇区数与擦除块（那是 f_mkfs / f_getfree 的事），不提供 */
-        return (cmd == CTRL_SYNC) ? RES_OK : RES_PARERR;
+        switch (cmd)
+        {
+        case CTRL_SYNC:
+            /* 每块写完已等卡编程结束，没有需要冲刷的缓冲 */
+            return RES_OK;
+        case GET_SECTOR_COUNT:
+            *(DWORD *)buff = (DWORD)sdcard_part_sectors;
+            return RES_OK;
+        case GET_SECTOR_SIZE:
+            *(WORD *)buff = 512;
+            return RES_OK;
+        case GET_BLOCK_SIZE:
+            *(DWORD *)buff = 1;
+            return RES_OK;
+        default:
+            return RES_PARERR;
+        }
     }
 #endif
     return RES_PARERR;
