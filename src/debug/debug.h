@@ -210,6 +210,15 @@
  * 主线在板子上跑通之后置 0。 */
 #define DEBUG_BRINGUP 0
 
+/* MMIO 映射探针：置 1 时在 trap_init() 之后打印设备区的页表项，并读若干身份寄存器。
+ * 判据是**固定值**，不是状态位：VF2 看 UART 的 CTR(+0xfc) = 0x44570110、
+ * SD 控制器 VERID 高 16 位 = 0x5342；QEMU 看 CLINT mtime 两次读数不同。
+ * ⚠️ **不要拿 LSR.THRE = 1 当判据**：真串口在发送时 THRE/TEMT 都是 0（VF2 实测
+ * LSR=0x00、USR=0x03 即 BUSY 且 TX FIFO 非空——固件 putc 塞进 FIFO 就返回，
+ * 上一行 printf 还在发），只有 QEMU 那种瞬间发完的虚拟串口才恒为 1。
+ * **只读，且避开有副作用的寄存器**。 */
+#define DEBUG_MMIO_PROBE 0
+
 #define DEBUG_TRACK_LINE() printf("DEBUG_TRACK_LINE: %s:%d\n", __FILE__, __LINE__)
 
 #endif /* DEBUG */

@@ -77,6 +77,12 @@ void os_init_after_mmu_enable(uint64_t cpu_id)
         slab_init();
         trap_init();
         fpu_init();   /* 必须早于任何可能执行浮点指令的代码，含 fpu_save/fpu_restore 自身 */
+#if DEBUG_MMIO_PROBE
+        /* 必须排在 trap_init() 之后：设备区映射不对时，读 LSR 是一发内核缺页，
+         * 而 trap_init 之前 stvec 还是 0，表现是**串口完全静默**——与阶段 12 那个
+         * A 位 bug 无法区分。放在后面，同一个故障会变成一条带 scause/stval 的 panic。 */
+        vmm_probe_mmio();
+#endif
 #if DEBUG_PTE_AD_PROBE
         vmm_probe_pte_ad();
 #endif

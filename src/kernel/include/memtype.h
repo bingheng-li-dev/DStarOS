@@ -112,6 +112,23 @@ extern char ebss[];      /* .bss 段结束 */
  * "PMM 能分配的范围"和"内核能用 KVA 访问的范围"本来就是两件事，
  * 混成一个会让预留区重新落进页帧池。 */
 #define KERNEL_MAP_END ((phyAddr_t)(ROOTFS_PHYS_BASE + ROOTFS_MAX_SIZE))
+
+/* 设备寄存器区（MMIO）。内核偏移映射只覆盖 RAM，一个外设寄存器都够不着，
+ * 这个窗口把设备段也纳进内核高半区，于是 pa_to_kva() 对设备地址直接可用，
+ * 不需要第二套换算（对比 periph_layout.h 里那套从未被落实的 VIRT_OFFSET）。
+ *
+ * 不分平台：两个平台的外设都落在这个窗口里（QEMU virt 的 CLINT 0x02000000 /
+ * PLIC 0x0c000000 / UART0 0x10000000；JH7110 的 PLIC 0x0c000000 /
+ * UART0 0x10000000 / SD 控制器 0x16020000），而两个平台的 RAM 都在
+ * 0x40000000 之上，与本窗口不重叠。
+ *
+ * 代价是内核高半区多占 512 MB VA——Sv39 的内核半区有 256 GB，无所谓。 */
+#define MMIO_PHYS_BASE ((phyAddr_t)(0x00000000))
+#define MMIO_PHYS_END ((phyAddr_t)(0x20000000))
+
+/* Sv39 第 1 级页的大小。用 4 KB 页映射 512 MB 设备区要十几万个 PTE、
+ * 跑同样多次三级 walk，2 MB 大页只要 256 个。 */
+#define PGSIZE_2M ((uint64_t)(2 * 1024 * 1024))
 /* 内核高位虚拟地址偏移 */
 #define KERNEL_VA_OFFSET 0xffffffc000000000UL /* Sv39 内核高地址区起始 */
 

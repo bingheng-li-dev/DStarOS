@@ -7,6 +7,7 @@
 #include "stringops.h"
 #include "cpu.h"
 #include "sync.h"
+#include "periph_layout.h"
 
 /**
  * @brief 内核页表根目录的物理页号。
@@ -188,6 +189,95 @@ static void init_kernel_offset_mapping(void)
 }
 
 /**
+ * @brief 在指定页表里建立一条 2 MB 大页映射（Sv39 第 1 级叶 PTE）
+ * @param[in] pgd_ppn     根页表帧的物理页号
+ * @param[in] va          目标虚拟地址，必须按 2 MB 对齐
+ * @param[in] pa          目标物理地址，必须按 2 MB 对齐
+ * @param[in] flags       叶 PTE 的权限位组合，A/D 位由 pte_create() 统一补
+ * @param[in] mmu_enabled 若为 true，访问页表帧时需经 pa_to_kva() 转换
+ * @retval ENO0_NO_ERROR    映射建立成功
+ * @retval ENO6_INVAL_PARAM va 或 pa 未按 2 MB 对齐
+ * @retval ENO1_NOMORE_MEM  中间级页表帧分配失败
+ * @retval ENO7_EXISTS      该 2 MB 区间已有映射（大页或下一级页表指针）
+ * @details Sv39 的大页就是"中间级 PTE 直接当叶子"：第 1 级 PTE 的 R/W/X 只要有一位
+ *   置上，硬件就不再把它当指针，而是按 2 MB 粒度解释它的 PPN——所以 PA 的低 21 位
+ *   必须为 0，由入口的对齐校验保证。
+ *
+ *   刻意不去改 get_pte() 支持大页：它在本文件里被二十来处调用，COW、缺页处理、
+ *   vmm_map_vma 全走它，改它的返回语义等于把风险摊到所有路径上。
+ * @note 必须复用 pte_create() 而不是自己拼 PTE。叶 PTE 少了 A 位，在没有 Svadu
+ *   扩展的 U74 上一访问就是 page fault，见 memtype.h 里 pte_create() 的注释。
+ */
+int vmm_map_2m_page(ppn_t pgd_ppn, virAddr_t va, phyAddr_t pa, pteflg_t flags, bool mmu_enabled)
+{
+    if ((va & (PGSIZE_2M - 1)) != 0 || (pa & (PGSIZE_2M - 1)) != 0)
+    {
+        return ENO6_INVAL_PARAM;
+    }
+
+    phyAddr_t pgd_pa = convert_ppn2pa(pgd_ppn);
+    pte_t *pgd = mmu_enabled ? (pte_t *)pa_to_kva(pgd_pa) : (pte_t *)pgd_pa;
+    ppn_t pgd_idx = PGD(va);
+
+    if (!pte_is_valid(pgd[pgd_idx]))
+    {
+        pframe_t *new_pmd_frame = pmm_alloc_page();
+        if (!new_pmd_frame)
+        {
+            return ENO1_NOMORE_MEM;
+        }
+        new_pmd_frame->reference += 1;
+        pgd[pgd_idx] = pte_create(convert_pframe2ppn(new_pmd_frame), 0);
+    }
+    else if (pte_is_readable(pgd[pgd_idx]) || pte_is_writable(pgd[pgd_idx]) ||
+             pte_is_executable(pgd[pgd_idx]))
+    {
+        return ENO7_EXISTS; /* 这一项已是 1 GB 大页的叶 PTE，不能再往下走 */
+    }
+
+    phyAddr_t pmd_pa = convert_ppn2pa(pgd[pgd_idx] >> PTE_PPN_OFFSET);
+    pte_t *pmd = mmu_enabled ? (pte_t *)pa_to_kva(pmd_pa) : (pte_t *)pmd_pa;
+    ppn_t pmd_idx = PMD(va);
+
+    if (pte_is_valid(pmd[pmd_idx]))
+    {
+        return ENO7_EXISTS;
+    }
+
+    pmd[pmd_idx] = pte_create(convert_pa2ppn_flr(pa), flags);
+    return ENO0_NO_ERROR;
+}
+
+/**
+ * @brief 把一段设备寄存器区（MMIO）用 2 MB 大页映射进内核高半区
+ * @param[in] pa_start 起始物理地址（含），必须按 2 MB 对齐
+ * @param[in] pa_end   结束物理地址（不含），必须按 2 MB 对齐
+ * @details 设备区沿用与 RAM 相同的偏移 KVA = PA + KERNEL_VA_OFFSET，于是
+ *   pa_to_kva() 对设备寄存器地址直接可用，不需要第二套换算；两段地址不重叠，
+ *   理由见 memtype.h 里 MMIO_PHYS_BASE 的注释。
+ *
+ *   权限固定为 PTE_G | PTE_R | PTE_W：
+ *   1. 不给 PTE_X——设备区不应该可执行；
+ *   2. 不需要任何 cache 属性位——Sv39 的 PTE 里没有这种位，设备区的
+ *      non-cacheable 由 PMA 决定，建普通读写映射即可（这点比 ARM 省事）。
+ * @note 在 MMU 启用前调用，且必须排在 init_kernel_offset_mapping() 之后——
+ *   内核根页表是那个函数分配的。映射失败一律 panic：设备区映射不上，
+ *   后面的串口与 SD 驱动一个都跑不起来，没有可降级的形态。
+ */
+void vmm_map_mmio_range(phyAddr_t pa_start, phyAddr_t pa_end)
+{
+    for (phyAddr_t pa = pa_start; pa < pa_end; pa += PGSIZE_2M)
+    {
+        int ret = vmm_map_2m_page(vmm_kernel_pgd_ppn, pa_to_kva(pa), pa,
+                                  PTE_G | PTE_R | PTE_W, false);
+        if (ret != ENO0_NO_ERROR)
+        {
+            panic("vmm_map_mmio_range: failed at pa 0x%lx, ret %d\n", (unsigned long)pa, ret);
+        }
+    }
+}
+
+/**
  * @brief 撤销内核页表中 trampoline 段的临时恒等映射（VA = PA）
  * @details MMU 启用后，PC 已跳转到高虚拟地址，trampoline 代码不再需要恒等映射。
  *   此函数逐页清除对应 PTE（置 0，即清除 PTE_V），并执行全局 TLB 刷新。
@@ -221,7 +311,91 @@ void vmm_init(void)
 {
     spinlock_init(&vmm_lock);
     init_kernel_offset_mapping();
+    vmm_map_mmio_range(MMIO_PHYS_BASE, MMIO_PHYS_END);
 }
+
+#if DEBUG_MMIO_PROBE
+/**
+ * @brief 读若干已知的设备寄存器，验证 MMIO 映射确实建立起来了
+ * @details 证据互相独立，坏在哪一层就停在哪一组：
+ *   1. **页表项**：设备 VA 的第 1 级 PTE，确认是 2 MB 叶 PTE、PPN 正确、无 X；
+ *   2. **通路判据**：QEMU 读 CLINT mtime（两次必不同）；VF2 读 SD 控制器 VERID
+ *      （高 16 位固定 0x5342），顺带读出 U-Boot 留下的时钟/传输模式状态；
+ *   3. **UART 身份**（仅 VF2）：CTR(+0xfc) 是 DesignWare 固定值 0x44570110；
+ *   4. **LSR**：只打印不判定。
+ *
+ *   ⚠️ 板上不读 CLINT：OpenSBI 用 PMP 把它划成 M 态独占，S 态读是访问异常（实测）。
+ *   ⚠️ 不拿 THRE=1 当判据：真串口发送期间 THRE/TEMT 都是 0（实测 LSR=0x00、
+ *   USR=0x03），只有 QEMU 瞬间发完的虚拟串口才恒为 1。
+ * @note **只读，且避开有副作用的寄存器**：不读 UART +0x00（RBR，会弹接收 FIFO）、
+ *   +0x08（IIR，会清中断标识）。必须在 trap_init() 之后调用：映射不对时这里是一发
+ *   内核缺页或访问异常，stvec 没装好就只剩静默。
+ */
+void vmm_probe_mmio(void)
+{
+    virAddr_t base = pa_to_kva((phyAddr_t)UART);
+
+    pte_t *pmd_pte = NULL;
+    pte_t *pgd = (pte_t *)pa_to_kva(convert_ppn2pa(vmm_kernel_pgd_ppn));
+    if (pte_is_valid(pgd[PGD(base)]))
+    {
+        pte_t *pmd = (pte_t *)pa_to_kva(convert_ppn2pa(pgd[PGD(base)] >> PTE_PPN_OFFSET));
+        pmd_pte = &pmd[PMD(base)];
+    }
+    printf("mmio: va 0x%lx pgd[%ld]=0x%lx pmd[%ld]=0x%lx\n",
+           (unsigned long)base, (long)PGD(base), (unsigned long)pgd[PGD(base)],
+           (long)PMD(base), pmd_pte ? (unsigned long)*pmd_pte : 0UL);
+
+#if defined(VF2)
+    /* 板上不读 CLINT：OpenSBI 用 PMP 把它划成 M 态独占，S 态一读就是访问异常（实测）。
+     * 判断能不能读的规则是：U-Boot proper 跑在 S 态，它用过的外设 S 态必然可访问——
+     * sdio1（fatload mmc）在名单里，CLINT 不在（S 态 U-Boot 走 SBI 定时器）。
+     * VERID 高 16 位是 DesignWare MMC 的固定格式 0x5342；CLKENA/CLKDIV 顺带看
+     * U-Boot 把卡时钟留在了什么状态，那是 SD 驱动"能不能直接接手"的头号未知。 */
+    virAddr_t mmc = pa_to_kva((phyAddr_t)SDMMC_PHYS_BASE);
+    printf("mmio: sdmmc verid(+6c)=0x%08x usrid(+68)=0x%08x hcon(+70)=0x%08x (verid should be 0x5342xxxx)\n",
+           *(volatile uint32_t *)(mmc + 0x6c), *(volatile uint32_t *)(mmc + 0x68),
+           *(volatile uint32_t *)(mmc + 0x70));
+    printf("mmio: sdmmc ctrl=0x%08x clkdiv=0x%08x clkena=0x%08x ctype=0x%08x status=0x%08x fifoth=0x%08x\n",
+           *(volatile uint32_t *)(mmc + 0x00), *(volatile uint32_t *)(mmc + 0x08),
+           *(volatile uint32_t *)(mmc + 0x10), *(volatile uint32_t *)(mmc + 0x18),
+           *(volatile uint32_t *)(mmc + 0x48), *(volatile uint32_t *)(mmc + 0x4c));
+#else
+    volatile uint64_t *mtime = (volatile uint64_t *)(pa_to_kva((phyAddr_t)CLINT) + 0xbff8);
+    uint64_t t1 = *mtime;
+    uint64_t t2 = *mtime;
+    printf("mmio: clint mtime 0x%lx -> 0x%lx (%s)\n", (unsigned long)t1, (unsigned long)t2,
+           (t2 != t1) ? "ticking, MMIO path OK" : "STUCK");
+
+#endif
+    /* 这一批只在 VF2 上读。⚠️ QEMU virt 的 16550 MMIO 区**只有 8 字节**
+     * （virt.c 里 serial_mm_init 按 regshift 0 注册），读 +0x0c 及以后落在未分配
+     * 物理地址上，拿到的是**访问异常**（不是缺页）——实测踩过一次。
+     * JH7110 那颗的 reg 长 0x10000，没有这个问题。 */
+#if defined(VF2)
+    printf("mmio: uart w32 +04=0x%08x +0c=0x%08x +14=0x%08x +18=0x%08x +7c=0x%08x\n",
+           *(volatile uint32_t *)(base + 0x04), *(volatile uint32_t *)(base + 0x0c),
+           *(volatile uint32_t *)(base + 0x14), *(volatile uint32_t *)(base + 0x18),
+           *(volatile uint32_t *)(base + 0x7c));
+
+    printf("mmio: uart ucv(+f8)=0x%08x ctr(+fc)=0x%08x (ctr should be 0x44570110)\n",
+           *(volatile uint32_t *)(base + 0xf8), *(volatile uint32_t *)(base + 0xfc));
+
+    printf("mmio: uart b8 +05=0x%02x +14=0x%02x\n",
+           *(volatile uint8_t *)(base + 0x05), *(volatile uint8_t *)(base + 0x14));
+#endif
+
+    /* 访问宽度也要分平台，不只是偏移：QEMU 那颗是字节宽寄存器，按 32 位读
+     * base+5 就是一发跨界的非对齐访问（实测拿到访问异常）。 */
+#if defined(VF2)
+    uint32_t lsr = *(volatile uint32_t *)(base + UART_REG_OFF(UART_LSR));
+#else
+    uint32_t lsr = *(volatile uint8_t *)(base + UART_REG_OFF(UART_LSR));
+#endif
+    printf("mmio: uart lsr = 0x%02x (THRE=%d, DR=%d)\n", lsr,
+           (lsr & UART_LSR_THRE) ? 1 : 0, (lsr & UART_LSR_DR) ? 1 : 0);
+}
+#endif
 
 #if DEBUG_BRINGUP
 /**

@@ -94,7 +94,7 @@ echo "  booti 0x40200000 - \${fdtcontroladdr}"
 echo
 echo "存成一条命令，之后每轮迭代只敲 run dstar："
 echo "  setenv tftpwindowsize 8"
-echo "  setenv dstar 'tftpboot 0x40200000 vf2-kernel.img; tftpboot 0x47000000 rootfs.img; booti 0x40200000 - \${fdtcontroladdr}'"
+echo "  setenv dstar 'tftpboot 0x40200000 vf2-kernel.img && tftpboot 0x47000000 rootfs.img && booti 0x40200000 - \${fdtcontroladdr}'"
 echo "  saveenv"
 echo
 echo "选 TFTP 而不是 SD 卡，是因为换卡要断电、拆卡、占用读卡器的 USB 口——"

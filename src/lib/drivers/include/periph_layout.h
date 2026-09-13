@@ -25,6 +25,28 @@
 #define UART                    0x10000000L
 #define UART_V                  (UART + VIRT_OFFSET)
 
+/* UART0 的寄存器排布。两个平台的基址相同，但访问方式不同：
+ * QEMU virt 的 ns16550a 是 8 位寄存器逐字节排列（reg-shift 0）；
+ * JH7110 的 snps,dw-apb-uart 要求 32 位访问、寄存器间隔 4 字节
+ * （reg-shift 2 + reg-io-width 4，实测自 /soc/serial@10000000）。
+ * 下面的寄存器号是 16550 的**逻辑编号**，取字节偏移要按 UART_REG_SHIFT 左移。 */
+#if defined(VF2)
+#define UART_REG_SHIFT          2
+#else
+#define UART_REG_SHIFT          0
+#endif
+#define UART_REG_OFF(reg)       ((reg) << UART_REG_SHIFT)
+
+#define UART_LSR                5       /* Line Status Register */
+#define UART_LSR_DR             (1 << 0) /* 接收数据就绪 */
+#define UART_LSR_THRE           (1 << 5) /* 发送保持寄存器空 */
+
+/* SD 卡槽控制器（snps,dw-mshc）。JH7110 上是 /soc/sdio1@16020000；
+ * 注意 sdio0@16010000 是板载 eMMC 接口，不是 SD 槽（U-Boot 里 SD 卡是 mmc 1）。 */
+#if defined(VF2)
+#define SDMMC_PHYS_BASE         0x16020000UL
+#endif
+
 /* virtio mmio interface */
 #define VIRTIO0                 0x10001000
 #define VIRTIO0_V               (VIRTIO0 + VIRT_OFFSET)

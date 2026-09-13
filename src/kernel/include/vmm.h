@@ -51,6 +51,8 @@ extern ppn_t vmm_kernel_pgd_ppn;
 
 void   vmm_init(void);
 void   vmm_remove_identity_mapping(void);
+int    vmm_map_2m_page(ppn_t pgd_ppn, virAddr_t va, phyAddr_t pa, pteflg_t flags, bool mmu_enabled);
+void   vmm_map_mmio_range(phyAddr_t pa_start, phyAddr_t pa_end);
 mm_t  *vmm_mm_create(void);
 void   vmm_mm_destroy(mm_t *mm);
 int    vmm_mm_copy(mm_t *dst, mm_t *src);
@@ -67,6 +69,10 @@ void   vmm_page_fault_handler(virAddr_t badva, int fault_type);
 
 #if DEBUG_PTE_AD_PROBE
 void   vmm_probe_pte_ad(void);
+#endif
+
+#if DEBUG_MMIO_PROBE
+void   vmm_probe_mmio(void);
 #endif
 
 #if DEBUG_BRINGUP
