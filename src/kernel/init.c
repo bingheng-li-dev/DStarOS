@@ -26,6 +26,11 @@ extern int main(int argc, char **args);
  * 由 startup.S 在 bss 清零之后存入。时基自检与 hart 探测都要读它。 */
 uint64_t dtb_phys_addr;
 
+#if DEBUG_BOOT_TRACE
+/* 置 1 之后 trap 入口开始记录 scause，见 trap_dispatch() */
+int boot_trace_armed;
+#endif
+
 /* 在 MMU 开启前调用，返回 satp 寄存器值 */
 void os_init_before_mmu_enable(void)
 {
@@ -93,10 +98,17 @@ void os_init_after_mmu_enable(uint64_t cpu_id)
         tty_init();      /* 全局 TTY 单例只能由 hart 0 初始化一次；必须早于 proc_init()——
                           * proc_init 会给 init 装 fd 0/1/2，届时 tty 必须已经能用 */
         signal_init();   /* sigpage 的物理页；必须早于任何 create_user_mm() */
+#if DEBUG_BOOT_TRACE
+        boot_trace_armed = 1;
+#endif
 
+        BOOT_TRACE("before plic_init");
         plic_init();          /* 必须晚于 tty_init()：中断一来就会往 tty 里推字符 */
+        BOOT_TRACE("after plic_init");
         uart_enable_rx_irq();
+        BOOT_TRACE("after uart_enable_rx_irq");
         fs_init();
+        BOOT_TRACE("after fs_init");
         sched_init();   /* 全局就绪队列只能由 hart 0 初始化一次，否则 hart 1 会把 init 冲掉 */
         proc_early_init(); /* proc_list / proc_list_lock / pid_stack，必须早于启动 hart 1 */
 

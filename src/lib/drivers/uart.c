@@ -1,5 +1,6 @@
 #include "uart.h"
 #include "periph_layout.h"
+#include "debug.h"
 
 /* 只要远大于"一整个发送 FIFO 排空"的耗时即可 */
 #define UART_TX_SPIN_LIMIT 1000000U
@@ -56,13 +57,22 @@ void uart_init(virAddr_t base)
  */
 void uart_putc(char c)
 {
-    for (uint32_t n = 0; n < UART_TX_SPIN_LIMIT; n++)
+    uint32_t n;
+    for (n = 0; n < UART_TX_SPIN_LIMIT; n++)
     {
         if ((uart_read(UART_LSR) & UART_LSR_THRE) != 0)
         {
             break;
         }
     }
+#if DEBUG_BOOT_TRACE
+    static int tx_stuck_reports;
+    if (n == UART_TX_SPIN_LIMIT && tx_stuck_reports < 3)
+    {
+        tx_stuck_reports++;
+        BOOT_TRACE("uart_putc: THRE wait hit limit");
+    }
+#endif
     uart_write(UART_THR, (uint8_t)c);
 }
 
@@ -77,6 +87,36 @@ void uart_putc(char c)
 void uart_enable_rx_irq(void)
 {
     uart_write(UART_IER, uart_read(UART_IER) | UART_IER_ERBFI);
+}
+
+/**
+ * @brief UART 中断的控制器侧确认，必须在读接收 FIFO 之前调用
+ * @details DesignWare APB UART 有一个 16550 没有的中断源：busy detect（IIR 低 4 位 = 0x7）。
+ *   UART 忙时写 LCR 会把它置位，**不受 IER 屏蔽**，读 LSR / RBR 清不掉，只有读 USR 才清除。
+ *   U-Boot 初始化串口若恰好碰上正在发送，进内核时这个中断就已经挂着——PLIC 一使能
+ *   UART 中断即刻投递，处理完、complete 之后又立刻重新挂起，主流程被饿死（板上实测）。
+ *   做法同 Linux 8250_dw 的 dw8250_handle_irq()。
+ * @note QEMU 的 16550 没有 busy detect，也没有 USR，这里什么都不做。
+ */
+void uart_handle_irq(void)
+{
+#if defined(VF2)
+    uint32_t iir = uart_read(UART_IIR);
+    bool busy = (iir & UART_IIR_ID_MASK) == UART_IIR_BUSY;
+    uint32_t usr = busy ? uart_read(UART_DW_USR) : 0;
+#if DEBUG_BOOT_TRACE
+    static int irq_reports;
+    if (irq_reports < 4)
+    {
+        irq_reports++;
+        boot_trace_hex("uart iir", iir);
+        boot_trace_hex("uart usr (read only if busy)", usr);
+        boot_trace_hex("uart lsr", uart_read(UART_LSR));
+        boot_trace_hex("uart ier", uart_read(UART_IER));
+    }
+#endif
+    (void)usr;
+#endif
 }
 
 /**

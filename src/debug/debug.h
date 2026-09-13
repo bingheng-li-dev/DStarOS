@@ -224,8 +224,39 @@
  * 打字会刷屏，只在验证时打开。 */
 #define DEBUG_EXT_IRQ 0
 
+/* 启动跟踪：置 1 时在关键初始化步骤前后经 SBI 直接输出 "[trace] ..."。
+ * 走固件而不走自有 UART 驱动：卡死若发生在串口驱动里，这些行仍然出得来，
+ * 从而区分"代码卡住"与"串口发不出去"。 */
+#define DEBUG_BOOT_TRACE 0
+
 #define DEBUG_TRACK_LINE() printf("DEBUG_TRACK_LINE: %s:%d\n", __FILE__, __LINE__)
 
 #endif /* DEBUG */
+
+#if defined(DEBUG_BOOT_TRACE) && DEBUG_BOOT_TRACE
+#include "sbi.h"
+#include <stdint.h>
+#define BOOT_TRACE(msg) do { for (const char *bt_p_ = "[trace] " msg "\n"; *bt_p_ != '\0'; bt_p_++) { sbi_console_putchar((int)*bt_p_); } } while (0)
+extern int boot_trace_armed;
+static inline void boot_trace_hex(const char *label, uint64_t v)
+{
+    for (const char *p = "[trace] "; *p != '\0'; p++)
+    {
+        sbi_console_putchar((int)*p);
+    }
+    for (const char *p = label; *p != '\0'; p++)
+    {
+        sbi_console_putchar((int)*p);
+    }
+    sbi_console_putchar('=');
+    for (int s = 60; s >= 0; s -= 4)
+    {
+        sbi_console_putchar((int)"0123456789abcdef"[(v >> s) & 0xf]);
+    }
+    sbi_console_putchar('\n');
+}
+#else
+#define BOOT_TRACE(msg) do { } while (0)
+#endif
 
 #endif /* _DEBUG_H */

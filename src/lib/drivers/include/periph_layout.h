@@ -30,6 +30,14 @@
 #define UART_LSR                5       /* Line Status Register */
 #define UART_LSR_DR             (1 << 0) /* 接收数据就绪 */
 #define UART_LSR_THRE           (1 << 5) /* 发送保持寄存器空 */
+#define UART_IIR                2       /* Interrupt Identification Register（读） */
+#define UART_IIR_ID_MASK        0x0f
+#define UART_IIR_BUSY           0x07    /* DesignWare 专有：busy detect，只有读 USR 才清得掉 */
+#if defined(VF2)
+/* DesignWare APB UART 专有的 UART Status Register（偏移 0x7c，即逻辑号 31）。
+ * QEMU 的 16550 没有它，而且那边 MMIO 区只有 8 字节，访问即访问异常。 */
+#define UART_DW_USR             31
+#endif
 
 /* SD 卡槽控制器（snps,dw-mshc）。JH7110 上是 /soc/sdio1@16020000；
  * 注意 sdio0@16010000 是板载 eMMC 接口，不是 SD 槽（U-Boot 里 SD 卡是 mmc 1）。 */

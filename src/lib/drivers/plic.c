@@ -3,6 +3,7 @@
 #include "memtype.h"
 #include "console.h"
 #include "cpu.h"
+#include "debug.h"
 
 static inline uint32_t plic_read(uint64_t off)
 {
@@ -40,14 +41,18 @@ void plic_init(void)
         plic_write(PLIC_ENABLE_OFF(ctx, UART_IRQ),
                    plic_read(PLIC_ENABLE_OFF(ctx, UART_IRQ)) & ~PLIC_ENABLE_BIT(UART_IRQ));
     }
+    BOOT_TRACE("plic: other contexts cleared");
 
     plic_write(PLIC_PRIORITY_OFF(UART_IRQ), 1);
+    BOOT_TRACE("plic: priority set");
 
     uint64_t ctx0 = PLIC_S_CONTEXT(cpu_get_hartid(0));
     plic_write(PLIC_THRESHOLD_OFF(ctx0), 0);
+    BOOT_TRACE("plic: threshold set");
     plic_write(PLIC_ENABLE_OFF(ctx0, UART_IRQ),
                plic_read(PLIC_ENABLE_OFF(ctx0, UART_IRQ)) | PLIC_ENABLE_BIT(UART_IRQ));
 
+    BOOT_TRACE("plic: ctx0 enabled, before printf");
     printf("plic: uart irq %d -> cpu0 (hart %ld, s-context %ld)\n",
            UART_IRQ, (long)cpu_get_hartid(0), (long)ctx0);
 }

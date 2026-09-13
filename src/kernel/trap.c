@@ -4,6 +4,7 @@
 #include "sync.h"
 #include "plic.h"
 #include "tty.h"
+#include "uart.h"
 #include "sbi.h"
 #include "vmm.h"
 #include "syscall.h"
@@ -54,6 +55,14 @@ static void trap_external_irq(void)
     {
         return;
     }
+#if DEBUG_BOOT_TRACE
+    static int bt_ext_irq_reports;
+    if (bt_ext_irq_reports < 8)
+    {
+        bt_ext_irq_reports++;
+        BOOT_TRACE("external irq claimed");
+    }
+#endif
 #if DEBUG_EXT_IRQ
     static uint64_t ext_irq_count;
     ext_irq_count += 1;
@@ -61,6 +70,7 @@ static void trap_external_irq(void)
 #endif
     if (irq == UART_IRQ)
     {
+        uart_handle_irq();
         tty_poll_input();
     }
     else
@@ -124,6 +134,14 @@ static void trap_dispatch(intstkf_t *sp)
         /* 发生中断后，硬件会自动将SSTATUS_SIE位置0。如果不是0说明出错了。 */
         panic("%s::interrupts enabled.\n", __FUNCTION__);
     }
+#if DEBUG_BOOT_TRACE
+    static int bt_trap_reports;
+    if (boot_trace_armed && bt_trap_reports < 16)
+    {
+        bt_trap_reports++;
+        boot_trace_hex("trap scause", sp->scause);
+    }
+#endif
 
 #if DEBUG_INTSTACK
     print_intstk(sp);
