@@ -174,10 +174,17 @@ static void trap_dispatch(intstkf_t *sp)
         switch (cause)
         {
         case CAUSE_FAULT_LOAD:
-            vmm_page_fault_handler((virAddr_t)sp->sbadaddr, 1);
-            return;
         case CAUSE_FAULT_STORE:
-            vmm_page_fault_handler((virAddr_t)sp->sbadaddr, 2);
+            /* 访问异常（scause 5/7）**不是缺页**：目标地址后面根本没有设备或内存响应，
+             * 缺页处理器补不出这种错。单独打一行点明，否则它会一路走到
+             * "kernel page fault" 那条 panic，把"地址后面没东西"误读成"映射没建上"
+             * ——两者的修法完全相反。MMIO / 设备驱动调试期这是常见故障形态。 */
+            printf("%s access fault (no device or memory responds at this addr): "
+                   "addr=0x%lx sepc=0x%lx\n",
+                   (cause == CAUSE_FAULT_LOAD) ? "Load" : "Store",
+                   (unsigned long)sp->sbadaddr, (unsigned long)sp->sepc);
+            vmm_page_fault_handler((virAddr_t)sp->sbadaddr,
+                                   (cause == CAUSE_FAULT_LOAD) ? 1 : 2);
             return;
         case CAUSE_FAULT_INSTRUCTION_PAGE:
 #if DEBUG_VMM_page_fault_handler
