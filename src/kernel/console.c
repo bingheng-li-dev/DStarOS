@@ -3,11 +3,27 @@
 #include "tinyprintf.h"
 #include "sbi.h"
 #include "tty.h"
+#include "uart.h"
+#include "memtype.h"
+#include "periph_layout.h"
 
 osslock_t ConsoleLock;
 volatile bool panicked = false;
 
+/* 内核日志的换行在这里补成回车+换行（同 Linux uart_console_write 的约定）。
+ * 以前是 OpenSBI 的 putc 顺手补的、RustSBI 不补，行尾因固件而异；
+ * 用户输出的换行转换归 tty 的 ONLCR，不能挪进 uart_putc，否则会补两次。 */
 static void stdout_putc(void *unused, char ch)
+{
+    if (ch == '\n')
+    {
+        uart_putc('\r');
+    }
+    uart_putc(ch);
+}
+
+/* panic 的逃生通道：不经过自有 UART 驱动，直接交给固件，驱动本身出问题时它仍能说话。 */
+static void panic_putc(void *unused, char ch)
 {
     sbi_console_putchar((int)ch);
 }
@@ -15,6 +31,7 @@ static void stdout_putc(void *unused, char ch)
 void console_init(void)
 {
     spinlock_init(&ConsoleLock);
+    uart_init(mmu_is_enabled() ? pa_to_kva((phyAddr_t)UART) : (virAddr_t)UART);
     init_printf(0, stdout_putc);
 }
 
@@ -71,7 +88,7 @@ void panic_impl(const char *func, int line, char *s, ...)
         sbi_console_putchar((int)*p);
     }
     va_start(args, s);
-    tfp_format(NULL, stdout_putc, s, args);
+    tfp_format(NULL, panic_putc, s, args);
     va_end(args);
     sbi_console_putchar('\n');
     panicked = true;

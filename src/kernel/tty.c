@@ -4,6 +4,7 @@
 #include "slab.h"
 #include "stringops.h"
 #include "sbi.h"
+#include "uart.h"
 #include "sched.h"
 #include "console.h"
 #include "kmalloc.h"
@@ -58,16 +59,16 @@ void tty_init(void)
     g_tty.ws.ws_ypixel = 0;
 }
 
-/* 回显一个字符。直接调 sbi_console_putchar，不碰 ConsoleLock（printf/tty_write 持的锁）
+/* 回显一个字符。直接调 uart_putc，不碰 ConsoleLock（printf/tty_write 持的锁）
  * ——两者交叉嵌套会引入一条新锁序，极端情况下回显字符可能插进一条 printf 中间，
  * 交互场景下可接受。ONLCR 的 \n -> \r\n 在这里做。 */
 static void tty_echo(char c)
 {
     if (c == '\n' && (g_tty.tio.c_oflag & OPOST) && (g_tty.tio.c_oflag & ONLCR))
     {
-        sbi_console_putchar('\r');
+        uart_putc('\r');
     }
-    sbi_console_putchar((int)c);
+    uart_putc(c);
 }
 
 static void tty_echo_str(const char *s)
@@ -324,9 +325,9 @@ ssize_t tty_write(file_t *file, const void *buf, size_t len)
         char c = ((const char *)buf)[i];
         if (c == '\n' && (tty->tio.c_oflag & OPOST) && (tty->tio.c_oflag & ONLCR))
         {
-            sbi_console_putchar('\r');
+            uart_putc('\r');
         }
-        sbi_console_putchar((int)c);
+        uart_putc(c);
     }
     spinlock_release(&ConsoleLock, ConsoleLock_key);
 
@@ -404,7 +405,7 @@ void tty_poll_input(void)
      * 把中断处理程序卡住。 */
     for (int n = 0; n < TTY_BUF_SIZE; n++)
     {
-        int c = sbi_console_getchar();
+        int c = uart_getc();
         if (c == -1)
         {
             break;

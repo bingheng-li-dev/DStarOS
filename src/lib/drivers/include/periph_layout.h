@@ -37,6 +37,8 @@
 #endif
 #define UART_REG_OFF(reg)       ((reg) << UART_REG_SHIFT)
 
+#define UART_RBR                0       /* Receiver Buffer Register（读） */
+#define UART_THR                0       /* Transmitter Holding Register（写） */
 #define UART_LSR                5       /* Line Status Register */
 #define UART_LSR_DR             (1 << 0) /* 接收数据就绪 */
 #define UART_LSR_THRE           (1 << 5) /* 发送保持寄存器空 */

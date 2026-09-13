@@ -57,12 +57,12 @@ typedef struct tty
  * 且只能由 hart0 调用一次（同 sched_init() 的单例初始化约定）。 */
 void tty_init(void);
 
-/* 行规范层：把一个从 sbi_console_getchar() 读到的字符喂给 TTY。
+/* 行规范层：把一个从串口读到的字符喂给 TTY。
  * 中断上下文安全（由 tick_int_handler() 经 tty_poll_input() 调用），全程只用自旋锁，
  * 永不阻塞。 */
 void tty_input_push(char c);
 
-/* 从 SBI 轮询串口输入，把读到的字符逐个喂给 tty_input_push()。中断上下文安全；
+/* 轮询 UART 接收寄存器，把读到的字符逐个喂给 tty_input_push()。中断上下文安全；
  * 由 tick_int_handler() 在释放 tick_lock 之后调用，只在 hart0 上执行。 */
 void tty_poll_input(void);
 
