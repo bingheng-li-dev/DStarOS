@@ -6,6 +6,11 @@
 #include "console.h"
 #include "debug.h"
 #include "kmalloc.h"
+#include "bdev.h"
+#include "bio.h"
+#include "ramdisk.h"
+#include "sdcard.h"
+#include "ktime.h"
 
 #if defined(VF2) && DEBUG_SDMMC_PROBE
 /**
@@ -29,11 +34,11 @@ static uint32_t fs_crc32_update(uint32_t crc, const uint8_t *p, size_t n)
 }
 
 /**
- * @brief 端到端校验 SD 读通路：经 VFS → FatFS → diskio → sdmmc 读完整个文件并算 CRC32
+ * @brief 端到端校验 SD 读通路：经 VFS → FatFS → 块缓存 → 驱动读完整个文件并算 CRC32
  * @param[in] path 要校验的文件
- * @details 板上 BusyBox 裁剪得只剩 cat / ls，没有 md5sum / cmp，只能内核自己算。
- *   4 MB 的文件要连续读 8000 多个块，任何一位读错 CRC 都对不上，比核对签名严格得多。
- *   算法与 zlib.crc32 相同，宿主机上对同一个文件算出的值就是标准答案。
+ * @details 板上 BusyBox 没有 md5sum / cmp，只能内核自己算；算法与 zlib.crc32 相同，
+ *   宿主机上对同一个文件算出的值就是标准答案。同时打印耗时与这一趟里块缓存的命中 / 未命中数，
+ *   同一文件连续校验两次即可看出缓存是否生效。
  * @note 运行在 fs_init() 里，同样不加 vfs_lock()（原因见 fs_init 的注释）。
  */
 static void fs_verify_file_crc32(const char *path)
@@ -52,6 +57,10 @@ static void fs_verify_file_crc32(const char *path)
         return;
     }
 
+    bio_stats_t before;
+    bio_get_stats(&before);
+    uint64_t t0 = ktime_get_ns();
+
     uint32_t crc = 0xffffffffU;
     uint64_t total = 0;
     for (;;)
@@ -69,9 +78,16 @@ static void fs_verify_file_crc32(const char *path)
         crc = fs_crc32_update(crc, buf, (size_t)n);
         total += (uint64_t)n;
     }
+
+    uint64_t ms = (ktime_get_ns() - t0) / 1000000;
+    bio_stats_t after;
+    bio_get_stats(&after);
     kfree(buf);
     vfs_close(f);
-    printf("sdcheck: %s size=%lu crc32=%08x\n", path, (unsigned long)total, crc ^ 0xffffffffU);
+    printf("sdcheck: %s size=%lu crc32=%08x time=%lums cache hits=%lu misses=%lu dev_reads=%lu\n",
+           path, (unsigned long)total, crc ^ 0xffffffffU, (unsigned long)ms,
+           (unsigned long)(after.hits - before.hits), (unsigned long)(after.misses - before.misses),
+           (unsigned long)(after.dev_reads - before.dev_reads));
 }
 #endif
 
@@ -83,13 +99,20 @@ static void fs_verify_file_crc32(const char *path)
  */
 void fs_init(void)
 {
+    /* 0. 块设备与块缓存。注册序号就是 FatFS 的物理驱动器号，必须早于任何挂载 */
+    ramdisk_register(0);
+#if defined(VF2)
+    sdcard_register(1);
+#endif
+    bio_init();
+
     /* 1. 初始化 VFS 全局数据结构（含 vfs_big_lock 本身的初始化）*/
     vfs_init();
 
     /* 2. 注册 fatfs 文件系统类型 */
     fatfs_register();
 
-    /* 3. 挂载根文件系统（驱动号 0 对应内存 ramdisk，见 diskio.c）*/
+    /* 3. 挂载根文件系统（驱动号 0 对应内存 ramdisk）*/
     int ret = vfs_mount("/", "fatfs", NULL);
     if (ret != ENO0_NO_ERROR)
     {
@@ -132,6 +155,7 @@ void fs_init(void)
     }
     printf("fs_init: sd card mounted at /sd\n");
 #if DEBUG_SDMMC_PROBE
+    fs_verify_file_crc32("/sd/rootfs.img");
     fs_verify_file_crc32("/sd/rootfs.img");
     fs_verify_file_crc32("/sd/copy.img");
 #endif

@@ -1,268 +1,98 @@
 /*
- * diskio.c - VFS/FatFS 磁盘 I/O 层
+ * diskio.c - FatFS 磁盘 I/O 层
  *
- * 0 号驱动器（两个平台）：内存 ramdisk，落在 memtype.h 划出的 rootfs 预留区上
- *            （ROOTFS_PHYS_BASE，PMM 页帧池之外）。QEMU 由 -device loader、VF2 由 U-Boot
- *            在启动前把镜像原样写进去；没装载镜像时那块是零，fatfs_mount 会退回 f_mkfs。
- * 1 号驱动器（仅 VF2）：SD 卡第一个分区，可读写。经 sdmmc 驱动按块读写，
- *            扇区号加上分区起始 LBA 后下发——FatFS 看到的是"0 号扇区就是 FAT 引导扇区"的盘。
+ * 只做一层转发：FatFS 的物理驱动器号就是块设备的注册序号（见 fs_init()：0 = 内存盘，
+ * 1 = VF2 的 SD 卡第一个分区）。越界检查在这里统一做，读写一律经过块缓存（bio.c）。
  */
 
 #include "diskio.h"
-#include "stringops.h"
-#include "memtype.h"
-
-#if defined(VF2)
-#include "sdmmc.h"
-#include "console.h"
+#include "bdev.h"
+#include "bio.h"
 #include "errorcode.h"
-#endif
-
-#define RAMDISK_PDRV           0
-#define SDCARD_PDRV            1
-
-/* ================================================================
- * 0 号驱动器：Ramdisk
- * ================================================================ */
-
-#define RAMDISK_SECTOR_SIZE    512
-/* 整个预留区都当成这块"盘"。**不必等于镜像大小**：f_mount 读的是引导扇区里记的
- * 总扇区数（镜像自己说了算），这个数只被 f_mkfs 用来决定格式化多大。
- * 于是镜像可以比预留区小，剩下的空间留着以后放大。 */
-#define RAMDISK_SECTOR_COUNT   (ROOTFS_MAX_SIZE / RAMDISK_SECTOR_SIZE)
-
-/* ramdisk 数据区：指向 rootfs 预留区的内核虚拟地址。
- * 不能写成静态初始化——pa_to_kva() 是内联函数、不是常量表达式，而且这块地址
- * 只有在 MMU 打开、内核偏移映射建好之后才可访问（KERNEL_MAP_END 覆盖了它）。
- * disk_initialize() 由 fatfs_mount() 调用，那时 os_init_after_mmu_enable 早就跑完了。 */
-static unsigned char *ramdisk_buf;
-
-/* ramdisk 初始化状态标志 */
-static int ramdisk_initialized = 0;
-
-#if defined(VF2)
-/* ================================================================
- * 1 号驱动器：SD 卡第一个分区（可读写）
- * ================================================================ */
-
-static uint64_t sdcard_part_start;
-static uint64_t sdcard_part_sectors;
-static DSTATUS sdcard_stat = STA_NOINIT;
-static uint8_t sdcard_sector[512];
-
-static inline uint32_t sdcard_le32(const uint8_t *p)
-{
-    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-}
-
-static inline uint64_t sdcard_le64(const uint8_t *p)
-{
-    return (uint64_t)sdcard_le32(p) | ((uint64_t)sdcard_le32(p + 4) << 32);
-}
 
 /**
- * @brief 找 SD 卡第一个分区的起始 LBA
- * @param[out] start 分区起始块号
- * @param[out] sectors 分区扇区数
- * @retval ENO0_NO_ERROR 找到
- * @retval ENO13_NO_FS   LBA0 不是有效的 MBR / GPT，或第一个分区为空
- * @return 其余为 sdmmc_read_blocks() 的错误码
- * @details 自己解析分区表，而不是交给 FatFS：FatFS R0.11 只认 MBR，遇到 GPT 的保护性 MBR
- *   会报"没有文件系统"。0xee 表示 GPT，取 GPT 头里的分区表位置，再取第一项的起始 LBA。
- * @note 只支持第一个分区。U-Boot 的 `fatls mmc 1:1` 能列出内容，说明本板的卡满足这一点。
+ * @brief 设备状态折算成 FatFS 的 DSTATUS
+ * @param[in] dev 设备描述符，可为 NULL
+ * @return 未注册或未就绪为 STA_NOINIT；只读设备为 STA_PROTECT；否则 0
  */
-static int sdcard_find_first_partition(uint64_t *start, uint64_t *sectors)
+static DSTATUS diskio_status_of(const bdev_t *dev)
 {
-    int ret = sdmmc_read_blocks(0, sdcard_sector, 1);
-    if (ret != ENO0_NO_ERROR)
+    if (dev == NULL || !dev->ready)
     {
-        return ret;
+        return STA_NOINIT;
     }
-    if (sdcard_sector[510] != 0x55 || sdcard_sector[511] != 0xaa)
-    {
-        return ENO13_NO_FS;
-    }
-
-    if (sdcard_sector[450] != 0xee)
-    {
-        *start = sdcard_le32(sdcard_sector + 454);
-        *sectors = sdcard_le32(sdcard_sector + 458);
-        return (*start != 0) ? ENO0_NO_ERROR : ENO13_NO_FS;
-    }
-
-    ret = sdmmc_read_blocks(1, sdcard_sector, 1);
-    if (ret != ENO0_NO_ERROR)
-    {
-        return ret;
-    }
-    if (memcmp(sdcard_sector, "EFI PART", 8) != 0)
-    {
-        return ENO13_NO_FS;
-    }
-    uint64_t entries_lba = sdcard_le64(sdcard_sector + 72);
-    ret = sdmmc_read_blocks(entries_lba, sdcard_sector, 1);
-    if (ret != ENO0_NO_ERROR)
-    {
-        return ret;
-    }
-    *start = sdcard_le64(sdcard_sector + 32);
-    uint64_t last_lba = sdcard_le64(sdcard_sector + 40);
-    *sectors = (last_lba >= *start) ? last_lba - *start + 1 : 0;
-    return (*start != 0) ? ENO0_NO_ERROR : ENO13_NO_FS;
+    return dev->read_only ? STA_PROTECT : 0;
 }
-
-/**
- * @brief 初始化 1 号驱动器：接手 SD 卡并定位第一个分区
- * @return 0 表示就绪；STA_NOINIT 表示失败
- * @note 幂等。FatFS 首次挂载时 find_volume 自己也会调 disk_initialize，
- *   而 fatfs_mount_cb 已经先调过一次——不短路的话会重复接手卡、重复解析分区表
- *   （板上实测分区信息打印了两次）。
- */
-static DSTATUS sdcard_initialize(void)
-{
-    if (!(sdcard_stat & STA_NOINIT))
-    {
-        return sdcard_stat;
-    }
-
-    int ret = sdmmc_init();
-    if (ret != ENO0_NO_ERROR)
-    {
-        printf("sdcard: controller/card not ready, err=%d\n", ret);
-        sdcard_stat = STA_NOINIT;
-        return sdcard_stat;
-    }
-    ret = sdcard_find_first_partition(&sdcard_part_start, &sdcard_part_sectors);
-    if (ret != ENO0_NO_ERROR)
-    {
-        printf("sdcard: no usable partition, err=%d\n", ret);
-        sdcard_stat = STA_NOINIT;
-        return sdcard_stat;
-    }
-    printf("sdcard: partition 1 at lba %lu, %lu sectors, read-write\n", (unsigned long)sdcard_part_start,
-           (unsigned long)sdcard_part_sectors);
-    sdcard_stat = 0;
-    return sdcard_stat;
-}
-#endif
 
 /*
- * disk_initialize - 初始化磁盘驱动
- * @pdrv: 物理驱动器编号（0 = ramdisk；1 = SD 卡，仅 VF2）
+ * disk_initialize - 初始化磁盘驱动（幂等，见 bdev_open）
+ * @pdrv: 物理驱动器编号
  * 返回：0 或 STA_PROTECT 表示就绪；STA_NOINIT 表示失败
  */
 DSTATUS disk_initialize(BYTE pdrv)
 {
-    if (pdrv == RAMDISK_PDRV)
+    bdev_t *dev = bdev_get(pdrv);
+    if (dev == NULL || bdev_open(dev) != ENO0_NO_ERROR)
     {
-        ramdisk_buf = (unsigned char *)pa_to_kva(ROOTFS_PHYS_BASE);
-        ramdisk_initialized = 1;
-        return 0;
+        return STA_NOINIT;
     }
-#if defined(VF2)
-    if (pdrv == SDCARD_PDRV)
-    {
-        return sdcard_initialize();
-    }
-#endif
-    return STA_NOINIT;
+    return diskio_status_of(dev);
 }
 
 /*
  * disk_status - 获取磁盘驱动器状态
  * @pdrv: 物理驱动器编号
- * 返回：0 表示就绪；STA_PROTECT 表示只读就绪；STA_NOINIT 表示未初始化
  */
 DSTATUS disk_status(BYTE pdrv)
 {
-    if (pdrv == RAMDISK_PDRV)
-    {
-        return ramdisk_initialized ? 0 : STA_NOINIT;
-    }
-#if defined(VF2)
-    if (pdrv == SDCARD_PDRV)
-    {
-        return sdcard_stat;
-    }
-#endif
-    return STA_NOINIT;
+    return diskio_status_of(bdev_get(pdrv));
 }
 
 /*
  * disk_read - 读取扇区数据
  * @pdrv:   物理驱动器编号
  * @buff:   读取数据的目标缓冲区
- * @sector: 起始扇区地址（驱动器内 LBA；SD 卡为分区内 LBA）
+ * @sector: 起始扇区地址（设备内 LBA）
  * @count:  读取的扇区数量
  */
 DRESULT disk_read(BYTE pdrv, BYTE *buff, DWORD sector, UINT count)
 {
-    if (pdrv == RAMDISK_PDRV)
+    bdev_t *dev = bdev_get(pdrv);
+    if (dev == NULL || !dev->ready)
     {
-        if (!ramdisk_initialized)
-        {
-            return RES_NOTRDY;
-        }
-        if (sector + count > RAMDISK_SECTOR_COUNT)
-        {
-            return RES_PARERR;
-        }
-        memcpy(buff,
-               ramdisk_buf + sector * RAMDISK_SECTOR_SIZE,
-               (unsigned long)count * RAMDISK_SECTOR_SIZE);
-        return RES_OK;
+        return RES_NOTRDY;
     }
-#if defined(VF2)
-    if (pdrv == SDCARD_PDRV)
+    if ((uint64_t)sector + count > dev->nr_blocks)
     {
-        if (sdcard_stat & STA_NOINIT)
-        {
-            return RES_NOTRDY;
-        }
-        return (sdmmc_read_blocks(sdcard_part_start + sector, buff, count) == ENO0_NO_ERROR)
-               ? RES_OK : RES_ERROR;
+        return RES_PARERR;
     }
-#endif
-    return RES_PARERR;
+    return (bio_read(dev, sector, buff, count) == ENO0_NO_ERROR) ? RES_OK : RES_ERROR;
 }
 
 /*
  * disk_write - 写入扇区数据
  * @pdrv:   物理驱动器编号
  * @buff:   待写入数据的源缓冲区
- * @sector: 起始扇区地址（LBA）
+ * @sector: 起始扇区地址（设备内 LBA）
  * @count:  写入的扇区数量
- * 注：SD 卡每块写完都会等卡内部编程结束才返回，写入即落盘。
+ * 注：直写（write-through）——返回时数据已在设备上，缓存里没有待落盘的块。
  */
 DRESULT disk_write(BYTE pdrv, const BYTE *buff, DWORD sector, UINT count)
 {
-    if (pdrv == RAMDISK_PDRV)
+    bdev_t *dev = bdev_get(pdrv);
+    if (dev == NULL || !dev->ready)
     {
-        if (!ramdisk_initialized)
-        {
-            return RES_NOTRDY;
-        }
-        if (sector + count > RAMDISK_SECTOR_COUNT)
-        {
-            return RES_PARERR;
-        }
-        memcpy(ramdisk_buf + sector * RAMDISK_SECTOR_SIZE,
-               buff,
-               (unsigned long)count * RAMDISK_SECTOR_SIZE);
-        return RES_OK;
+        return RES_NOTRDY;
     }
-#if defined(VF2)
-    if (pdrv == SDCARD_PDRV)
+    if (dev->read_only)
     {
-        if (sdcard_stat & STA_NOINIT)
-        {
-            return RES_NOTRDY;
-        }
-        return (sdmmc_write_blocks(sdcard_part_start + sector, buff, count) == ENO0_NO_ERROR)
-               ? RES_OK : RES_ERROR;
+        return RES_WRPRT;
     }
-#endif
-    return RES_PARERR;
+    if ((uint64_t)sector + count > dev->nr_blocks)
+    {
+        return RES_PARERR;
+    }
+    return (bio_write(dev, sector, buff, count) == ENO0_NO_ERROR) ? RES_OK : RES_ERROR;
 }
 
 /*
@@ -273,48 +103,26 @@ DRESULT disk_write(BYTE pdrv, const BYTE *buff, DWORD sector, UINT count)
  */
 DRESULT disk_ioctl(BYTE pdrv, BYTE cmd, void *buff)
 {
-    if (pdrv == RAMDISK_PDRV)
+    bdev_t *dev = bdev_get(pdrv);
+    if (dev == NULL || !dev->ready)
     {
-        switch (cmd)
-        {
-        case CTRL_SYNC:
-            /* ramdisk 无需同步 */
-            return RES_OK;
-        case GET_SECTOR_COUNT:
-            *(DWORD *)buff = RAMDISK_SECTOR_COUNT;
-            return RES_OK;
-        case GET_SECTOR_SIZE:
-            *(WORD *)buff = RAMDISK_SECTOR_SIZE;
-            return RES_OK;
-        case GET_BLOCK_SIZE:
-            /* ramdisk 的擦除块大小为 1 个扇区 */
-            *(DWORD *)buff = 1;
-            return RES_OK;
-        default:
-            return RES_PARERR;
-        }
+        return RES_NOTRDY;
     }
-#if defined(VF2)
-    if (pdrv == SDCARD_PDRV)
+    switch (cmd)
     {
-        switch (cmd)
-        {
-        case CTRL_SYNC:
-            /* 每块写完已等卡编程结束，没有需要冲刷的缓冲 */
-            return RES_OK;
-        case GET_SECTOR_COUNT:
-            *(DWORD *)buff = (DWORD)sdcard_part_sectors;
-            return RES_OK;
-        case GET_SECTOR_SIZE:
-            *(WORD *)buff = 512;
-            return RES_OK;
-        case GET_BLOCK_SIZE:
-            *(DWORD *)buff = 1;
-            return RES_OK;
-        default:
-            return RES_PARERR;
-        }
+    case CTRL_SYNC:
+        /* 直写：每次写都已落到设备，没有需要冲刷的缓冲 */
+        return RES_OK;
+    case GET_SECTOR_COUNT:
+        *(DWORD *)buff = (DWORD)dev->nr_blocks;
+        return RES_OK;
+    case GET_SECTOR_SIZE:
+        *(WORD *)buff = BDEV_BLOCK_SIZE;
+        return RES_OK;
+    case GET_BLOCK_SIZE:
+        *(DWORD *)buff = 1;
+        return RES_OK;
+    default:
+        return RES_PARERR;
     }
-#endif
-    return RES_PARERR;
 }
