@@ -11,6 +11,7 @@
 #include "sync.h"
 #include "plic.h"
 #include "uart.h"
+#include "sdmmc.h"
 #include "sched.h"
 #include "tty.h"
 #include "slab.h"
@@ -88,6 +89,9 @@ void os_init_after_mmu_enable(uint64_t cpu_id)
          * 而 trap_init 之前 stvec 还是 0，表现是**串口完全静默**——与阶段 12 那个
          * A 位 bug 无法区分。放在后面，同一个故障会变成一条带 scause/stval 的 panic。 */
         vmm_probe_mmio();
+#endif
+#if defined(VF2) && DEBUG_SDMMC_PROBE
+        sdmmc_probe();
 #endif
 #if DEBUG_PTE_AD_PROBE
         vmm_probe_pte_ad();

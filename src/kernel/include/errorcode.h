@@ -30,6 +30,8 @@
 #define ENOTEMPTY     39
 #define ESPIPE        29
 #define EPIPE         32
+#define EIO           5
+#define ETIMEDOUT     110
 
 /** 内核内部错误码——名字保留历史命名（含数字后缀 ENOx，由于历史原因，现已不代表实际数值）
  * 值统一改写为对应的 * Linux errno 负值，
@@ -71,6 +73,9 @@
 #define ENO27_ARG_TOO_LONG (-E2BIG)  /* execve 的 argv/envp 超出内核暂存区上限 */
 
 #define ENO28_ACCESS       (-EACCES) /* faccessat：目标存在但不具备请求的权限 */
+
+#define ENO29_IO           (-EIO)       /* 设备 I/O 错误：命令/数据 CRC 错、控制器报错 */
+#define ENO30_TIMEDOUT     (-ETIMEDOUT) /* 设备在限定时间内没有响应 */
 
 /* 内核内部专用：阻塞循环被信号打断时返回它，由 signal_handle_pending() 统一翻译成
  * "重启该 syscall"或 ENO26_INTERRUPTED。**它永远不会出现在 syscall 的返回值里**，

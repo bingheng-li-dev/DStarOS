@@ -224,6 +224,11 @@
  * 打字会刷屏，只在验证时打开。 */
 #define DEBUG_EXT_IRQ 0
 
+/* SD 卡读通路探针（仅 VF2）：置 1 时在 trap_init() 之后切到 PIO、发 CMD16 确认卡处于传输态，
+ * 再读 LBA 0（MBR/GPT）与第一个分区的首扇区并打印。**只发读命令，不写卡**。
+ * 判据：CMD16 的 state=4；lba0 的 sig=55aa；part1 的 fat=1。 */
+#define DEBUG_SDMMC_PROBE 0
+
 /* 启动跟踪：置 1 时在关键初始化步骤前后经 SBI 直接输出 "[trace] ..."。
  * 走固件而不走自有 UART 驱动：卡死若发生在串口驱动里，这些行仍然出得来，
  * 从而区分"代码卡住"与"串口发不出去"。 */
