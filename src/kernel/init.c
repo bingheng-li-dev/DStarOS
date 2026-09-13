@@ -32,10 +32,38 @@ uint64_t dtb_phys_addr;
 int boot_trace_armed;
 #endif
 
+/**
+ * @brief 打印启动字符画
+ */
+static void init_print_banner(void)
+{
+    /* 此时 MMU 尚未开启、按物理地址运行：指针数组里存的是链接时的高位虚拟地址，
+     * 一解引用就访问异常（trap 还没初始化，表现为一个字都不打印就卡死）。
+     * 二维字符数组的内容就地存放，取址走 PC 相对寻址，没有这个问题。 */
+    static const char banner[][64] = {
+        " ____   ____   _                  ___   ____         /\\",
+        "|  _ \\ / ___| | |_   __ _  _ __  / _ \\ / ___|   ____/  \\____",
+        "| | | |\\___ \\ | __| / _` || '__|| | | |\\___ \\    \\        /",
+        "| |_| | ___) || |_ | (_| || |   | |_| | ___) |   /   /\\   \\",
+        "|____/ |____/  \\__| \\__,_||_|    \\___/ |____/   /___/  \\___\\",
+    };
+
+    for (uint32_t i = 0; i < sizeof(banner) / sizeof(banner[0]); i++)
+    {
+        printf("%s\n", banner[i]);
+    }
+#if defined(VF2)
+    printf("\n     RISC-V rv64 kernel  -  VisionFive 2\n");
+#else
+    printf("\n     RISC-V rv64 kernel  -  QEMU virt\n");
+#endif
+}
+
 /* 在 MMU 开启前调用，返回 satp 寄存器值 */
 void os_init_before_mmu_enable(void)
 {
     console_init();
+    init_print_banner();
     printf("DStarOS is starting...\n");
     sbi_init();
     printf("dtb: phys addr 0x%lx\n", dtb_phys_addr);
