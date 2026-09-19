@@ -13,8 +13,8 @@
 #include "sbi.h"
 #include "console.h"
 
-/* sbi.h 里 extern 声明了它，但在此之前从来没有人定义——于是 sbi_spec_is_0_1()
- * 这类判断一直是悬空的（没被调用才没暴露成链接错误）。 */
+/* sbi.h 只做 extern 声明，唯一的定义在这里。sbi_init() 探测成功前它保持默认值，
+ * 那个值代表"固件只实现了 v0.1 legacy"。 */
 unsigned long sbi_spec_version = SBI_SPEC_VERSION_DEFAULT;
 
 static long sbi_impl_id = -1;
@@ -37,27 +37,6 @@ long sbi_probe_extension(int ext)
         return 0;
     }
     return ret.value;
-}
-
-long sbi_get_mvendorid(void)
-{
-    struct sbiret ret = sbi_ecall(SBI_EXT_BASE, SBI_EXT_BASE_GET_MVENDORID,
-                                  0, 0, 0, 0, 0, 0);
-    return ret.error ? -1 : ret.value;
-}
-
-long sbi_get_marchid(void)
-{
-    struct sbiret ret = sbi_ecall(SBI_EXT_BASE, SBI_EXT_BASE_GET_MARCHID,
-                                  0, 0, 0, 0, 0, 0);
-    return ret.error ? -1 : ret.value;
-}
-
-long sbi_get_mimpid(void)
-{
-    struct sbiret ret = sbi_ecall(SBI_EXT_BASE, SBI_EXT_BASE_GET_MIMPID,
-                                  0, 0, 0, 0, 0, 0);
-    return ret.error ? -1 : ret.value;
 }
 
 /* SBI 规范附录里登记的实现 ID。只列常见的，够认出"是不是我以为的那个固件"即可。 */
