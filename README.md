@@ -156,3 +156,15 @@ saveenv
 ```
 
 单引号必须保留——原值带分号，不加引号会被拆成几条命令当场执行。只想临时走一次 TFTP 的话，直接 `run dstar` 即可，不必改 `bootcmd`。
+
+---
+
+## License
+
+DStarOS 以 **GPL-3.0-or-later** 发布，全文见 [LICENSE](LICENSE)。
+
+仓库中包含的第三方源码——Canaan K210 BSP、tinyprintf、Linux 的链表与红黑树、FatFs——
+各自保留原作者的版权与许可证，逐一列在 [THIRD-PARTY.md](THIRD-PARTY.md)；涉及的许可证
+全文存放在 `LICENSES/` 目录。
+
+RustSBI 固件与 BusyBox 的源码和二进制均未包含在本仓库中。
