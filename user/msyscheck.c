@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (C) 2021-2026 BingHeng Li <bingheng-li@outlook.com> */
+
 /* user/msyscheck.c —— 用 libc 接口复压阶段 3~8 的 syscall
  *
  * 与 user/ 下那批裸 ecall 测试程序的关系：**不是重复，是换一个客户**。

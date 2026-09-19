@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (C) 2021-2026 BingHeng Li <bingheng-li@outlook.com> */
+
 /**
  * @file sched_test.c
  * @brief 调度器回归测试（CFS/idle 类、生命周期、公平性）+ 全套测试聚合入口

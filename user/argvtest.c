@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (C) 2021-2026 BingHeng Li <bingheng-li@outlook.com> */
+
 /* user/argvtest.c —— 验证进程启动约定：argc / argv / envp / auxv 初始栈
  *
  * 这个程序有两种被启动的方式，各验一半：

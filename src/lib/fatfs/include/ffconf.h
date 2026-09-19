@@ -1,6 +1,7 @@
 /*---------------------------------------------------------------------------/
 /  FatFs - FAT file system module configuration file  R0.11 (C)ChaN, 2015
 /---------------------------------------------------------------------------*/
+/* Modified for DStarOS, 2026. See THIRD-PARTY.md for details. */
 
 #define _FFCONF 32020	/* Revision ID */
 

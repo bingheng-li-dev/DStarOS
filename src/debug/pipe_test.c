@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (C) 2021-2026 BingHeng Li <bingheng-li@outlook.com> */
+
 /**
  * @file pipe_test.c
  * @brief 管道核心读写逻辑回归测试（pipe_read/pipe_write/pipe_alloc/pipe_release/

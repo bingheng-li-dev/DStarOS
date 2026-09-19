@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (C) 2021-2026 BingHeng Li <bingheng-li@outlook.com> */
+
 /* user/timetest.c —— 验证阶段 8 的时间、定时器、身份与杂项 syscall
  *
  * 写法与 sigtest.c / memtest.c 一致：不引入 libc，syscall 全部内联 ecall。

@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (C) 2021-2026 BingHeng Li <bingheng-li@outlook.com> */
+
 /* user/init.c —— 系统的 1 号进程 /sbin/init
  *
  * 它接管的就是原来那个内核线程 init()：**同一个 PCB、同一个 pid=1**，

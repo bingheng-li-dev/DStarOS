@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (C) 2021-2026 BingHeng Li <bingheng-li@outlook.com> */
+
 /* user/hello.c —— 用户态构建流水线的测试程序
  * 不引入 libc，自带 _start 和内联 ecall 系统调用包装。
  * 行为与之前手写汇编版 user_hello.S 完全一致：write(1, "hi\n", 3); exit(0)。

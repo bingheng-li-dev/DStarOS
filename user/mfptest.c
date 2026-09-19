@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (C) 2021-2026 BingHeng Li <bingheng-li@outlook.com> */
+
 /* user/mfptest.c —— 验证浮点上下文在特权级边界与任务切换上不丢
  *
  * 为什么必须有这套：BusyBox 逼出来的。musl 在 lp64d 下的 setjmp/longjmp 会

@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (C) 2021-2026 BingHeng Li <bingheng-li@outlook.com> */
+
 /**
  * @file sync_test.c
  * @brief 信号量回归测试：sem_down 阻塞睡眠 / sem_up 唤醒、以及互斥语义

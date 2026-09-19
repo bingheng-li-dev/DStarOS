@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (C) 2021-2026 BingHeng Li <bingheng-li@outlook.com> */
+
 /* user/waittest.c —— 验证 wait4 的 pid 选择与 WNOHANG，以及放大后的 fd 表
  *
  * 这两样都是**为 ash 补的**，而不是为了补齐 POSIX：

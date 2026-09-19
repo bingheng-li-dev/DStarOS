@@ -74,6 +74,7 @@ functions.
 For further details see source code.
 regs Kusti, 23.10.2004
 */
+/* Modified for DStarOS, 2021, 2026. See THIRD-PARTY.md for details. */
 
 #ifndef __TFP_PRINTF__
 #define __TFP_PRINTF__

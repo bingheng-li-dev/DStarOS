@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (C) 2021-2026 BingHeng Li <bingheng-li@outlook.com> */
+
 /* user/ttytest.c —— 验证 TTY 行规范层 + termios/ioctl（Phase 5 Step 9）
  *
  * 与 filetest.c/pipetest.c 同样的理由：TTY 的 read(0,...) 依赖真实用户地址空间指针

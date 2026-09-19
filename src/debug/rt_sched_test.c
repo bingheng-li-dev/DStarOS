@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (C) 2021-2026 BingHeng Li <bingheng-li@outlook.com> */
+
 /**
  * @file rt_sched_test.c
  * @brief RT 调度类回归测试：跨类抢占（RT 优先于 CFS）、同优先级 SCHED_RR 轮转

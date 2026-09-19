@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (C) 2021-2026 BingHeng Li <bingheng-li@outlook.com> */
+
 /* user/segtest.c —— 验证 elf_load 正确处理"多个 PT_LOAD 共享同一物理页"的 ELF
  *
  * 本程序**必须用 user/user_dense.ld + -z max-page-size=16 链接**（见 user/Makefile），

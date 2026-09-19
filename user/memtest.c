@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (C) 2021-2026 BingHeng Li <bingheng-li@outlook.com> */
+
 /* user/memtest.c —— 验证内存管理 syscall（brk / mmap / munmap）
  *
  * 这三个 syscall 的语义全都落在"用户地址空间里能不能真的读写这块地址"上，

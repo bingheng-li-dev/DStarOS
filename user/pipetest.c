@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (C) 2021-2026 BingHeng Li <bingheng-li@outlook.com> */
+
 /* user/pipetest.c —— 验证管道（pipe2/pipe_read/pipe_write/pipe_release）
  *
  * pipe2/pipe_read/pipe_write 这批 syscall 的**唯一真实验收手段**：内核态自测

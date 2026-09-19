@@ -12,6 +12,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+/* Modified for DStarOS, 2026. See THIRD-PARTY.md for details. */
 #ifndef _RISCV_CSR_ENCODING_H
 #define _RISCV_CSR_ENCODING_H
 

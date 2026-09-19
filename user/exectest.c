@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (C) 2021-2026 BingHeng Li <bingheng-li@outlook.com> */
+
 /* user/exectest.c —— 验证 dup 与 execve
  *
  * 覆盖两个此前没被真实用户进程触发过的缺口：

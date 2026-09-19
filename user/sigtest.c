@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (C) 2021-2026 BingHeng Li <bingheng-li@outlook.com> */
+
 /* user/sigtest.c —— 验证信号（rt_sigaction/rt_sigprocmask/kill/rt_sigreturn 等）
  *
  * 信号机制的**唯一真实验收手段**：投递发生在"内核带着本进程返回 U 态"那一刻，

@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (C) 2021-2026 BingHeng Li <bingheng-li@outlook.com> */
+
 /* user/mrootfs.c —— 验证宿主机造的 rootfs 镜像真的被内核读到了
  *
  * 这是阶段 9 的关键里程碑：在此之前，根文件系统永远是内核启动时 f_mkfs 现格式化的

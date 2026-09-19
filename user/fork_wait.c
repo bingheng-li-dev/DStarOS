@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (C) 2021-2026 BingHeng Li <bingheng-li@outlook.com> */
+
 /* user/fork_wait.c —— U 态 fork/exit/wait4/COW 测试程序
  * 验证 sys_clone/sys_wait4 的 syscall 接线（此前只有内核线程测试覆盖过 do_fork/do_wait，
  * 从没有真正的用户进程调用过这两个 syscall），以及 vmm.c 里的写时复制。

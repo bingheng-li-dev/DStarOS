@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (C) 2021-2026 BingHeng Li <bingheng-li@outlook.com> */
+
 /* user/trapkill.c —— 验证"U 态触发的同步异常只杀该进程，内核照常活着"
  *
  * 阶段 9 的 9C 只把非法指令一条改成了"诊断 + 杀进程"，另外五条

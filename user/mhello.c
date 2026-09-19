@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (C) 2021-2026 BingHeng Li <bingheng-li@outlook.com> */
+
 /* user/mhello.c —— 第一个用 musl 静态链接的用户程序
  *
  * 与 user/ 下其它程序的根本不同：它**不手写 ecall**，而是走 libc。

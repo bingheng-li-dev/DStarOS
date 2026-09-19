@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (C) 2021-2026 BingHeng Li <bingheng-li@outlook.com> */
+
 /* user/filetest.c —— 验证 POSIX 文件 syscall
  *
  * 这是 openat/lseek/readv/writev/fstat/newfstatat/getdents64/mkdirat/unlinkat/

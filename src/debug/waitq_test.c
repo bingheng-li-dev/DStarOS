@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (C) 2021-2026 BingHeng Li <bingheng-li@outlook.com> */
+
 /**
  * @file waitq_test.c
  * @brief 等待队列（waitq_t）回归测试：prepare 阻塞睡眠 / wake_all 唤醒、广播不丢
