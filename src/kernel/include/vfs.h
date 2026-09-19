@@ -7,7 +7,6 @@
 
 #include "list.h"
 #include "types.h"
-#include "hlist.h"
 
 /* ============================================================
  * 路径与名称长度上限
@@ -211,7 +210,6 @@ struct file_system_type
         void *data);
     void               (*kill_sb)(super_block_t *sb);  /* 强制卸载超级块 */
     file_system_type_t *next;           /* 已注册文件系统类型单向链表中的下一个 */
-    struct hlist_head   fs_supers;      /* 同类型文件系统的所有 super_block 链表头 */
 };
 
 /* ============================================================
