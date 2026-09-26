@@ -1,6 +1,6 @@
 #!/bin/bash
 # 回归套件运行器（容器内使用）：bash scripts/regress.sh <suite> [runs]
-#   suite: sched | slab | file | pipe | tty | mem | exec | sig | time | seg | wait | trap | musl | msys | mroot | mfp | bb
+#   suite: sched | slab | dcache | vfs | file | pipe | tty | mem | exec | sig | time | seg | wait | trap | musl | msys | mroot | mfp | bb
 # 切换套件前必须自行改 src/debug/debug.h 里对应的开关（U 态那批开关互斥）再 make。
 #
 # 阶段 9 起用户程序**从 rootfs 镜像加载**，不再嵌进内核。于是多了一个陷阱：
@@ -55,6 +55,8 @@ suite_marker()
 {
     case "$1" in
         sched) echo '======== SCHED TESTS DONE:' ;;
+        dcache) echo '=== dcachetest done:' ;;
+        vfs)   echo '=== VFS test done:' ;;
         slab)  echo '=== slabtest done:' ;;
         file)  echo '=== filetest done:' ;;
         pipe)  echo '=== pipetest done:' ;;
