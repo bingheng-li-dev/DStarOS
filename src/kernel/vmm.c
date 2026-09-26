@@ -708,13 +708,65 @@ void vmm_unmap_range(mm_t *mm, virAddr_t start, virAddr_t end)
     }
 }
 
+/* 页表帧的引用计数由 get_pte() 建表时 +1，这里对称地减回去。 */
+static void free_table_frame(ppn_t ppn)
+{
+    pframe_t *frame = convert_ppn2pframe(ppn);
+    frame->reference--;
+    if (frame->reference == 0)
+    {
+        pmm_free_pages(frame);
+    }
+}
+
 /**
- * @brief 销毁进程地址空间：解映射所有 VMA，释放物理帧，释放 mm_t 本身
+ * @brief 回收用户地址空间自己的页表帧：中间级与根 PGD
+ * @param[in] mm 目标地址空间
+ * @details 用户虚拟地址全部在 USER_STACK_TOP（1 GB）以下，在 Sv39 里只占 PGD[0] 一项，
+ *   所以只遍历低半段。PGD[256..511] 是从内核页表复制来的，指向的是共享的内核中间级表，
+ *   跟着释放会把内核页表拆掉。
+ * @note 只在叶子映射已由 vmm_unmap_vma() 解完之后调用。共享内核页表的 mm 没有自己的
+ *   页表，直接返回。这些帧只能经本 mm 的页表到达，而调用时进程已不再运行，故不取 vmm_lock。
+ */
+static void free_user_page_table(mm_t *mm)
+{
+    if (mm->pgd_ppn == vmm_kernel_pgd_ppn)
+    {
+        return;
+    }
+
+    pte_t *pgd = (pte_t *)pa_to_kva(convert_ppn2pa(mm->pgd_ppn));
+    for (uint64_t i = 0; i < 256; i++)
+    {
+        if (!pte_is_valid(pgd[i]) || pte_is_readable(pgd[i]) ||
+            pte_is_writable(pgd[i]) || pte_is_executable(pgd[i]))
+        {
+            continue; /* 空项，或本身就是大页叶子——都没有下一级可回收 */
+        }
+
+        ppn_t pmd_ppn = pgd[i] >> PTE_PPN_OFFSET;
+        pte_t *pmd = (pte_t *)pa_to_kva(convert_ppn2pa(pmd_ppn));
+        for (uint64_t j = 0; j < PGSIZE / sizeof(pte_t); j++)
+        {
+            if (!pte_is_valid(pmd[j]) || pte_is_readable(pmd[j]) ||
+                pte_is_writable(pmd[j]) || pte_is_executable(pmd[j]))
+            {
+                continue;
+            }
+            free_table_frame(pmd[j] >> PTE_PPN_OFFSET);
+        }
+        free_table_frame(pmd_ppn);
+        pgd[i] = 0;
+    }
+    free_table_frame(mm->pgd_ppn);
+}
+
+/**
+ * @brief 销毁进程地址空间：解映射所有 VMA，回收页表帧，释放 mm_t 本身
  * @param[in] mm 要销毁的进程地址空间描述符
  * @details 遍历 mmap_list，对每个 VMA 依次调用 vmm_unmap_vma() 和 vmm_vma_destroy()，
- *   最后 kfree(mm)。页表中间节点帧（PMD/PTE 帧）在当前阶段不单独释放；
- *   待引入独立用户页表后，应在此处调用 free_page_table() 回收中间节点。
- * @note 调用前必须确保进程已不再运行，否则另一 hart 可能仍在使用被释放的帧。
+ *   再由 free_user_page_table() 回收该地址空间自己的页表帧，最后 kfree(mm)。
+ * @note 调用前必须确保进程已不再运行，且当前 hart 已切回内核页表——正在用的页表不能拆。
  */
 void vmm_mm_destroy(mm_t *mm)
 {
@@ -726,6 +778,7 @@ void vmm_mm_destroy(mm_t *mm)
         list_del(cur);
         vmm_vma_destroy(vma);
     }
+    free_user_page_table(mm);
     kfree(mm);
 }
 
