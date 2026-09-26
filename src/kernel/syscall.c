@@ -1436,7 +1436,6 @@ static long sys_munmap(virAddr_t addr, uint64_t len)
             }
             vmm_unmap_range(mm, start, seg_end);
             vma->vm_end = start;
-            mm->last_access = NULL;
             vmm_vma_insert(mm, tail);
         }
         else
@@ -1446,18 +1445,15 @@ static long sys_munmap(virAddr_t addr, uint64_t len)
             {
                 list_del(&vma->vma_list_linker);
                 mm->map_count--;
-                mm->last_access = NULL;
                 vmm_vma_destroy(vma);
             }
             else if (start <= vma->vm_start)
             {
                 vma->vm_start = seg_end;
-                mm->last_access = NULL;
             }
             else
             {
                 vma->vm_end = start;
-                mm->last_access = NULL;
             }
         }
 

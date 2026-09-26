@@ -34,7 +34,6 @@ struct mm_struct
 {
     uint16_t map_count;             /* vma 数量 */
     ppn_t pgd_ppn;                  /* 进程一级页表帧 */
-    vma_t *last_access;             /* 最近访问的 VMA，用于缓存加速查询 */
     virAddr_t brk_start;            /* 堆起始地址 */
     virAddr_t brk_current;          /* 堆当前地址 */
     struct list_head mmap_list;     /* VMA 链表头 */

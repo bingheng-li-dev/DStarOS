@@ -468,7 +468,6 @@ mm_t *vmm_mm_create(void)
     mm_t *ret = slab_cache_alloc(mm_cache);
     if (ret != NULL)
     {
-        ret->last_access = NULL;
         ret->map_count   = 0;
         ret->pgd_ppn     = vmm_kernel_pgd_ppn;
         ret->brk_start   = 0;

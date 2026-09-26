@@ -32,10 +32,8 @@ struct phy_frame
     pgcount_t nsize;    /* The size of this block which free or to be used. */
     uint16_t reference; /* Amount of vir page used. */
     bool can_be_alloc;    /* True:this frame is the head of a free block and can be allocated;false:this frame is in usage or it is not the head of a block. */
-    virAddr_t va;       /* Used for pra. */
     struct list_head free_list_linker;
     struct list_head free_addr_list_linker;
-    struct list_head clock_list_linker;
     kmem_cache_t *slab_cache;      /* NULL 表示非 slab 页，kfree 靠它 O(1) 分派 */
     void *slab_freelist;           /* 页内第一个空闲对象（KVA） */
     uint16_t slab_inuse;           /* 页内已分配对象数 */
