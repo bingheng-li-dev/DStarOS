@@ -181,7 +181,7 @@ void *slab_cache_alloc(kmem_cache_t *cache)
 
         spinlock_release(&cache->lock, cache_lock_key);
         pframe_t *fresh = pmm_alloc_page();
-        irq_key_t cache_lock_key = spinlock_acquire(&cache->lock);
+        cache_lock_key = spinlock_acquire(&cache->lock);
         if (fresh == NULL)
         {
             spinlock_release(&cache->lock, cache_lock_key);
