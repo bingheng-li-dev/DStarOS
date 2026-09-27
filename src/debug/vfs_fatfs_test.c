@@ -251,6 +251,80 @@ static file_system_type_t nullfs_type = {
     .next    = NULL,
 };
 
+/* 旧实现最多回溯 64 级，超出部分被静默丢掉；1 字符的目录名 66 级也才 140 来字节 */
+#define GETCWD_DEEP_LEVELS 66
+
+/* getcwd 的边界：挂载点下的 cwd、已删除的 cwd、深于 64 级的 cwd */
+static void vfs_getcwd_edge_test(void)
+{
+    char cwd[VFS_PATH_MAX];
+
+    check("chdir /dev", vfs_chdir("/dev") == ENO0_NO_ERROR);
+    check("getcwd under a mountpoint -> ok", vfs_getcwd(cwd, sizeof(cwd)) == ENO0_NO_ERROR);
+    check("getcwd under a mountpoint == \"/dev\"", strncmp(cwd, "/dev", 5) == 0);
+
+    check("mkdir /gcwd_del", vfs_mkdir("/gcwd_del", 0755) == ENO0_NO_ERROR);
+    check("chdir /gcwd_del", vfs_chdir("/gcwd_del") == ENO0_NO_ERROR);
+    check("rmdir the cwd", vfs_rmdir("/gcwd_del") == ENO0_NO_ERROR);
+    check("getcwd in a deleted dir -> NOSUCH", vfs_getcwd(cwd, sizeof(cwd)) == ENO5_NOSUCH_ENTRY);
+
+    char expect_path[VFS_PATH_MAX];
+    int elen = 0;
+    memcpy(expect_path, "/gcwd_deep", 10);
+    elen = 10;
+    check("mkdir /gcwd_deep", vfs_mkdir("/gcwd_deep", 0755) == ENO0_NO_ERROR);
+    check("chdir /gcwd_deep", vfs_chdir("/gcwd_deep") == ENO0_NO_ERROR);
+    int made = 0;
+    for (int i = 0; i < GETCWD_DEEP_LEVELS; i++)
+    {
+        if (vfs_mkdir("d", 0755) != ENO0_NO_ERROR || vfs_chdir("d") != ENO0_NO_ERROR)
+        {
+            break;
+        }
+        expect_path[elen++] = '/';
+        expect_path[elen++] = 'd';
+        made++;
+    }
+    expect_path[elen] = '\0';
+    check("built a cwd deeper than 64 levels", made == GETCWD_DEEP_LEVELS);
+    memset(cwd, 0xAA, sizeof(cwd));
+    check("getcwd deeper than 64 levels -> ok", vfs_getcwd(cwd, sizeof(cwd)) == ENO0_NO_ERROR);
+    check("getcwd deeper than 64 levels is the full path", strncmp(cwd, expect_path, VFS_PATH_MAX) == 0);
+
+    for (int i = 0; i < made; i++)
+    {
+        vfs_chdir("..");
+        vfs_rmdir("d");
+    }
+    check("chdir back to /", vfs_chdir("/") == ENO0_NO_ERROR);
+    check("rmdir /gcwd_deep", vfs_rmdir("/gcwd_deep") == ENO0_NO_ERROR);
+}
+
+/* 挂载回调成功、之后在挂载点检查上失败：回调建好的根 inode / 根目录项必须被拆掉 */
+static void vfs_mount_fail_test(void)
+{
+    vfs_dcache_shrink(0xffffffffu);
+    uint32_t dentry_before = dentry_cache->nr_inuse;
+    uint32_t inode_before  = inode_cache->nr_inuse;
+
+    file_t *reg = vfs_open("/mnt_fail_file", O_WRONLY | O_CREAT, NULL);
+    check("create a regular file to mount onto", reg != NULL);
+    if (reg)
+    {
+        vfs_close(reg);
+    }
+
+    nullfs_inodes_destroyed = 0;
+    check("mount onto a missing dir -> NOSUCH", vfs_mount("/no_such_dir", "nullfs", NULL) == ENO5_NOSUCH_ENTRY);
+    check("mount onto a regular file -> NOT_DIR", vfs_mount("/mnt_fail_file", "nullfs", NULL) == ENO9_NOT_DIR);
+    check("each failed mount tore down its root inode", nullfs_inodes_destroyed == 2);
+
+    vfs_dcache_shrink(0xffffffffu);
+    check("failed mounts leak no dentry", dentry_cache->nr_inuse == dentry_before);
+    check("failed mounts leak no inode", inode_cache->nr_inuse == inode_before);
+    check("unlink /mnt_fail_file", vfs_unlink("/mnt_fail_file") == ENO0_NO_ERROR);
+}
+
 static void vfs_unmount_test(void)
 {
     check("register nullfs", register_filesystem(&nullfs_type) == ENO0_NO_ERROR);
@@ -281,6 +355,8 @@ static void vfs_unmount_test(void)
     {
         vfs_close(con);
     }
+
+    vfs_mount_fail_test();
 
     check("rmdir /mnt2", vfs_rmdir("/mnt2") == ENO0_NO_ERROR);
     unregister_filesystem(&nullfs_type);
@@ -398,6 +474,8 @@ void vfs_test(void)
 
     check("chdir onto a regular file -> NOT_DIR",
           vfs_chdir("/testdir/sub.txt") == ENO9_NOT_DIR);
+
+    vfs_getcwd_edge_test();
 
     /* 必须切回根：后面的用例和 init 的其余流程都假定 cwd 是 "/" */
     ret = vfs_chdir("/");

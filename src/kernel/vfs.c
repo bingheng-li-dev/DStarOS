@@ -1122,6 +1122,28 @@ dentry_t *vfs_lookup(const char *path)
  * 挂载与卸载
  * ============================================================ */
 
+/* 挂载回调成功之后的失败出口：按 vfs_unmount 的顺序拆掉回调建好的根目录项、根 inode
+ * 与超级块。根目录项还被子项引用着（devfs 挂载时就建好了子项）时拆不得——超级块一销毁，
+ * 那些 inode 的 i_sb 就成了悬空指针——只能留着。 */
+static void vfs_mount_undo(dentry_t *root)
+{
+    super_block_t *sb = (root->d_inode != NULL) ? root->d_inode->i_sb : NULL;
+
+    if (root->d_ref != 1)
+    {
+        return;
+    }
+    dentry_put(root);
+    if (sb != NULL && sb->s_op != NULL && sb->s_op->unmount != NULL)
+    {
+        sb->s_op->unmount(sb);
+    }
+    if (sb != NULL)
+    {
+        destroy_super_block(sb);
+    }
+}
+
 /**
  * @brief 挂载文件系统
  * @param[in] path    挂载点路径（"/" 表示根文件系统）
@@ -1159,6 +1181,7 @@ int vfs_mount(const char *path, const char *fs_type, void *data)
     vfsmount_t *mnt = (vfsmount_t *)kmalloc(sizeof(vfsmount_t));
     if (!mnt)
     {
+        vfs_mount_undo(root_dentry);
         return ENO1_NOMORE_MEM;
     }
 
@@ -1168,6 +1191,7 @@ int vfs_mount(const char *path, const char *fs_type, void *data)
     if (!mnt->mnt_path)
     {
         kfree(mnt);
+        vfs_mount_undo(root_dentry);
         return ENO1_NOMORE_MEM;
     }
     memcpy(mnt->mnt_path, path, plen + 1);
@@ -1193,6 +1217,7 @@ int vfs_mount(const char *path, const char *fs_type, void *data)
         {
             kfree(mnt->mnt_path);
             kfree(mnt);
+            vfs_mount_undo(root_dentry);
             return ENO5_NOSUCH_ENTRY;
         }
         if (!host->d_inode || !S_ISDIR(host->d_inode->i_mode))
@@ -1200,6 +1225,7 @@ int vfs_mount(const char *path, const char *fs_type, void *data)
             dentry_put(host);
             kfree(mnt->mnt_path);
             kfree(mnt);
+            vfs_mount_undo(root_dentry);
             return ENO9_NOT_DIR;
         }
         if (host->d_mounted) /* 当前目录项已经挂载了其他文件系统 */
@@ -1207,6 +1233,7 @@ int vfs_mount(const char *path, const char *fs_type, void *data)
             dentry_put(host);
             kfree(mnt->mnt_path);
             kfree(mnt);
+            vfs_mount_undo(root_dentry);
             return ENO4_BUSY;
         }
         host->d_mounted      = mnt;
@@ -1543,9 +1570,8 @@ int vfs_close(file_t *file)
         return ENO8_NULL_POINTER;
     }
 
-    /* 引用计数减 1 */
-    file->f_count--;
-    if (file->f_count > 0)
+    /* fork / dup 给同一个 file_t 加引用时不持任何锁，这里必须原子地减 */
+    if (atomic_add(&file->f_count, -1) > 1)
     {
         return ENO0_NO_ERROR;
     }
@@ -2038,17 +2064,26 @@ int vfs_rename(const char *oldpath, const char *newpath)
         return ret;
     }
 
-    /* 成功：将原目录项移到新父目录下，更新名称。改父目录意味着子→父引用要
+    /* 磁盘上已经改名成功。新名字要先分配好再动 old_d：分配失败时只能把 old_d
+     * 从树上摘掉（同 unlink），让之后的 lookup 回到底层按新名字重建。 */
+    int nl = (int)strlen(new_name);
+    char *new_d_name = (char *)kmalloc(nl + 1);
+    if (new_d_name == NULL)
+    {
+        dentry_detach(old_d);
+        dentry_put(new_d);
+        dentry_put(old_d);
+        dentry_put(new_parent);
+        return ENO0_NO_ERROR;
+    }
+    memcpy(new_d_name, new_name, nl + 1);
+
+    /* 将原目录项移到新父目录下，更新名称。改父目录意味着子→父引用要
      * 跟着搬家——先给新父加引用，摘链改名之后再放掉旧父的那一份。 */
     dentry_t *old_parent = (old_d->d_parent != old_d) ? old_d->d_parent : NULL;
     list_del(&old_d->d_child);
     kfree(old_d->d_name);
-    int nl = (int)strlen(new_name);
-    old_d->d_name = (char *)kmalloc(nl + 1);
-    if (old_d->d_name)
-    {
-        memcpy(old_d->d_name, new_name, nl + 1);
-    }
+    old_d->d_name = new_d_name;
     old_d->d_parent = new_parent;
     dentry_get(new_parent);
     list_add(&old_d->d_child, &new_parent->d_subdirs);
@@ -2143,10 +2178,14 @@ int vfs_chdir(const char *path)
  * @brief 获取当前进程的工作目录路径
  * @param[out] buf  存放路径字符串的缓冲区
  * @param[in]  size 缓冲区大小
- * @retval ENO0_NO_ERROR     成功，buf 填入以 '/' 开头的绝对路径
- * @retval ENO8_NULL_POINTER 参数为 NULL 或 size 为 0
- * @retval ENO11_NAME_TOO_LONG 缓冲区太小
- * @note 算法：从 proc_cwd 逐级向上回溯至根，逆序拼接各分量。
+ * @retval ENO0_NO_ERROR       成功，buf 填入以 '/' 开头的绝对路径
+ * @retval ENO8_NULL_POINTER   参数为 NULL 或 size 为 0
+ * @retval ENO11_NAME_TOO_LONG 路径超过 VFS_PATH_MAX，或缓冲区太小
+ * @retval ENO5_NOSUCH_ENTRY   当前目录已被删除
+ * @details 从 proc_cwd 沿 d_parent 向上，倒着写进缓冲区尾部；遇到文件系统局部根就跳到
+ *   宿主文件系统里的挂载点目录项继续，所以挂载点下的 cwd 也能拼出完整路径。
+ *   cwd 的深度与总长不受 VFS_PATH_MAX 约束（相对路径可以一层层 chdir 进去），
+ *   所以每一步都要检查边界。
  */
 int vfs_getcwd(char *buf, size_t size)
 {
@@ -2159,61 +2198,58 @@ int vfs_getcwd(char *buf, size_t size)
         return ENO13_NO_FS;
     }
 
-    /* 若 cwd 未设置或等于根，直接返回 "/" */
     pcb_t *cur_proc = proc_get_current();
-    dentry_t *cwd = (cur_proc && cur_proc->proc_cwd)
-                    ? cur_proc->proc_cwd
-                    : vfs_root_dentry;
+    dentry_t *d = (cur_proc && cur_proc->proc_cwd) ? cur_proc->proc_cwd : vfs_root_dentry;
 
-    if (cwd == vfs_root_dentry)
+    char tmp[VFS_PATH_MAX];
+    int pos = VFS_PATH_MAX - 1;
+    tmp[pos] = '\0';
+
+    while (d != vfs_root_dentry)
     {
-        if (size < 2)
+        if (d->d_parent == d)
+        {
+            /* 文件系统局部根：跳到宿主文件系统里的挂载点目录项。已被删除的目录
+             * 同样 d_parent 指向自身，但它不是任何挂载的根 */
+            vfsmount_t *mnt = NULL;
+            irq_key_t vfs_fs_lock_key = spinlock_acquire(&vfs_fs_lock);
+            if (d->d_inode && d->d_inode->i_sb)
+            {
+                mnt = find_mount_by_sb(d->d_inode->i_sb);
+            }
+            spinlock_release(&vfs_fs_lock, vfs_fs_lock_key);
+
+            if (mnt == NULL || mnt->mnt_host_dentry == NULL || mnt->mnt_sb == NULL ||
+                mnt->mnt_sb->s_root_inode == NULL || mnt->mnt_sb->s_root_inode->i_dentry != d)
+            {
+                return ENO5_NOSUCH_ENTRY;
+            }
+            d = mnt->mnt_host_dentry;
+            continue;
+        }
+
+        int nlen = (int)strlen(d->d_name);
+        if (pos < nlen + 1)
         {
             return ENO11_NAME_TOO_LONG;
         }
-        buf[0] = '/';
-        buf[1] = '\0';
-        return ENO0_NO_ERROR;
-    }
-
-    /* 从 cwd 向上回溯，收集路径分量 */
-    /* 用临时数组保存各分量指针（最多 64 级深度）*/
-    const char *parts[64];
-    int depth = 0;
-
-    dentry_t *d = cwd;
-    while (d != vfs_root_dentry && d->d_parent != d && depth < 64)
-    {
-        parts[depth++] = d->d_name;
+        pos -= nlen;
+        memcpy(tmp + pos, d->d_name, nlen);
+        tmp[--pos] = '/';
         d = d->d_parent;
     }
 
-    /* 从后向前拼接路径 */
-    char tmp[VFS_PATH_MAX];
-    int pos = 0;
-    for (int i = depth - 1; i >= 0; i--)
+    if (pos == VFS_PATH_MAX - 1)
     {
-        tmp[pos++] = '/';
-        const char *p = parts[i];
-        while (*p && pos < VFS_PATH_MAX - 1)
-        {
-            tmp[pos++] = *p++;
-        }
-    }
-    tmp[pos] = '\0';
-
-    if (pos == 0)
-    {
-        tmp[0] = '/';
-        tmp[1] = '\0';
-        pos = 1;
+        tmp[--pos] = '/';
     }
 
-    if ((size_t)(pos + 1) > size)
+    int len = VFS_PATH_MAX - 1 - pos;
+    if ((size_t)(len + 1) > size)
     {
         return ENO11_NAME_TOO_LONG;
     }
-    memcpy(buf, tmp, pos + 1);
+    memcpy(buf, tmp + pos, len + 1);
     return ENO0_NO_ERROR;
 }
 

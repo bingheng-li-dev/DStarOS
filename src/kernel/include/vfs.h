@@ -176,7 +176,7 @@ struct file
     vfsmount_t        *f_vfsmount;  /* 文件所在的挂载点 */
     off_t              f_pos;       /* 当前读写位置（64 位，支持大文件）*/
     int                f_mode;      /* 打开模式标志（O_RDONLY/O_WRONLY/O_RDWR 等）*/
-    int                f_count;     /* 引用计数 */
+    int                f_count;     /* 引用计数；fork / dup 不持锁，一律原子增减 */
     void              *f_private;   /* 底层文件系统私有数据（如 fatfs 的 FIL* 指针）*/
     file_kind_t        f_kind;      /* 是否需要 vfs_big_lock */
 };

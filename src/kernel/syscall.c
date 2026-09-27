@@ -826,7 +826,7 @@ static long dup_fd_from(file_t *f, int from, bool cloexec)
         return newfd; /* 透传 EMFILE / EINVAL */
     }
 
-    f->f_count++;
+    atomic_add(&f->f_count, 1);
     proc_fd_install(newfd, f);
     if (cloexec)
     {
@@ -991,7 +991,7 @@ static long sys_dup3(int oldfd, int newfd, int flags)
         /* newfd 已占用：先关闭。oldfd 仍持有 f 的引用，即便二者是同一 file_t 也不会被提前释放 */
         proc_fd_close(newfd);
     }
-    f->f_count++;
+    atomic_add(&f->f_count, 1);
     proc_fd_install(newfd, f);
     /* dup3 的 flags 里只有 O_CLOEXEC 有意义（此前是 (void)flags 丢弃，现已接上）*/
     if (flags & O_CLOEXEC)

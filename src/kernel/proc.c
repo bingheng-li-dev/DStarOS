@@ -141,8 +141,11 @@ int16_t do_fork(uint32_t clone_flags, uintptr_t stack, intstkf_t *regs)
     new_proc->proc_cwd = proc_get_current()->proc_cwd;
     if (new_proc->proc_cwd)
     {
-        /* 增加 cwd 目录项的引用计数，防止父进程 chdir 后 dentry 被释放 */
+        /* d_ref 的增减一律在大锁内：别的 hart 可能正对同一个目录项 dentry_put。
+         * 只在真有 cwd 时才取锁，理由同 do_exit 归还 cwd 那处。 */
+        vfs_lock();
         dentry_get_pub(new_proc->proc_cwd);
+        vfs_unlock();
     }
 
     /* 子进程继承父进程的 fd 表：浅拷贝指针 + 每个 file_t 的 f_count++（父子共享打开文件与偏移）*/
@@ -1820,7 +1823,7 @@ int proc_fd_copy(pcb_t *dst, pcb_t *src)
         dst->proc_fd_flags[i] = src->proc_fd_flags[i]; /* FD_CLOEXEC 随 fork 继承，exec 才清 */
         if (src->proc_fds[i])
         {
-            src->proc_fds[i]->f_count++;
+            atomic_add(&src->proc_fds[i]->f_count, 1);
         }
     }
 
@@ -1900,9 +1903,9 @@ int proc_install_stdio(void)
     }
 
     proc_fd_install(0, con);
-    con->f_count++;
+    atomic_add(&con->f_count, 1);
     proc_fd_install(1, con);
-    con->f_count++;
+    atomic_add(&con->f_count, 1);
     proc_fd_install(2, con);
 
     return ENO0_NO_ERROR;
