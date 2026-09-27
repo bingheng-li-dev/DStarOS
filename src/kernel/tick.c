@@ -83,7 +83,7 @@ void tick_int_handler(void)
 #if DEBUG_TICK
     if (cpu_get_current()->tick % 100 == 0)
     {
-        printf("core %ld : %ld ticks\n", cpu_get_current()->tick);
+        printf("core %ld : %ld ticks\n", cpu_get_core_id(), cpu_get_current()->tick);
     }
 #endif
     spinlock_release(&tick_lock, tick_lock_key);

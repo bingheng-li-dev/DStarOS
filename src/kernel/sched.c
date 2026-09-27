@@ -394,7 +394,6 @@ void sched_init(void)
     run_queue.rt.bitmap = 0;
     run_queue.rt.nr_running = 0;
 
-    INIT_LIST_HEAD(&sleeping_tasks);
     spinlock_init(&sleeping_tasks_lock);
 }
 
