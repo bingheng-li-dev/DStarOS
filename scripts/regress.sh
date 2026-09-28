@@ -124,9 +124,13 @@ for i in $(seq 1 "$runs"); do
     # 出现时测试早已跑完，不能算失败。
     if echo "$out" | grep -vF '[RustSBI]' | grep -qE 'panic|Zombie'; then
         reason="panic/zombie"
-    # 单条断言的失败标记也在单次 write 里，比数汇总行里的数字可靠
-    elif echo "$out" | grep -qE '(  FAIL: |  \[FAIL\] )'; then
+    # 单条断言的失败标记也在单次 write 里，比数汇总行里的数字可靠；
+    # 各套件写法不一（"  FAIL: "、"  [FAIL] "、"[slabtest] FAIL: "、exectest 的 "EXEC FAILED"），缺一种就漏判一套
+    elif echo "$out" | grep -qE '(  FAIL: |  \[FAIL\] |\] FAIL: |EXEC FAILED)'; then
         reason="assertion failed"
+    # 汇总行本身也要看：收尾标记不论成败都会打出来
+    elif echo "$out" | grep -qE 'done: [0-9]+ pass +[1-9][0-9]* fail'; then
+        reason="nonzero fail count"
     elif [ -n "$marker" ] && ! echo "$out" | grep -qF "$marker"; then
         reason="suite did not finish (no '$marker')"
     fi
