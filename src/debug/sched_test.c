@@ -14,6 +14,10 @@
  *   worker 通过全局变量把结果回传给 init（单核协作式，无真正并发，用 volatile 表意）。
  */
 
+#include "debug.h"
+
+#if DEBUG_SUITE == SUITE_SCHED
+
 #include "console.h"
 #include "proc.h"
 #include "sched.h"
@@ -451,3 +455,5 @@ void run_sched_tests(void)
     printf("\n======== SCHED TESTS DONE: %d pass  %d fail ========\n\n",
            sched_test_pass, sched_test_fail);
 }
+
+#endif /* DEBUG_SUITE == SUITE_SCHED */

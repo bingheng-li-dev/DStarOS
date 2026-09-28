@@ -11,6 +11,10 @@
  *   测试一致：init 作为驱动任务，通过 sched_schedule 主动让出等 worker 跑到阻塞点。
  */
 
+#include "debug.h"
+
+#if DEBUG_SUITE == SUITE_SCHED
+
 #include "console.h"
 #include "suites.h"
 #include "proc.h"
@@ -152,3 +156,5 @@ void waitq_broadcast_test(void)
     sched_test_check("reaped all 3 broadcast workers", reaped == WQ_BROADCAST_N);
     sched_test_check("wake_all woke every waiter (none lost)", wqb_woken_count == WQ_BROADCAST_N);
 }
+
+#endif /* DEBUG_SUITE == SUITE_SCHED */

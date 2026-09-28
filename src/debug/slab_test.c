@@ -290,8 +290,8 @@ static void test_reclaim(void)
     pgcount_t before = pmm_free_list.fnsize;
     slab_reclaim_all();
     pgcount_t after = pmm_free_list.fnsize;
-    /* 只打印不断言："回收前后空闲页数不减"的余量只有 1 页，另一个 hart 上的 vmm_test()
-     * 随时可能借走一页。回收真正要保证的结果由下一条断言覆盖：大块分配拿得到。 */
+    /* 只打印不断言："回收前后空闲页数不减"的余量只有 1 页，其它 hart 随时可能借走一页。
+     * 回收真正要保证的结果由下一条断言覆盖：大块分配拿得到。 */
     printf("[slabtest] reclaim: pmm_free_list.fnsize %d -> %d\n", before, after);
 
     void *big = kmalloc(64 * PGSIZE);
@@ -308,7 +308,7 @@ static void test_reclaim(void)
     release_big_blocks(n1);
 
     /* 判据是"再来一轮还能不能拿到同样多的块"，而不是把全局空闲页数跟快照对齐：
-     * 另一个 hart 上的 vmm_test() 会临时占着若干页，全局计数里混着别人的账。
+     * 其它 hart 可能临时占着若干页，全局计数里混着别人的账。
      * 块粒度 16 页远大于这点噪声，而且"还能再拿到 n 块"更强——它要求页真的回到 PMM
      * 并重新合并成了连续块。 */
     int n2 = exhaust_big_blocks();

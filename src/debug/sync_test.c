@@ -10,6 +10,10 @@
  *   端到端验证 sleep(UNINTERRUPTIBLE)→sched_schedule 与 wakeup→sched_activate 这条链路。
  */
 
+#include "debug.h"
+
+#if DEBUG_SUITE == SUITE_SCHED
+
 #include "console.h"
 #include "suites.h"
 #include "proc.h"
@@ -108,3 +112,5 @@ void sync_mutex_test(void)
     printf("  shared_counter=%d (expect %d)\n", shared_counter, MTX_WORKERS * MTX_ITERS);
     sched_test_check("mutex kept counter correct", shared_counter == MTX_WORKERS * MTX_ITERS);
 }
+
+#endif /* DEBUG_SUITE == SUITE_SCHED */

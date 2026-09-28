@@ -1,6 +1,10 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright (C) 2021-2026 BingHeng Li <bingheng-li@outlook.com> */
 
+#include "debug.h"
+
+#if DEBUG_SUITE == SUITE_VFS
+
 #include "sbi.h"
 #include "console.h"
 #include "kmalloc.h"
@@ -498,3 +502,5 @@ void vfs_test(void)
     vfs_unlock();
     printf("=== VFS test done: %d pass  %d fail ===\n\n", vfs_pass, vfs_fail);
 }
+
+#endif /* DEBUG_SUITE == SUITE_VFS */

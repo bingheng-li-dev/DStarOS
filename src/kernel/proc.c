@@ -142,10 +142,6 @@ int16_t do_fork(uint32_t clone_flags, uintptr_t stack, intstkf_t *regs)
     /* 子进程继承父进程的 fd 表：浅拷贝指针 + 每个 file_t 的 f_count++（父子共享打开文件与偏移）*/
     proc_fd_copy(new_proc, proc_get_current());
 
-#if DEBUG_PROC_do_fork
-    printf("do_fork::pid:%d\n", pid);
-#endif
-
     /* 父子链与 proc_parent 一律在 proc_list_lock 下改：退出的进程会把孤儿过继给
      * init，与 init 自己的 do_wait 在不同 hart 上并发操作同一条 proc_children */
     irq_key_t plist_key = spinlock_acquire(&proc_list_lock);
@@ -829,25 +825,12 @@ void proc_init(void)
     cpu_get_current()->idle_proc = idle;
     sched_set_current(idle);
 
-#if DEBUG_PROC_proc_init
-    printf("%s::TaskCurrent->need_resched:%d TaskIdle->need_resched %d\n", 
-        __FUNCTION__, proc_get_current()->need_resched, idle->need_resched);
-    printf("%s::TaskCurrent addr:%lx TaskIdle addr %lx\n", 
-        __FUNCTION__, (intptr_t)proc_get_current(), (intptr_t)idle);
-#endif
-
     if (cpu_get_core_id() == 0)
     {
         int16_t id_init = create_kernel_thread_by_fork((void *)init, NULL, 0);
         pcb_t *pcb_init = find_proc_by_pid(id_init);
         const char *name = "init";
         set_proc_name(pcb_init, name);
-
-#if DEBUG_PROC_proc_init
-        printf("%s::pcb_init pid:%d\n", __FUNCTION__, id_init);
-        printf("%s::pcb_init addr:%lx\n", __FUNCTION__, (intptr_t)pcb_init);
-#endif
-
     }
 }
 
@@ -920,11 +903,6 @@ static pcb_t *alloc_new_proc(void)
         pcb->proc_umask = 0022;
         pcb->proc_clear_child_tid = 0;
         pcb->proc_sum_exec_runtime_children = 0;
-
-
-#if DEBUG_PROC_allocNewProc
-        printf("alloc_new_proc::new pcb addr:%lx,sizeof(pcb_t):%ld\n", (intptr_t)pcb, sizeof(pcb_t));
-#endif
     }
     return pcb;
 }
@@ -1017,9 +995,6 @@ static pcb_t *create_first_proc_idle(void)
         task_count = task_count + 1;
         spinlock_release(&proc_list_lock, plist_key);
     }
-#if DEBUG_PROC_createFirstProcIdle
-    printf("create_first_proc_idle::idle->need_resched:%d\n", idle->need_resched);
-#endif
     return idle;
 }
 
@@ -1036,9 +1011,6 @@ static pcb_t *find_proc_by_pid(int16_t pid)
             currentPcb = list_entry(currentProc, pcb_t, proc_list_linker);
             if (currentPcb->proc_pid == pid)
             {
-#if DEBUG_PROC_findProcByPid
-                printf("find_proc_by_pid::currentPcb->proc_pid:%d,currentPcb->proc_pname:%s\n", currentPcb->proc_pid, currentPcb->proc_pname);
-#endif
                 spinlock_release(&proc_list_lock, plist_key);
                 return currentPcb;
             }
@@ -1172,17 +1144,6 @@ void idle(void)
 {
     while (1)
     {
-#if DEBUG_PROC_idle
-        pcb_t *cur = proc_get_current();
-        pcb_t *my_idle = cpu_get_current()->idle_proc;
-        printf("%s::TaskCurrent->need_resched:%d TaskIdle->need_resched %d\n",
-            __FUNCTION__, cur->need_resched, my_idle->need_resched);
-        printf("%s::TaskCurrent->proc_pname:%s TaskIdle->proc_pname %s\n",
-            __FUNCTION__, cur->proc_pname, my_idle->proc_pname);
-        printf("%s::TaskCurrent->proc_pid:%d TaskIdle->proc_pid %d\n",
-            __FUNCTION__, cur->proc_pid, my_idle->proc_pid);
-#endif
-
         /* 每轮都调度，不靠 need_resched 当门槛：本 hart 空转时没人会替它置这个标志，
          * 那样它永远看不到别的 hart 刚放进共享就绪队列的任务。 */
         sched_schedule();
@@ -1363,24 +1324,6 @@ void proc_run_user_program(const char *path, const char *const argv[], int argc)
 static int16_t init(void)
 {
     printf("%s::Hello! I'm the init process!!\n", __FUNCTION__);
-
-#if DEBUG_PROC_init
-    /* 验证内核线程 satp 正确：switch_to 切换后，通过 KVA 读写新分配的物理帧。
-     * 若 satp 被 switch_to 写成 0（BARE 模式），此处访问高位 VA 会触发 access fault。 */
-    pframe_t *t_frame = pmm_alloc_page();
-    if (!t_frame)
-    {
-        panic("init test: pmm_alloc_page returned NULL");
-    }
-    volatile uint64_t *tp = (volatile uint64_t *)convert_pframe2kva(t_frame);
-    *tp = 0xabcd1234ef567890UL;
-    if (*tp != 0xabcd1234ef567890UL)
-    {
-        panic("init test: kernel thread KVA FAILED - satp incorrect after switch_to");
-    }
-    pmm_free_pages(t_frame);
-    printf("[init] kernel thread KVA after switch_to: PASS\n");
-#endif
 
 #if DEBUG_SUITE
     debug_suite_run();

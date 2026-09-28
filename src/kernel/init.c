@@ -23,10 +23,6 @@
 #include "fdt.h"
 #include "probes.h"
 
-#if DEBUG_INIT_main
-extern int main(int argc, char **args);
-#endif
-
 /* 固件（OpenSBI/RustSBI）或 U-Boot booti 通过 a1 传进来的 DTB 物理地址，
  * 由 startup.S 在 bss 清零之后存入。时基自检与 hart 探测都要读它。 */
 uint64_t dtb_phys_addr;
@@ -183,10 +179,6 @@ void os_init_after_mmu_enable(uint64_t cpu_id)
         printf("core %ld init done\n", cpu_get_core_id());
 
         proc_init();     /* hart 0 的 idle + init；放在最后，此后被抢占都无所谓 */
-
-#if DEBUG_INIT_main_core0
-        main(0, (void *)0);
-#endif
     }
     else
     {
@@ -198,19 +190,7 @@ void os_init_after_mmu_enable(uint64_t cpu_id)
         tick_init();
         proc_init();
         printf("core %ld init done\n", cpu_get_core_id());
-#if DEBUG_INIT_main_core1
-        main(0, (void *)0);
-#endif
     }
-
-#if DEBUG_INIT_main_bothcore
-    main(0, (void *)0);
-#endif
-
-#if DEBUG_INIT_os_init
-    while (1)
-        ;
-#endif
 
     idle(); /* 当前执行上下文成为 idle 线程，永不返回 */
     sbi_shutdown(); /* unreachable */

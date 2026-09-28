@@ -21,9 +21,6 @@ static uint64_t timebase = TICK_PERIOD_COUNTS;
 static void tick_set_next_int(uint64_t stime)
 {
     sbi_set_timer(tick_read_time() + stime);
-#if DEBUG_TICK
-    printf("++ setup timer interrupts\n");
-#endif
 }
 
 /**
@@ -85,12 +82,6 @@ void tick_int_handler(void)
 {
     irq_key_t tick_lock_key = spinlock_acquire(&tick_lock);
     cpu_get_current()->tick += 1;
-#if DEBUG_TICK
-    if (cpu_get_current()->tick % 100 == 0)
-    {
-        printf("core %ld : %ld ticks\n", cpu_get_core_id(), cpu_get_current()->tick);
-    }
-#endif
     spinlock_release(&tick_lock, tick_lock_key);
     /* 以下几步都在 tick_lock 释放之后做，它们各自要抢别的锁：sched_task_tick 抢
      * run_queue.lock，tty_poll_input 抢 tty_lock 并可能经 wakeup 再抢就绪队列锁。 */

@@ -10,6 +10,10 @@
  *   完成，故用 proc_find_by_pid 拿到 pcb，而非 worker 自己设——自己设会太晚，见 rr 测试注释）。
  */
 
+#include "debug.h"
+
+#if DEBUG_SUITE == SUITE_SCHED
+
 #include "console.h"
 #include "suites.h"
 #include "proc.h"
@@ -252,3 +256,5 @@ void rt_rr_rotation_test(void)
     sched_test_check("RR rotates (frequent handovers, no run-to-completion)",
                      total > 0 && handovers >= total / 2);
 }
+
+#endif /* DEBUG_SUITE == SUITE_SCHED */

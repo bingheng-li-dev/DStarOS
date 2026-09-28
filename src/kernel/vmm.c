@@ -710,14 +710,14 @@ void vmm_page_fault_handler(virAddr_t badva, int fault_type)
 
             if (old_frame->reference == 1)
             {
-#if DEBUG_VMM_page_fault_handler
+#if DEBUG_COW
                 printf("vmm: cow in-place va=0x%lx\n", page_va);
 #endif
                 *ptep = pte_create(old_ppn, flags);
             }
             else
             {
-#if DEBUG_VMM_page_fault_handler
+#if DEBUG_COW
                 printf("vmm: cow duplicate va=0x%lx refs=%u\n", page_va, old_frame->reference);
 #endif
                 pframe_t *new_frame = slab_alloc_page_retry();

@@ -15,6 +15,10 @@
  *   最贴近真实使用的验证方式。
  */
 
+#include "debug.h"
+
+#if DEBUG_SUITE == SUITE_SCHED
+
 #include "console.h"
 #include "suites.h"
 #include "proc.h"
@@ -536,3 +540,5 @@ void run_pipe_tests(void)
     pipe_release_read_then_write_epipe_test();
     pipe_close_on_exec_test();
 }
+
+#endif /* DEBUG_SUITE == SUITE_SCHED */

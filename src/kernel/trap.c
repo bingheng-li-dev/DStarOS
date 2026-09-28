@@ -108,12 +108,6 @@ void local_intr_disable(void)
 void local_intr_enable(void)
 {
     set_csr(sstatus, SSTATUS_SIE);
-#if DEBUG_LOCK_irq_enable
-    /* 不能用 printf：它会经 ConsoleLock 绕回本函数无限递归，只能走 SBI 直出。 */
-    const char *msg = "local_intr_enable::irq enabled!!\n";
-    for (const char *p = msg; *p; p++)
-        sbi_console_putchar((int)*p);
-#endif
 }
 
 static bool get_local_intr(void)
@@ -190,23 +184,12 @@ static void trap_dispatch(intstkf_t *sp)
                                    (cause == CAUSE_FAULT_LOAD) ? 1 : 2);
             return;
         case CAUSE_FAULT_INSTRUCTION_PAGE:
-#if DEBUG_VMM_page_fault_handler
-            printf("Instruction page fault\n");
-#endif
             vmm_page_fault_handler((virAddr_t)sp->sbadaddr, 0);
             return;
         case CAUSE_FAULT_LOAD_PAGE:
-#if DEBUG_VMM_page_fault_handler
-            printf("Load page fault\n");
-            printf("sbadaddr=0x%lx\n", sp->sbadaddr);
-#endif
             vmm_page_fault_handler((virAddr_t)sp->sbadaddr, 1);
             return;
         case CAUSE_FAULT_STORE_PAGE:
-#if DEBUG_VMM_page_fault_handler
-            printf("Store page fault\n");
-            printf("sbadaddr=0x%lx\n", sp->sbadaddr);
-#endif
             vmm_page_fault_handler((virAddr_t)sp->sbadaddr, 2);
             return;
         case CAUSE_USER_ECALL:

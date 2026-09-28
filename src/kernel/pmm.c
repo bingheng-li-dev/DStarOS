@@ -84,11 +84,6 @@ void pmm_init(void)
     pmm_free_addr_list.fnsize = ppn_free_amount;
     list_add(&(free_frame_begin->free_addr_list_linker), &(pmm_free_addr_list.list_linker));
 
-#if DEBUG_MMU_mm_init
-    printf("ppn_free_amount:%u\n", ppn_free_amount);
-    printf("pmm_free_list.fnsize:%u, pmm_free_addr_list.fnsize:%u\n", pmm_free_list.fnsize, pmm_free_addr_list.fnsize);
-#endif
-
     printf("pmm inited!\n");
 }
 
@@ -159,10 +154,6 @@ pframe_t *pmm_alloc_pages(pgcount_t nsize)
         memset(zero_dst, 0, (size_t)nsize * PGSIZE);
 
         ret->nsize = nsize;
-
-#if DEBUG_MMU_mm_alloc
-        printf("pmm_alloc_pages::Frame has been allocated!ppn:%ld,pa:%08lx\n", convert_pframe2ppn(ret), convert_pframe2pa(ret));
-#endif
     }
 
 f1:
@@ -197,16 +188,7 @@ void pmm_free_pages(pframe_t *base_frame)
         current_frame->slab_cache = NULL;
     }
 
-#if DEBUG_MMU_mm_dealloc
-    ppn_t ppn_dealloc;
-    ppn_dealloc = convert_pframe2ppn(base_frame);
-#endif
-
     BFallocator.bffa_insert_and_merge(base_frame, nsize);
-
-#if DEBUG_MMU_mm_dealloc
-    printf("pmm_free_pages::Frame has been deallocated!ppn:%ld,pa:%08lx,nsize:%u\n", ppn_dealloc, convert_ppn2pa(ppn_dealloc), nsize);
-#endif
 
     spinlock_release(&pmm_lock, PmmLock_key);
 }
@@ -218,9 +200,6 @@ static pframe_t *delete_and_reinsert(pgcount_t nsize)
     list_for_each(current_entry, &(pmm_free_list.list_linker))
     {
         current_frame = list_entry(current_entry, pframe_t, free_list_linker);
-#if DEBUG_MMU_deleteAndReinsert
-        printf("delete_and_reinsert::current_frame ppn:%ld,nsize:%u\n", convert_pframe2ppn(current_frame), current_frame->nsize);
-#endif
         if (current_frame->nsize >= nsize)
         {
             ret = current_frame;
@@ -261,9 +240,6 @@ static pframe_t *delete_and_reinsert(pgcount_t nsize)
         pmm_free_list.fnsize = pmm_free_list.fnsize - nsize;
         pmm_free_addr_list.fnsize = pmm_free_addr_list.fnsize - nsize;
     }
-#if DEBUG_MMU_deleteAndReinsert
-    printf("delete_and_reinsert::pmm_free_list.fnsize:%u,pmm_free_addr_list.fnsize:%u\n", pmm_free_list.fnsize, pmm_free_addr_list.fnsize);
-#endif
     return ret;
 }
 
@@ -320,11 +296,6 @@ static void insert_and_merge(pframe_t *base_frame, pgcount_t nsize)
     }
     pframe_t *merged_frame = base_frame;
 
-#if DEBUG_MMU_insertAndMerge
-    printf("insert_and_merge::base_frame:%ld prev_frame_in_addr_list:%ld next_frame_in_addr_list:%ld\n", convert_pframe2ppn(base_frame),
-           convert_pframe2ppn(prev_frame_in_addr_list), convert_pframe2ppn(next_frame_in_addr_list));
-#endif
-
     /* 先与后面的合并，因为可能存在需要同时合并前面和后面的情况。 */
     pframe_t *frame_closest_after = base_frame + base_frame->nsize;
     if (next_frame_in_addr_list != NULL)
@@ -349,10 +320,6 @@ static void insert_and_merge(pframe_t *base_frame, pgcount_t nsize)
             merged_frame = prev_frame_in_addr_list;
         }
     }
-
-#if DEBUG_MMU_insertAndMerge
-    printf("insert_and_merge::merged_frame ppn:%ld,merged_frame->nsize %u\n", convert_pframe2ppn(merged_frame), merged_frame->nsize);
-#endif
 
     pmm_free_list.fnsize = pmm_free_list.fnsize + nsize;
     if (list_empty(&(pmm_free_list.list_linker)))
