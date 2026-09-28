@@ -85,43 +85,31 @@ static void tty_echo_str(const char *s)
     }
 }
 
-/**
- * @brief 行规范层：把一个从串口读到的字符喂给 TTY
- */
-void tty_input_push(char c)
+/* raw 模式：每个字符自成一行，特殊键处理全部跳过——^U/退格在 raw 模式下是普通字节，
+ * 交给用户程序自己解释。以下 tty_input_* 均由 tty_input_push 持 g_tty.lock 调用。 */
+static void tty_input_raw(char c)
 {
-    irq_key_t g_tty_lock_key = spinlock_acquire(&g_tty.lock);
-
-    /* 1. ICRNL：串口送来的 \r 当作行结束，放最前面，后面所有判断只需认 \n */
-    if (c == '\r' && (g_tty.tio.c_iflag & ICRNL))
+    if (g_tty.edit_pos - g_tty.read_pos < TTY_BUF_SIZE)
     {
-        c = '\n';
+        g_tty.buf[g_tty.edit_pos % TTY_BUF_SIZE] = c;
+        g_tty.edit_pos++;
+        g_tty.line_pos = g_tty.edit_pos;
+        if (g_tty.tio.c_lflag & ECHO)
+        {
+            tty_echo(c);
+        }
+        waitq_wake_all(&g_tty.wq_read);
     }
-
-    /* 2. raw 模式短路：每个字符自成一行，后面的特殊键处理全部跳过——
-     * ^U/退格在 raw 模式下是普通字节，交给用户程序自己解释。 */
-    if (!(g_tty.tio.c_lflag & ICANON))
+    else
     {
-        if (g_tty.edit_pos - g_tty.read_pos < TTY_BUF_SIZE)
-        {
-            g_tty.buf[g_tty.edit_pos % TTY_BUF_SIZE] = c;
-            g_tty.edit_pos++;
-            g_tty.line_pos = g_tty.edit_pos;
-            if (g_tty.tio.c_lflag & ECHO)
-            {
-                tty_echo(c);
-            }
-            waitq_wake_all(&g_tty.wq_read);
-        }
-        else
-        {
-            tty_echo('\a');
-        }
-        spinlock_release(&g_tty.lock, g_tty_lock_key);
-        return;
+        tty_echo('\a');
     }
+}
 
-    /* 3. VINTR（^C）与 VQUIT（^\），仅当 ISIG 打开：丢弃整个未提交半行，
+/* canonical 模式的特殊键，处理了返回 true */
+static bool tty_input_special(char c)
+{
+    /* VINTR（^C）与 VQUIT（^\），仅当 ISIG 打开：丢弃整个未提交半行，
      * 并给前台进程组发信号。这里是中断上下文、手里还攥着 tty->lock，所以只能走
      * signal_send_group 这条"置位 + 唤醒"的路径；真正的投递发生在目标自己返回 U 态
      * 那一刻（最迟一个 tick 之后）。锁序 tty->lock → proc_list_lock → sighand->lock
@@ -134,11 +122,10 @@ void tty_input_push(char c)
         tty_echo_str(is_intr ? "^C\n" : "^\\\n");
         signal_send_group(g_tty.foreground_pgid, is_intr ? SIGINT : SIGQUIT);
         waitq_wake_all(&g_tty.wq_read);
-        spinlock_release(&g_tty.lock, g_tty_lock_key);
-        return;
+        return true;
     }
 
-    /* 4. VKILL（^U）：杀掉整个未提交半行（简化：不做逐字符退格的擦除序列） */
+    /* VKILL（^U）：杀掉整个未提交半行（简化：不做逐字符退格的擦除序列） */
     if (c == (char)g_tty.tio.c_cc[VKILL])
     {
         g_tty.edit_pos = g_tty.line_pos;
@@ -146,11 +133,10 @@ void tty_input_push(char c)
         {
             tty_echo('\n');
         }
-        spinlock_release(&g_tty.lock, g_tty_lock_key);
-        return;
+        return true;
     }
 
-    /* 5. VERASE（DEL 0x7F 或 ^H 0x08，不同终端送的不一样，都要认）：退一格。
+    /* VERASE（DEL 0x7F 或 ^H 0x08，不同终端送的不一样，都要认）：退一格。
      * 只能退到 line_pos，不能把已提交的行退回来、更不能退到已被读走的字节。 */
     if (c == (char)g_tty.tio.c_cc[VERASE] || c == 0x08)
     {
@@ -162,11 +148,10 @@ void tty_input_push(char c)
                 tty_echo_str("\b \b");
             }
         }
-        spinlock_release(&g_tty.lock, g_tty_lock_key);
-        return;
+        return true;
     }
 
-    /* 6. VEOF（^D）：字节本身不入缓冲、不回显。
+    /* VEOF（^D）：字节本身不入缓冲、不回显。
      * 行首按下：把位置存进 eof_queue，tty_read 在 read_pos 追到它时返回 0；队列满则响铃丢弃。
      * 行中按下：立即提交这半行，不动 eof_queue——里面是更早的 ^D，仍要依次交付。 */
     if (c == (char)g_tty.tio.c_cc[VEOF])
@@ -187,15 +172,17 @@ void tty_input_push(char c)
             g_tty.line_pos = g_tty.edit_pos;
         }
         waitq_wake_all(&g_tty.wq_read);
-        spinlock_release(&g_tty.lock, g_tty_lock_key);
-        return;
+        return true;
     }
+    return false;
+}
 
-    /* 7. 普通字符：缓冲满则丢弃并响铃；否则入队，\n 触发整行提交并唤醒读者 */
+/* canonical 模式的普通字符：缓冲满则丢弃并响铃；否则入队，\n 触发整行提交并唤醒读者 */
+static void tty_input_char(char c)
+{
     if (g_tty.edit_pos - g_tty.read_pos >= TTY_BUF_SIZE)
     {
         tty_echo('\a');
-        spinlock_release(&g_tty.lock, g_tty_lock_key);
         return;
     }
     g_tty.buf[g_tty.edit_pos % TTY_BUF_SIZE] = c;
@@ -209,6 +196,30 @@ void tty_input_push(char c)
         g_tty.line_pos = g_tty.edit_pos;
         waitq_wake_all(&g_tty.wq_read);
     }
+}
+
+/**
+ * @brief 行规范层：把一个从串口读到的字符喂给 TTY
+ */
+void tty_input_push(char c)
+{
+    irq_key_t g_tty_lock_key = spinlock_acquire(&g_tty.lock);
+
+    /* ICRNL：串口送来的 \r 当作行结束，放最前面，后面所有判断只需认 \n */
+    if (c == '\r' && (g_tty.tio.c_iflag & ICRNL))
+    {
+        c = '\n';
+    }
+
+    if (!(g_tty.tio.c_lflag & ICANON))
+    {
+        tty_input_raw(c);
+    }
+    else if (!tty_input_special(c))
+    {
+        tty_input_char(c);
+    }
+
     spinlock_release(&g_tty.lock, g_tty_lock_key);
 }
 
