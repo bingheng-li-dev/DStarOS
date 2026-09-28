@@ -8,14 +8,7 @@
 #include "console.h"
 #include "fdt.h"
 #include "stringops.h"
-
-extern uint64_t cpu_get_core_id_asm(void);
-extern void cpu_set_core_id_asm(uint64_t core_id);
-
-/* startup.S 在 _start 里记下的引导核 hartid（未经映射的原始值） */
-extern uint64_t boot_hartid_raw;
-/* startup.S 里的每核引导栈数组，按逻辑 cpu 号分格 */
-extern char boot_stacks[];
+#include "startup.h"
 
 static cpu_t cpus[CORE_NUMBER];
 
@@ -184,8 +177,6 @@ uint64_t cpu_get_hartid(int cpu_id)
  */
 int cpu_start_secondary_hart(uint16_t cpu_id)
 {
-    extern char _start[];
-
     if (cpu_id == 0 || cpu_id >= cpu_present_count)
     {
         return SBI_ERR_INVALID_PARAM;

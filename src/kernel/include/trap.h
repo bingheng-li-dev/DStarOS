@@ -89,6 +89,8 @@ _Static_assert(sizeof(struct int_stackframe) == 35 * 8,
 #define __local_intr_restore(x) __intr_restore(x)
 
 void trap_init(void);
+/* cpua.S：stvec 指向 trap 入口，sscratch 清零 */
+void trap_init_asm(void);
 /* 关闭当前CPU的中断。 */
 void local_intr_disable(void);
 /* 打开当前CPU的中断。 */

@@ -175,6 +175,10 @@ struct proc_control_block
 };
 
 extern void switch_to(ctx_t *from, ctx_t *to);
+/* cpua.S：从 regs 恢复整个 trap 帧并 sret */
+void fork_out_asm(intstkf_t *regs) __attribute__((noreturn));
+/* cpua.S：内核线程的第一站，调用 s0 指向的函数（参数 s1），返回后 do_exit */
+void kernel_thread_entry(void);
 
 char *set_proc_name(pcb_t *proc, const char *name);
 int16_t do_fork(uint32_t clone_flags, uintptr_t stack, intstkf_t *regs);

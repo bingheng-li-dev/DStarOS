@@ -794,7 +794,6 @@ int16_t create_kernel_thread_by_fork(void *func(void *), void *args, uint32_t cl
     /* SPP=1 返回 S 态；SPIE=1 返回后开中断；SIE=0 模拟"在 trap 里"的环境 */
     regs.sstatus = ((read_csr(sstatus) | SSTATUS_SPP | SSTATUS_SPIE) & ~SSTATUS_SIE & ~SSTATUS_FS)
                    | SSTATUS_FS_INITIAL;
-    extern void kernel_thread_entry(void);
     regs.sepc = (uint64_t)kernel_thread_entry;
     return do_fork((clone_flags | CLONE_VM), 0, &regs);
 }
@@ -1338,7 +1337,6 @@ static int16_t init(void)
 
 static void fork_out(void)
 {
-    extern void fork_out_asm(intstkf_t * regs);
     /* 新执行流第一次被 switch_to() 换上：按"接力"约定由它补上 sched_schedule() 欠下的
      * 那次放锁（key 取自 proc_rq_key，alloc_new_proc 已初始化成 true），漏掉就是调度器死锁。 */
     sched_finish_switch();
@@ -1385,8 +1383,6 @@ static void print_ctx_stk(ctx_t *ctx)
  */
 void enter_user_mode(virAddr_t entry, virAddr_t ustack)
 {
-    extern void fork_out_asm(intstkf_t *regs) __attribute__((noreturn));
-
     pcb_t *cur = proc_get_current();
     intstkf_t *f = (intstkf_t *)(PROC_KSTACK_TOP(cur) - sizeof(intstkf_t));
 
@@ -1643,13 +1639,13 @@ void proc_fd_close_on_exec(pcb_t *p)
 /**
  * @brief 给当前进程装上 stdin/stdout/stderr（fd 0/1/2）
  * @retval ENO0_NO_ERROR   成功
- * @retval ENO1_NOMORE_MEM console file 分配失败
+ * @retval ENO1_NOMORE_MEM TTY file 分配失败
  * @details 三个标准 fd 指向同一个 TTY file（输入、输出、错误输出物理上是同一个终端），
  *   引用计数随之为 3。
  */
 int proc_install_stdio(void)
 {
-    file_t *con = console_open_file();
+    file_t *con = tty_open_file();
     if (con == NULL)
     {
         return ENO1_NOMORE_MEM;

@@ -14,8 +14,6 @@
 #include "signal.h"
 #include "proc.h"
 
-extern void trap_init_asm(void);
-
 /**
  * @brief 处理一次由指令自身引发的同步异常：U 态发起的只杀该进程，S 态发起的 panic
  * @param[in] sp   本次 trap 的寄存器帧

@@ -11,6 +11,7 @@
 #include "cpu.h"
 #include "sync.h"
 #include "periph_layout.h"
+#include "startup.h"
 #include "probes.h"
 
 /**
@@ -145,7 +146,6 @@ static void init_kernel_offset_mapping(void)
      * MMU 关闭时 auipc 相对寻址得到的就是物理地址，所以这里不能再套 kva_to_pa()——
      * 那会再减一次 KERNEL_VA_OFFSET。vmm_remove_identity_mapping() 在 MMU 开启后调用，
      * 拿到的才是 VA，那边用 kva_to_pa 才正确。 */
-    extern char _trampoline_start[], _trampoline_end[];
     phyAddr_t tramp_pa_start = (phyAddr_t)_trampoline_start;
     phyAddr_t tramp_pa_end   = (phyAddr_t)_trampoline_end;
     for (ppn_t ppn = convert_pa2ppn_flr(tramp_pa_start); ppn < convert_pa2ppn_cil(tramp_pa_end); ppn++)
@@ -247,7 +247,6 @@ void vmm_map_mmio_range(phyAddr_t pa_start, phyAddr_t pa_end)
  */
 void vmm_remove_identity_mapping(void)
 {
-    extern char _trampoline_start[], _trampoline_end[];
     phyAddr_t tramp_pa_start = kva_to_pa((virAddr_t)_trampoline_start);
     phyAddr_t tramp_pa_end   = kva_to_pa((virAddr_t)_trampoline_end);
     for (ppn_t ppn = convert_pa2ppn_flr(tramp_pa_start); ppn < convert_pa2ppn_cil(tramp_pa_end); ppn++)
@@ -852,8 +851,6 @@ int vmm_mm_copy(mm_t *dst, mm_t *src)
  */
 void vmm_dump_boot_mappings(void)
 {
-    extern char _trampoline_start[], _start_virtual[];
-
     printf("mmu: pgd_ppn=0x%lx, satp will be 0x%lx\n",
            (unsigned long)vmm_kernel_pgd_ppn,
            (unsigned long)(0x8000000000000000UL | vmm_kernel_pgd_ppn));

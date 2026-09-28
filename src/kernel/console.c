@@ -5,7 +5,6 @@
 #include "sync.h"
 #include "tinyprintf.h"
 #include "sbi.h"
-#include "tty.h"
 #include "uart.h"
 #include "memtype.h"
 #include "periph_layout.h"
@@ -103,14 +102,4 @@ void panic_impl(const char *func, int line, char *s, ...)
     panicked = true;
     while (true)
         ;
-}
-
-/* ============================================================
- * console 设备 file（stdin/stdout/stderr 的后端）
- * ============================================================ */
-
-/* @deprecated 转调 tty_open_file()；调用点换掉后连同 console.h 的声明一起删 */
-file_t *console_open_file(void)
-{
-    return tty_open_file();
 }

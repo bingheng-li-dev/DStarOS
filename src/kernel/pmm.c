@@ -6,6 +6,7 @@
 #include "console.h"
 #include "sync.h"
 #include "memtype.h"
+#include "startup.h"
 
 pframe_t *pmm_page_list;
 fslist_t pmm_free_list;  /* Free memories will arrange from small size to large size,used for best fit. */
@@ -28,7 +29,6 @@ void pmm_init(void)
 {
     spinlock_init(&pmm_lock);
 
-    extern char _start[];
     phyAddr_t kernel_end_addr   = (phyAddr_t)ekernel;
     phyAddr_t kernel_start_addr = (phyAddr_t)skernel;
     phyAddr_t kernel_entry_addr = (phyAddr_t)_start;
