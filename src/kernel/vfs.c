@@ -1306,6 +1306,101 @@ static file_t *vfs_open_fail(int *err, int code)
     return NULL;
 }
 
+/* O_CREAT 且目标不存在：在父目录里建一个普通文件，*out 得到持有一个引用的新 dentry */
+static int vfs_create_regular(const char *path, dentry_t **out)
+{
+    char ppath[VFS_PATH_MAX], fname[VFS_NAME_MAX];
+    if (split_path(path, ppath, VFS_PATH_MAX, fname, VFS_NAME_MAX) < 0)
+    {
+        return ENO11_NAME_TOO_LONG;
+    }
+
+    dentry_t *parent = vfs_lookup(ppath);
+    if (!parent)
+    {
+        return ENO5_NOSUCH_ENTRY;
+    }
+    if (!parent->d_inode || !S_ISDIR(parent->d_inode->i_mode))
+    {
+        dentry_put(parent);
+        return ENO9_NOT_DIR;
+    }
+
+    dentry_t *new_d = dentry_create(fname, NULL, parent, NULL);
+    if (!new_d)
+    {
+        dentry_put(parent);
+        return ENO1_NOMORE_MEM;
+    }
+
+    if (!parent->d_inode->i_op || !parent->d_inode->i_op->create)
+    {
+        dentry_put(new_d);
+        dentry_put(parent);
+        return ENO16_PERM;
+    }
+
+    int ret = parent->d_inode->i_op->create(parent->d_inode, new_d, S_IFREG | 0644);
+    dentry_put(parent);
+    if (ret != ENO0_NO_ERROR)
+    {
+        dentry_put(new_d);
+        return ret;
+    }
+    *out = new_d;
+    return ENO0_NO_ERROR;
+}
+
+/* 目录只允许只读打开（供 getdents64 遍历），O_TRUNC 也要挡——截断一个目录没有意义，
+ * 放过去只会让底层拿到矛盾的语义；反过来，带 O_DIRECTORY 却指向普通文件按 POSIX 是 ENOTDIR */
+static int vfs_check_open_mode(const inode_t *inode, int mode)
+{
+    if (S_ISDIR(inode->i_mode))
+    {
+        int acc = mode & O_ACCMODE;
+        if (acc == O_WRONLY || acc == O_RDWR || (mode & O_TRUNC))
+        {
+            return ENO10_IS_DIR;
+        }
+    }
+    else if (mode & O_DIRECTORY)
+    {
+        return ENO9_NOT_DIR;
+    }
+    return ENO0_NO_ERROR;
+}
+
+/* 为 target 造一个新的 file_t，接管调用方持有的那个 dentry 引用；内存不足返回 NULL */
+static file_t *vfs_file_alloc(dentry_t *target, const char *path, int mode)
+{
+    file_t *file = (file_t *)slab_cache_alloc(file_cache);
+    if (!file)
+    {
+        return NULL;
+    }
+
+    /* 复制路径字符串（调试用）*/
+    int pathlen = (int)strlen(path);
+    file->f_path = (char *)kmalloc(pathlen + 1);
+    if (!file->f_path)
+    {
+        kfree(file);
+        return NULL;
+    }
+    memcpy(file->f_path, path, pathlen + 1);
+
+    file->f_inode   = target->d_inode;
+    file->f_dentry  = target;
+    file->f_op      = target->d_inode->i_fop;
+    file->f_mode    = mode;
+    file->f_count   = 1;
+    file->f_private = NULL;
+    file->f_vfsmount = NULL;
+    file->f_kind    = FILE_KIND_VFS;
+    file->f_pos     = (mode & O_APPEND) ? (off_t)target->d_inode->i_size : 0;
+    return file;
+}
+
 /**
  * @brief 打开（或创建）文件
  * @param[in] path 文件路径
@@ -1324,64 +1419,24 @@ file_t *vfs_open(const char *path, int mode, int *err)
         return vfs_open_fail(err, ENO13_NO_FS);
     }
 
+    int ret;
     dentry_t *target = vfs_lookup(path);
-
     if (!target)
     {
         if (!(mode & O_CREAT))
         {
             return vfs_open_fail(err, ENO5_NOSUCH_ENTRY);
         }
-
-        char ppath[VFS_PATH_MAX], fname[VFS_NAME_MAX];
-        if (split_path(path, ppath, VFS_PATH_MAX, fname, VFS_NAME_MAX) < 0)
-        {
-            return vfs_open_fail(err, ENO11_NAME_TOO_LONG);
-        }
-
-        dentry_t *parent = vfs_lookup(ppath);
-        if (!parent)
-        {
-            return vfs_open_fail(err, ENO5_NOSUCH_ENTRY);
-        }
-        if (!parent->d_inode || !S_ISDIR(parent->d_inode->i_mode))
-        {
-            dentry_put(parent);
-            return vfs_open_fail(err, ENO9_NOT_DIR);
-        }
-
-        dentry_t *new_d = dentry_create(fname, NULL, parent, NULL);
-        if (!new_d)
-        {
-            dentry_put(parent);
-            return vfs_open_fail(err, ENO1_NOMORE_MEM);
-        }
-
-        if (!parent->d_inode->i_op || !parent->d_inode->i_op->create)
-        {
-            dentry_put(new_d);
-            dentry_put(parent);
-            return vfs_open_fail(err, ENO16_PERM);
-        }
-
-        int ret = parent->d_inode->i_op->create(
-                      parent->d_inode, new_d, S_IFREG | 0644);
-        dentry_put(parent);
+        ret = vfs_create_regular(path, &target);
         if (ret != ENO0_NO_ERROR)
         {
-            dentry_put(new_d);
             return vfs_open_fail(err, ret);
         }
-
-        target = new_d;
     }
-    else
+    else if ((mode & O_CREAT) && (mode & O_EXCL))
     {
-        if ((mode & O_CREAT) && (mode & O_EXCL))
-        {
-            dentry_put(target);
-            return vfs_open_fail(err, ENO7_EXISTS);
-        }
+        dentry_put(target);
+        return vfs_open_fail(err, ENO7_EXISTS);
     }
 
     /* target 现在指向有效的 dentry，且持有一个引用计数 */
@@ -1390,65 +1445,24 @@ file_t *vfs_open(const char *path, int mode, int *err)
         dentry_put(target);
         return vfs_open_fail(err, ENO5_NOSUCH_ENTRY);
     }
-
-    /* 目录只允许只读打开（供 getdents64 遍历）；任何写意图一律拒绝。
-     * O_TRUNC 也要挡——截断一个目录没有意义，放过去只会让底层拿到矛盾的语义。 */
-    if (S_ISDIR(target->d_inode->i_mode))
-    {
-        int acc = mode & O_ACCMODE;
-        if (acc == O_WRONLY || acc == O_RDWR || (mode & O_TRUNC))
-        {
-            dentry_put(target);
-            return vfs_open_fail(err, ENO10_IS_DIR);
-        }
-    }
-    /* 反过来：带 O_DIRECTORY 却指向普通文件，按 POSIX 应失败（ENOTDIR） */
-    else if (mode & O_DIRECTORY)
+    ret = vfs_check_open_mode(target->d_inode, mode);
+    if (ret != ENO0_NO_ERROR)
     {
         dentry_put(target);
-        return vfs_open_fail(err, ENO9_NOT_DIR);
+        return vfs_open_fail(err, ret);
     }
 
-    file_t *file = (file_t *)slab_cache_alloc(file_cache);
+    file_t *file = vfs_file_alloc(target, path, mode);
     if (!file)
     {
         dentry_put(target);
         return vfs_open_fail(err, ENO1_NOMORE_MEM);
     }
 
-    /* 复制路径字符串（调试用）*/
-    int pathlen = (int)strlen(path);
-    file->f_path = (char *)kmalloc(pathlen + 1);
-    if (!file->f_path)
-    {
-        kfree(file);
-        dentry_put(target);
-        return vfs_open_fail(err, ENO1_NOMORE_MEM);
-    }
-    memcpy(file->f_path, path, pathlen + 1);
-
-    file->f_inode   = target->d_inode;
-    file->f_dentry  = target;          /* 持有引用，防止 dentry 被释放 */
-    file->f_op      = target->d_inode->i_fop;
-    file->f_mode    = mode;
-    file->f_count   = 1;
-    file->f_private = NULL;
-    file->f_vfsmount = NULL;
-    file->f_kind    = FILE_KIND_VFS;
-
-    if (mode & O_APPEND)
-    {
-        file->f_pos = (off_t)target->d_inode->i_size;
-    }
-    else
-    {
-        file->f_pos = 0;
-    }
-
     /* 调用底层 open 回调（分配底层资源，如 FIL*）*/
     if (file->f_op && file->f_op->open)
     {
-        int ret = file->f_op->open(target->d_inode, file, mode);
+        ret = file->f_op->open(target->d_inode, file, mode);
         if (ret != ENO0_NO_ERROR)
         {
             kfree(file->f_path);
