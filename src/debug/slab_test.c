@@ -14,6 +14,7 @@
 #if DEBUG_SUITE == SUITE_SLAB
 
 #include "suites.h"
+#include "ktest.h"
 #include "slab.h"
 #include "pmm.h"
 #include "kmalloc.h"
@@ -33,20 +34,11 @@
 static void *test_objs[SLAB_TEST_MAX_OBJS];
 /* 耗尽用例专用，与 test_objs 分开：两者的容量判据完全不同（见 SLAB_TEST_MAX_BLOCKS）*/
 static void *test_blocks[SLAB_TEST_MAX_BLOCKS];
-static int slab_pass;
-static int slab_fail;
+static ktest_t slab_kt = { "slabtest", 0, 0 };
 
 static void expect(bool cond, const char *what)
 {
-    if (cond)
-    {
-        slab_pass++;
-    }
-    else
-    {
-        slab_fail++;
-        printf("[slabtest] FAIL: %s\n", what);
-    }
+    ktest_expect(&slab_kt, cond, what);
 }
 
 /* 固定种子的 LCG，保证碎片化用例可复现 */
@@ -338,15 +330,14 @@ static void test_reclaim(void)
  */
 void run_slab_tests(void)
 {
-    slab_pass = 0;
-    slab_fail = 0;
+    ktest_reset(&slab_kt);
     printf("=== slabtest start ===\n");
     test_basic();
     test_kmalloc();
     test_fragmentation();
     test_reclaim();
     slab_dump_stats();
-    printf("=== slabtest done: %d pass  %d fail ===\n", slab_pass, slab_fail);
+    ktest_done(&slab_kt);
 }
 
 #endif /* DEBUG_SUITE == SUITE_SLAB */

@@ -27,28 +27,19 @@
 #include "atomic.h"
 #include "sync.h"
 #include "suites.h"
+#include "ktest.h"
 
 /* ============================================================
  * 各调度类子套件共用的断言
  * ============================================================ */
-static int sched_test_pass = 0;
-static int sched_test_fail = 0;
+static ktest_t sched_kt = { "sched", 0, 0 };
 
 /**
  * @brief 记一条断言结果并打印 [PASS]/[FAIL]
  */
 void sched_test_check(const char *name, int cond)
 {
-    if (cond)
-    {
-        printf("  [PASS] %s\n", name);
-        sched_test_pass += 1;
-    }
-    else
-    {
-        printf("  [FAIL] %s\n", name);
-        sched_test_fail += 1;
-    }
+    ktest_check(&sched_kt, name, cond);
 }
 
 /* 收割当前进程的全部子进程，返回收割到的个数。
@@ -436,8 +427,7 @@ static void sched_timed_sleep_test(void)
 void run_sched_tests(void)
 {
     printf("\n======== SCHEDULER REGRESSION TESTS ========\n");
-    sched_test_pass = 0;
-    sched_test_fail = 0;
+    ktest_reset(&sched_kt);
 
     sched_unit_tests();
     sched_lifecycle_test();
@@ -453,7 +443,7 @@ void run_sched_tests(void)
     run_pipe_tests();
 
     printf("\n======== SCHED TESTS DONE: %d pass  %d fail ========\n\n",
-           sched_test_pass, sched_test_fail);
+           sched_kt.pass, sched_kt.fail);
 }
 
 #endif /* DEBUG_SUITE == SUITE_SCHED */

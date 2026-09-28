@@ -7,7 +7,7 @@
 #
 # 每套把 DEBUG_SUITE 设成对应的 SUITE_*、以 PLATFORM=VF2 全量重建，然后逐个核对：
 #   1. 零告警；
-#   2. 内核里有这一套的特征串（内核态套件用收尾标记，用户态套件用 USER_PROGRAM_PATH）；
+#   2. 内核里有这一套的特征串（内核态套件用开始 / 收尾标记里的字面串，用户态套件用 USER_PROGRAM_PATH）；
 #   3. 所有 vf2-<suite>.img 的 CRC 互不相同——构建是确定性的，两套 CRC 相同就是打成了同一个镜像。
 # 结束时（含中途失败）把 DEBUG_SUITE 复位成交付形态，并重建 build/vf2-kernel.img。
 set -uo pipefail
@@ -21,8 +21,8 @@ SUITES="${*:-$ALL_SUITES}"
 
 signature_of() {
     case $1 in
-        sched) echo 'SCHED TESTS DONE' ;;   slab)  echo 'slabtest done' ;;
-        dcache) echo 'dcachetest done' ;;   vfs)   echo 'VFS test done' ;;
+        sched) echo 'SCHED TESTS DONE' ;;   slab)  echo 'slabtest start' ;;
+        dcache) echo 'dcachetest start' ;;  vfs)   echo 'VFS basic test' ;;
         file)  echo '/bin/filetest.elf' ;;  pipe)  echo '/bin/pipetest.elf' ;;
         tty)   echo '/bin/ttytest.elf' ;;   mem)   echo '/bin/memtest.elf' ;;
         exec)  echo '/bin/exectest.elf' ;;  sig)   echo '/bin/sigtest.elf' ;;

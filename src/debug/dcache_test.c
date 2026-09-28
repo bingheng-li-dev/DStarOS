@@ -18,6 +18,7 @@
 #if DEBUG_SUITE == SUITE_DCACHE
 
 #include "suites.h"
+#include "ktest.h"
 #include "vfs.h"
 #include "pmm.h"
 #include "slab.h"
@@ -33,20 +34,11 @@
 #define DCACHE_TEST_CWD   "/dccwd"
 #define DCACHE_TEST_FLOOD 150   /* 水位线用例造的条目数，需明显大于 DCACHE_MAX_UNUSED */
 
-static int dcache_pass;
-static int dcache_fail;
+static ktest_t dcache_kt = { "dcachetest", 0, 0 };
 
 static void expect(bool cond, const char *what)
 {
-    if (cond)
-    {
-        dcache_pass++;
-    }
-    else
-    {
-        dcache_fail++;
-        printf("[dcachetest] FAIL: %s\n", what);
-    }
+    ktest_expect(&dcache_kt, cond, what);
 }
 
 static void stats_of(dcache_stats_t *s)
@@ -427,8 +419,7 @@ static void setup(void)
  */
 void run_dcache_tests(void)
 {
-    dcache_pass = 0;
-    dcache_fail = 0;
+    ktest_reset(&dcache_kt);
     printf("=== dcachetest start ===\n");
 
     vfs_lock();   /* 整段测试独占 VFS 大锁：vfs.c 内部不再重复加锁 */
@@ -444,7 +435,7 @@ void run_dcache_tests(void)
 
     test_exit_releases_cwd();
 
-    printf("=== dcachetest done: %d pass  %d fail ===\n", dcache_pass, dcache_fail);
+    ktest_done(&dcache_kt);
 }
 
 #endif /* DEBUG_SUITE == SUITE_DCACHE */

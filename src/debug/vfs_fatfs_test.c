@@ -16,19 +16,13 @@
 #include "linux_abi.h"
 #include "slab.h"
 #include "suites.h"
+#include "ktest.h"
 
-static int vfs_pass = 0;
-static int vfs_fail = 0;
+static ktest_t vfs_kt = { "VFS test", 0, 0 };
 
 static void check(const char *name, int cond)
 {
-    if (cond) {
-        printf("  [PASS] %s\n", name);
-        vfs_pass++;
-    } else {
-        printf("  [FAIL] %s\n", name);
-        vfs_fail++;
-    }
+    ktest_check(&vfs_kt, name, cond);
 }
 
 /* 在 buf 里的 dirent 记录序列中查找名为 name 的一条；找到返回其 d_type，否则返回 -1 */
@@ -500,7 +494,8 @@ void vfs_test(void)
     vfs_unmount_test();
 
     vfs_unlock();
-    printf("=== VFS test done: %d pass  %d fail ===\n\n", vfs_pass, vfs_fail);
+    ktest_done(&vfs_kt);
+    printf("\n");
 }
 
 #endif /* DEBUG_SUITE == SUITE_VFS */
