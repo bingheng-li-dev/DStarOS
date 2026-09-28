@@ -8,4 +8,4 @@
 
 int ramdisk_register(uint32_t id);
 
-#endif
+#endif /* _RAMDISK_H_ */

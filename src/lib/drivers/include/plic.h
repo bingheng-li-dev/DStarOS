@@ -1,8 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright (C) 2021-2026 BingHeng Li <bingheng-li@outlook.com> */
 
-#ifndef __PLIC_H
-#define __PLIC_H
+#ifndef _PLIC_H_
+#define _PLIC_H_
 
 #include <stdint.h>
 
@@ -18,4 +18,4 @@ void     plic_init(void);
 uint32_t plic_claim(void);
 void     plic_complete(uint32_t irq);
 
-#endif
+#endif /* _PLIC_H_ */

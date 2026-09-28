@@ -75,4 +75,4 @@
 #define PLIC_S_CONTEXT(hart)            (2 * (hart) + 1)
 #endif
 
-#endif
+#endif /* _PERIPH_LAYOUT_H_ */

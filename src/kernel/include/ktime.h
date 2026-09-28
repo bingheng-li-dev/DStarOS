@@ -72,4 +72,4 @@ void ktime_alarm_cancel(struct proc_control_block *p);
 /* 由 tick_int_handler() 每次 tick 调用：向所有到期的进程投 SIGALRM 并重排周期定时器 */
 void ktime_check_alarms(void);
 
-#endif
+#endif /* _KTIME_H_ */

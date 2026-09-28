@@ -8,4 +8,4 @@
 
 int sdcard_register(uint32_t id);
 
-#endif
+#endif /* _SDCARD_H_ */

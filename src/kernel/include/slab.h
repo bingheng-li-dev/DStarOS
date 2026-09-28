@@ -52,4 +52,4 @@ extern kmem_cache_t *pipe_cache;
 extern kmem_cache_t *pcb_cache;
 extern kmem_cache_t *fil_cache;
 
-#endif
+#endif /* _SLAB_H_ */

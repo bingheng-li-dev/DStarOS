@@ -1,8 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright (C) 2021-2026 BingHeng Li <bingheng-li@outlook.com> */
 
-#ifndef _TICK_H
-#define _TICK_H
+#ifndef _TICK_H_
+#define _TICK_H_
 
 #include <stdint.h>
 
@@ -57,4 +57,4 @@ void tick_set_os_tick(uint64_t tick);
 /* 核忙等待延时，以tick为单位。 */
 void tick_delay(uint64_t ticks);
 
-#endif /* _TICK_H */
+#endif /* _TICK_H_ */

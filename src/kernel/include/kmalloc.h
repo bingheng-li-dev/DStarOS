@@ -12,4 +12,4 @@ void kfree(void *ptr);
 
 extern void pmm_init(void);
 
-#endif
+#endif /* _KMALLOC_H_ */

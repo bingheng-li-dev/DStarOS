@@ -34,4 +34,4 @@ void sdmmc_set_multiblock(bool enable);
 void sdmmc_write_test(void);
 #endif
 
-#endif
+#endif /* _SDMMC_H_ */

@@ -229,4 +229,4 @@ static inline bool mmu_is_enabled(void)
     return (read_csr(satp) >> 60) != 0;
 }
 
-#endif
+#endif /* _MEMTYPE_H_ */

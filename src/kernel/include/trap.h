@@ -1,8 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright (C) 2021-2026 BingHeng Li <bingheng-li@outlook.com> */
 
-#ifndef _TRAP_H
-#define _TRAP_H
+#ifndef _TRAP_H_
+#define _TRAP_H_
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -122,4 +122,4 @@ static inline void __intr_restore(bool flag)
     }
 }
 
-#endif
+#endif /* _TRAP_H_ */

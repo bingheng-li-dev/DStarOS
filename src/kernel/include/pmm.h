@@ -1,8 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright (C) 2021-2026 BingHeng Li <bingheng-li@outlook.com> */
 
-#ifndef _PMM_H
-#define _PMM_H
+#ifndef _PMM_H_
+#define _PMM_H_
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -119,4 +119,4 @@ static inline pframe_t *convert_pa2pframe_flr(phyAddr_t pa)
     return convert_ppn2pframe(convert_pa2ppn_flr(pa));
 }
 
-#endif
+#endif /* _PMM_H_ */

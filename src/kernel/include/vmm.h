@@ -1,8 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright (C) 2021-2026 BingHeng Li <bingheng-li@outlook.com> */
 
-#ifndef _VMM_H
-#define _VMM_H
+#ifndef _VMM_H_
+#define _VMM_H_
 
 #include "pmm.h"
 #include "list.h"
@@ -69,4 +69,4 @@ void   vmm_unmap_range(mm_t *mm, virAddr_t start, virAddr_t end);
 virAddr_t vmm_mmap_find_free_area(mm_t *mm, uint64_t len);
 void   vmm_page_fault_handler(virAddr_t badva, int fault_type);
 
-#endif
+#endif /* _VMM_H_ */

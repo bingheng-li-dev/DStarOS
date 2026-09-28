@@ -1,8 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright (C) 2021-2026 BingHeng Li <bingheng-li@outlook.com> */
 
-#ifndef _DEBUG_H
-#define _DEBUG_H
+#ifndef _DEBUG_H_
+#define _DEBUG_H_
 
 /* 每次进入 trap 打印整个 trap 帧 */
 #define DEBUG_INTSTACK 0
@@ -82,4 +82,4 @@ static inline void boot_trace_hex(const char *label, uint64_t v)
 #define BOOT_TRACE(msg) do { } while (0)
 #endif
 
-#endif /* _DEBUG_H */
+#endif /* _DEBUG_H_ */
