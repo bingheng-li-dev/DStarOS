@@ -83,6 +83,44 @@ void os_init_before_mmu_enable(void)
 #endif
 }
 
+/* 经 SBI HSM 启动全部从核，HSM 不支持或启动失败则退回单核。
+ * 有界等待：SBI 报 SUCCESS 不代表从核真的走到了高 VA。死等会整机停住、串口
+ * 再无一个字；有界之后最坏也只是少几个核，还留下一条可见日志。 */
+static void start_secondary_harts(void)
+{
+    int started = 0;
+    for (int id = 1; id < cpu_get_present_count(); id++)
+    {
+        if (cpu_start_secondary_hart((uint16_t)id) == SBI_SUCCESS)
+        {
+            started += 1;
+        }
+    }
+
+    int up = 0;
+    for (uint64_t spin = 0; spin < SECONDARY_UP_SPIN_LIMIT && up < started; spin++)
+    {
+        mb();
+        up = 0;
+        for (int id = 1; id <= started; id++)
+        {
+            up += secondary_up[id] ? 1 : 0;
+        }
+    }
+    if (up < started)
+    {
+        printf("core 0: only %d/%d secondary cpu(s) came up\n", up, started);
+    }
+
+    /* 所有已请求启动的从核都过了 trampoline 才能拆恒等映射——超时那一路不能拆，
+     * 姗姗来迟的从核一 csrw satp 就跑飞。留着只多占一段内核低半区 VA：用户页表
+     * 只复制内核高半段，对 U 态不可见。 */
+    if (up == started)
+    {
+        vmm_remove_identity_mapping();
+    }
+}
+
 /**
  * @brief 各 hart 开 MMU、经 trampoline 跳到高地址之后的初始化
  * @param[in] cpu_id 逻辑 cpu 号（引导核恒为 0），不是 hartid
@@ -141,40 +179,8 @@ void os_init_after_mmu_enable(uint64_t cpu_id)
         proc_early_init(); /* proc_list / proc_list_lock / pid_lock，必须早于启动从核 */
 
         /* 启动从核必须排在 proc_init() 之前：fork 出 init 时引导核会被抢占，剩下的
-         * 启动代码要等 idle 重新被调度才继续。HSM 不支持或启动失败则退回单核。 */
-        int started = 0;
-        for (int id = 1; id < cpu_get_present_count(); id++)
-        {
-            if (cpu_start_secondary_hart((uint16_t)id) == SBI_SUCCESS)
-            {
-                started += 1;
-            }
-        }
-
-        /* 有界等待：SBI 报 SUCCESS 不代表从核真的走到了高 VA。死等会整机停住、串口
-         * 再无一个字；有界之后最坏也只是少几个核，还留下一条可见日志。 */
-        int up = 0;
-        for (uint64_t spin = 0; spin < SECONDARY_UP_SPIN_LIMIT && up < started; spin++)
-        {
-            mb();
-            up = 0;
-            for (int id = 1; id <= started; id++)
-            {
-                up += secondary_up[id] ? 1 : 0;
-            }
-        }
-        if (up < started)
-        {
-            printf("core 0: only %d/%d secondary cpu(s) came up\n", up, started);
-        }
-
-        /* 所有已请求启动的从核都过了 trampoline 才能拆恒等映射——超时那一路不能拆，
-         * 姗姗来迟的从核一 csrw satp 就跑飞。留着只多占一段内核低半区 VA：用户页表
-         * 只复制内核高半段 [256..511]，对 U 态不可见。 */
-        if (up == started)
-        {
-            vmm_remove_identity_mapping();
-        }
+         * 启动代码要等 idle 重新被调度才继续。 */
+        start_secondary_harts();
 
         printf("core %ld init done\n", cpu_get_core_id());
 
