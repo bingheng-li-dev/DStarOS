@@ -25,6 +25,10 @@
 /* readv/writev 一次调用最多接受的 iovec 段数，防止不可信的 iovcnt 触发过大的 kmalloc */
 #define SYS_IOV_MAX 64
 
+/* 换算结果的上限，约 146 年：秒数大到乘上 1e9 会溢出时饱和到这里，
+ * 调用方再加上 ktime_get_ns() 也不会回绕成一个"马上到期"的时刻 */
+#define SYS_TIME_NS_MAX (1ULL << 62)
+
 /* 把 ubuf 的 len 字节写入 f，按 SYS_RW_BUF_SIZE 分块拷贝+落盘。
  * 调用方必须已经 vfs_lock()，kbuf 是调用方提供的 SYS_RW_BUF_SIZE 大小的中转缓冲
  * （writev 要对多个 iovec 段复用同一块，不在这里反复 kmalloc/kfree）。
@@ -1447,10 +1451,6 @@ static void ns_to_timespec(uint64_t ns, struct timespec *ts)
     ts->tv_sec  = (int64_t)(ns / NSEC_PER_SEC);
     ts->tv_nsec = (int64_t)(ns % NSEC_PER_SEC);
 }
-
-/* 换算结果的上限，约 146 年：秒数大到乘上 1e9 会溢出时饱和到这里，
- * 调用方再加上 ktime_get_ns() 也不会回绕成一个"马上到期"的时刻 */
-#define SYS_TIME_NS_MAX (1ULL << 62)
 
 /* struct timespec 合到纳秒；字段非法（负数 / tv_nsec 越界）返回 -EINVAL */
 static long timespec_to_ns(const struct timespec *ts, uint64_t *out_ns)

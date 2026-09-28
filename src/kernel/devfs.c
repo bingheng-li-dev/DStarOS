@@ -15,6 +15,27 @@
  * 设备集合固定（4 个），挂载时一次建好全部子 dentry，vfs_lookup 走缓存命中路径
  * 就能找到，不实现 i_op->lookup；运行时注册/注销设备留待有需求时再做。 */
 
+typedef struct devfs_entry
+{
+    const char *name;
+    uint8_t     d_type;
+} devfs_entry_t;
+
+static const devfs_entry_t devfs_entries[] = {
+    { "console", DT_CHR },
+    { "tty",     DT_CHR },
+    { "null",    DT_CHR },
+    { "zero",    DT_CHR },
+};
+#define DEVFS_ENTRY_COUNT (sizeof(devfs_entries) / sizeof(devfs_entries[0]))
+
+/* 每次 open("/dev") 独立的读游标，放在 f_private：next_index 0/1 是合成的 "."/".."，
+ * 2.. 对应 devfs_entries[]。两个进程同时 opendir("/dev") 必须各有游标。 */
+typedef struct devfs_dir_priv
+{
+    size_t next_index;
+} devfs_dir_priv_t;
+
 /* ============================================================
  * /dev/null、/dev/zero
  * ============================================================ */
@@ -66,27 +87,6 @@ static file_operations_t devzero_fops = {
 /* ============================================================
  * /dev 根目录：readdir（"ls /dev"）
  * ============================================================ */
-
-typedef struct devfs_entry
-{
-    const char *name;
-    uint8_t     d_type;
-} devfs_entry_t;
-
-static const devfs_entry_t devfs_entries[] = {
-    { "console", DT_CHR },
-    { "tty",     DT_CHR },
-    { "null",    DT_CHR },
-    { "zero",    DT_CHR },
-};
-#define DEVFS_ENTRY_COUNT (sizeof(devfs_entries) / sizeof(devfs_entries[0]))
-
-/* 每次 open("/dev") 独立的读游标，放在 f_private：next_index 0/1 是合成的 "."/".."，
- * 2.. 对应 devfs_entries[]。两个进程同时 opendir("/dev") 必须各有游标。 */
-typedef struct devfs_dir_priv
-{
-    size_t next_index;
-} devfs_dir_priv_t;
 
 /* 与 fatfs_vfs.c 的 fatfs_fill_dirent 同一布局；那边按 is_dir 填，这里按 d_type 填，故不共用 */
 static void devfs_fill_dirent(void *buf, const char *name, uint8_t d_type,

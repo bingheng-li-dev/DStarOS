@@ -36,6 +36,27 @@ uint16_t task_count = 0;
 
 #define USER_STACK_LEN  (16 * PGSIZE)      /* 64 KB，懒分配 */
 
+#define EXEC_MAX_ARGS       64          /* argc + envc 的合计上限 */
+#define EXEC_ARG_STRLEN_MAX 256         /* 单个参数串的长度上限（含结束符） */
+#define EXEC_ARG_BUF_SIZE   PGSIZE      /* 字符串区总字节上限 */
+
+/**
+ * @brief execve 参数在内核侧的暂存区
+ * @details argv/envp 是二级指针：先要读指针数组、再逐个跟着指针读字符串，
+ *   两级都在旧地址空间里，所以必须赶在切 satp 之前全部拷进内核。
+ *   这里只存紧凑排列的字符串与它们的偏移，不存指针——暂存区里的地址与最终
+ *   要写进用户栈的地址毫无关系。
+ */
+typedef struct exec_args
+{
+    int      argc;
+    int      envc;
+    int      n;                      /* 已收进的串总数，恒等于 argc + envc */
+    char    *buf;                    /* 字符串区，argc 个串在前、envc 个在后 */
+    uint32_t used;                   /* buf 已用字节 */
+    uint32_t off[EXEC_MAX_ARGS];     /* 每个串在 buf 中的起始偏移 */
+} exec_args_t;
+
 static pcb_t *alloc_new_proc(void);
 static int16_t alloc_kernel_stack(pcb_t *pcb);
 static int16_t dealloc_kernel_stack(pcb_t *pcb);
@@ -418,27 +439,6 @@ int16_t do_wait(int16_t pid, int *status, int options)
 /* ============================================================
  * 进程启动约定：argv / envp / auxv 初始栈
  * ============================================================ */
-
-#define EXEC_MAX_ARGS       64          /* argc + envc 的合计上限 */
-#define EXEC_ARG_STRLEN_MAX 256         /* 单个参数串的长度上限（含结束符） */
-#define EXEC_ARG_BUF_SIZE   PGSIZE      /* 字符串区总字节上限 */
-
-/**
- * @brief execve 参数在内核侧的暂存区
- * @details argv/envp 是二级指针：先要读指针数组、再逐个跟着指针读字符串，
- *   两级都在旧地址空间里，所以必须赶在切 satp 之前全部拷进内核。
- *   这里只存紧凑排列的字符串与它们的偏移，不存指针——暂存区里的地址与最终
- *   要写进用户栈的地址毫无关系。
- */
-typedef struct exec_args
-{
-    int      argc;
-    int      envc;
-    int      n;                      /* 已收进的串总数，恒等于 argc + envc */
-    char    *buf;                    /* 字符串区，argc 个串在前、envc 个在后 */
-    uint32_t used;                   /* buf 已用字节 */
-    uint32_t off[EXEC_MAX_ARGS];     /* 每个串在 buf 中的起始偏移 */
-} exec_args_t;
 
 static int exec_args_init(exec_args_t *a)
 {

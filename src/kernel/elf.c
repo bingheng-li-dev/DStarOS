@@ -7,18 +7,6 @@
 #include "errorcode.h"
 #include "uaccess.h"
 
-/* 向下取整到页边界 */
-static inline virAddr_t round_down_page(virAddr_t va)
-{
-    return va & ~(PGSIZE - 1);
-}
-
-/* 向上取整到页边界 */
-static inline virAddr_t round_up_page(virAddr_t va)
-{
-    return (va + PGSIZE - 1) & ~(PGSIZE - 1);
-}
-
 /* 可处理的 PT_LOAD 段数上限。真实可执行文件通常只有 2~4 个（RX / RO / RW），
  * 给 8 是为了下面两个定长数组能安心放在栈上——内核栈只有一页。 */
 #define ELF_MAX_LOAD_SEG 8
@@ -32,6 +20,18 @@ typedef struct
     pgprot_t    prot;
     Elf64_Phdr *ph;    /* 回填内容时要用；合并项不使用 */
 } elf_seg_t;
+
+/* 向下取整到页边界 */
+static inline virAddr_t round_down_page(virAddr_t va)
+{
+    return va & ~(PGSIZE - 1);
+}
+
+/* 向上取整到页边界 */
+static inline virAddr_t round_up_page(virAddr_t va)
+{
+    return (va + PGSIZE - 1) & ~(PGSIZE - 1);
+}
 
 /**
  * @brief 把内存里的 ELF 镜像装进 mm：按 PT_LOAD 建 VMA、映射、拷贝内容，再建堆 VMA

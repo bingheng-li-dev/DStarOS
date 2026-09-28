@@ -16,6 +16,17 @@
 #include "uaccess.h"
 
 /**
+ * @brief 压在用户栈上的信号帧
+ * @note 布局是内核自己定的：本项目不支持 SA_SIGINFO，用户 handler 拿不到 ucontext，
+ *   所以没有必须与 Linux 逐字节对齐的理由。唯一的读者是 sys_rt_sigreturn()。
+ */
+typedef struct sigframe
+{
+    sigset_t saved_mask;   /* 进入 handler 之前的屏蔽字 */
+    intstkf_t saved_regs;  /* 整个 trap 帧原样备份，含 sepc/sstatus */
+} sigframe_t;
+
+/**
  * @brief 每进程的信号处理表（signal.h 里只有前向声明，实体在这里）
  * @note lock 同时保护宿主 pcb 的 proc_sig_pending 与 proc_sig_mask，写必须持锁。
  *   pending 是真的跨 hart 共享（任何进程都能 kill 它），mask 实际只有任务自己写，
@@ -41,6 +52,20 @@ static pframe_t *sigpage_frame;
  *   addi a7, x0, 139 → imm=0x08b, rs1=0, funct3=0, rd=17, opcode=0x13 → 0x08b00893
  *   ecall                                                            → 0x00000073 */
 static const uint32_t sigreturn_code[2] = {0x08b00893, 0x00000073};
+
+/**
+ * @brief 各信号的默认动作（SIG_DFL 时生效）
+ * @details 表填满 NSIG 项而不是只填 1..31，是为了让 actions[] 越界访问在编译期就
+ *   不可能发生。core dump 类信号（SIGQUIT/SIGILL/SIGABRT/SIGSEGV 等）本项目没有
+ *   地方写 core，一律按终止处理。
+ */
+static const uint8_t default_action[NSIG] = {
+    [SIGCHLD] = SIG_ACT_IGNORE,
+    [SIGURG]  = SIG_ACT_IGNORE,
+    [SIGWINCH] = SIG_ACT_IGNORE,
+    [SIGCONT] = SIG_ACT_IGNORE,
+    /* 其余项由静态初始化补 0 == SIG_ACT_TERM */
+};
 
 /**
  * @brief 准备 sigpage 的物理页
@@ -90,20 +115,6 @@ int signal_map_sigpage(mm_t *mm)
     return vmm_map_fixed_page(mm, USER_SIGPAGE,
                               convert_pframe2ppn(sigpage_frame), VMP_R | VMP_X);
 }
-
-/**
- * @brief 各信号的默认动作（SIG_DFL 时生效）
- * @details 表填满 NSIG 项而不是只填 1..31，是为了让 actions[] 越界访问在编译期就
- *   不可能发生。core dump 类信号（SIGQUIT/SIGILL/SIGABRT/SIGSEGV 等）本项目没有
- *   地方写 core，一律按终止处理。
- */
-static const uint8_t default_action[NSIG] = {
-    [SIGCHLD] = SIG_ACT_IGNORE,
-    [SIGURG]  = SIG_ACT_IGNORE,
-    [SIGWINCH] = SIG_ACT_IGNORE,
-    [SIGCONT] = SIG_ACT_IGNORE,
-    /* 其余项由静态初始化补 0 == SIG_ACT_TERM */
-};
 
 /**
  * @brief 给一个进程分配 sighand_t（全部动作置 SIG_DFL）
@@ -260,17 +271,6 @@ static int sigset_first(sigset_t set)
     }
     return 0;
 }
-
-/**
- * @brief 压在用户栈上的信号帧
- * @note 布局是内核自己定的：本项目不支持 SA_SIGINFO，用户 handler 拿不到 ucontext，
- *   所以没有必须与 Linux 逐字节对齐的理由。唯一的读者是 sys_rt_sigreturn()。
- */
-typedef struct sigframe
-{
-    sigset_t saved_mask;   /* 进入 handler 之前的屏蔽字 */
-    intstkf_t saved_regs;  /* 整个 trap 帧原样备份，含 sepc/sstatus */
-} sigframe_t;
 
 /**
  * @brief 在用户栈上构造信号帧并把 trap 帧改写成"进入 handler"

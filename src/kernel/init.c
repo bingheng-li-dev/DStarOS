@@ -32,6 +32,11 @@ uint64_t dtb_phys_addr;
 int boot_trace_armed;
 #endif
 
+/* 从核报到标志，按逻辑 cpu 号索引。每格只由对应从核写、引导核只读，不需要锁。 */
+static volatile int secondary_up[CORE_NUMBER];
+/* 等从核报到的自旋上限，宽到不可能误判，又不至于挂住太久。 */
+#define SECONDARY_UP_SPIN_LIMIT 100000000UL
+
 static void init_print_banner(void)
 {
     /* 必须是二维字符数组：指针数组存的是链接时的高位虚拟地址，而此时 MMU 未开、按
@@ -77,11 +82,6 @@ void os_init_before_mmu_enable(void)
     printf("mmu: about to write satp\n");
 #endif
 }
-
-/* 从核报到标志，按逻辑 cpu 号索引。每格只由对应从核写、引导核只读，不需要锁。 */
-static volatile int secondary_up[CORE_NUMBER];
-/* 等从核报到的自旋上限，宽到不可能误判，又不至于挂住太久。 */
-#define SECONDARY_UP_SPIN_LIMIT 100000000UL
 
 /**
  * @brief 各 hart 开 MMU、经 trampoline 跳到高地址之后的初始化
