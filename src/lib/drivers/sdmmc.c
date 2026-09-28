@@ -389,120 +389,6 @@ void sdmmc_get_stats(sdmmc_stats_t *out)
     *out = sdmmc_stats;
 }
 
-#if DEBUG_SDMMC_PROBE
-/**
- * @brief 切换多块传输，只供板上对比单块 / 多块的耗时与命令数
- * @param[in] enable false 时读写都退回逐块 CMD17 / CMD24
- */
-void sdmmc_set_multiblock(bool enable)
-{
-    sdmmc_multiblock = enable;
-}
-
-static inline uint32_t le32(const uint8_t *p)
-{
-    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-}
-
-static inline uint64_t le64(const uint8_t *p)
-{
-    return (uint64_t)le32(p) | ((uint64_t)le32(p + 4) << 32);
-}
-
-/**
- * @brief SD 读通路的上板探针：逐步打印，坏在哪一步就停在哪一步
- * @details 1. 切 PIO 前后的 CTRL / BMOD 等寄存器；
- *   2. CMD16：应答与卡状态（4 = 传输态）；
- *   3. 读 LBA 0：签名 55aa，分区类型 0xee 表示 GPT，否则按 MBR 取第一个分区；
- *   4. 读第一个分区首扇区：签名 55aa 且在 0x36（FAT12/16）或 0x52（FAT32）处有 "FAT"。
- *      按块寻址对不上就换字节寻址再读一次（SDSC 卡）。
- * @note 只发读命令。必须在 trap_init() 之后调用。
- */
-void sdmmc_probe(void)
-{
-    static uint8_t blk[SD_BLOCK_SIZE];
-
-    printf("sdmmc: ctrl=0x%08x bmod=0x%08x status=0x%08x clkena=0x%08x clkdiv=0x%08x ctype=0x%08x\n",
-           sdmmc_read(SDMMC_CTRL), sdmmc_read(SDMMC_BMOD), sdmmc_read(SDMMC_STATUS),
-           sdmmc_read(SDMMC_CLKENA), sdmmc_read(SDMMC_CLKDIV), sdmmc_read(SDMMC_CTYPE));
-
-    int ret = sdmmc_use_pio();
-    printf("sdmmc: pio ret=%d ctrl=0x%08x bmod=0x%08x\n",
-           ret, sdmmc_read(SDMMC_CTRL), sdmmc_read(SDMMC_BMOD));
-    if (ret != ENO0_NO_ERROR)
-    {
-        return;
-    }
-
-    uint32_t r1 = 0;
-    ret = sdmmc_send_cmd(SD_CMD_SET_BLOCKLEN, SD_BLOCK_SIZE,
-                         SDMMC_CMD_RESP_EXP | SDMMC_CMD_RESP_CRC, &r1);
-    printf("sdmmc: CMD16 ret=%d rintsts=0x%08x r1=0x%08x state=%u (4=tran)\n",
-           ret, sdmmc_last_rintsts, r1, SD_R1_STATE(r1));
-    if (ret != ENO0_NO_ERROR)
-    {
-        return;
-    }
-
-    ret = sdmmc_read_xfer(0, blk, 1);
-    printf("sdmmc: lba0 ret=%d rintsts=0x%08x sig=%02x%02x ptype=0x%02x\n",
-           ret, sdmmc_last_rintsts, blk[510], blk[511], blk[450]);
-    if (ret != ENO0_NO_ERROR)
-    {
-        return;
-    }
-    printf("sdmmc: lba0[0..15] =");
-    for (int i = 0; i < 16; i++)
-    {
-        printf(" %02x", blk[i]);
-    }
-    printf("\n");
-
-    uint64_t start;
-    if (blk[450] == 0xee)
-    {
-        ret = sdmmc_read_xfer(1, blk, 1);
-        printf("sdmmc: gpt header ret=%d sig=%c%c%c%c%c%c%c%c\n",
-               ret, blk[0], blk[1], blk[2], blk[3], blk[4], blk[5], blk[6], blk[7]);
-        if (ret != ENO0_NO_ERROR)
-        {
-            return;
-        }
-        uint64_t entries_lba = le64(blk + 72);
-        ret = sdmmc_read_xfer(entries_lba, blk, 1);
-        start = le64(blk + 32);
-        printf("sdmmc: gpt entries lba=%lu ret=%d part1 first_lba=%lu\n",
-               (unsigned long)entries_lba, ret, (unsigned long)start);
-        if (ret != ENO0_NO_ERROR)
-        {
-            return;
-        }
-    }
-    else
-    {
-        start = le32(blk + 454);
-        printf("sdmmc: mbr part1 start_lba=%lu sectors=%u\n",
-               (unsigned long)start, le32(blk + 458));
-    }
-
-    for (int attempt = 0; attempt < 2; attempt++)
-    {
-        ret = sdmmc_read_xfer(start, blk, 1);
-        bool fat = blk[510] == 0x55 && blk[511] == 0xaa &&
-                   (memcmp(blk + 0x36, "FAT", 3) == 0 || memcmp(blk + 0x52, "FAT", 3) == 0);
-        printf("sdmmc: part1 lba=%lu addr=%s ret=%d rintsts=0x%08x sig=%02x%02x oem=%c%c%c%c%c%c%c%c fat=%d\n",
-               (unsigned long)start, sdmmc_block_addressing ? "block" : "byte", ret, sdmmc_last_rintsts,
-               blk[510], blk[511], blk[3], blk[4], blk[5], blk[6], blk[7], blk[8], blk[9], blk[10],
-               fat ? 1 : 0);
-        if (fat || ret != ENO0_NO_ERROR || !sdmmc_block_addressing)
-        {
-            break;
-        }
-        sdmmc_block_addressing = false;
-    }
-}
-#endif
-
 /**
  * @brief 写连续若干块（PIO）：1 块用 CMD24，多块用 CMD25 并由控制器自动发 CMD12
  * @param[in] lba   起始块号
@@ -702,6 +588,121 @@ void sdmmc_write_test(void)
     }
     printf("sdwrite: restore zeros write=%d verify=%d\n", rret, zero);
     printf("sdwrite: %s\n", (ret == ENO0_NO_ERROR && mismatch < 0 && zero == ENO0_NO_ERROR) ? "PASS" : "FAIL");
+}
+#endif
+
+
+#if DEBUG_SDMMC_PROBE
+/**
+ * @brief 切换多块传输，只供板上对比单块 / 多块的耗时与命令数
+ * @param[in] enable false 时读写都退回逐块 CMD17 / CMD24
+ */
+void sdmmc_set_multiblock(bool enable)
+{
+    sdmmc_multiblock = enable;
+}
+
+static inline uint32_t le32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static inline uint64_t le64(const uint8_t *p)
+{
+    return (uint64_t)le32(p) | ((uint64_t)le32(p + 4) << 32);
+}
+
+/**
+ * @brief SD 读通路的上板探针：逐步打印，坏在哪一步就停在哪一步
+ * @details 1. 切 PIO 前后的 CTRL / BMOD 等寄存器；
+ *   2. CMD16：应答与卡状态（4 = 传输态）；
+ *   3. 读 LBA 0：签名 55aa，分区类型 0xee 表示 GPT，否则按 MBR 取第一个分区；
+ *   4. 读第一个分区首扇区：签名 55aa 且在 0x36（FAT12/16）或 0x52（FAT32）处有 "FAT"。
+ *      按块寻址对不上就换字节寻址再读一次（SDSC 卡）。
+ * @note 只发读命令。必须在 trap_init() 之后调用。
+ */
+void sdmmc_probe(void)
+{
+    static uint8_t blk[SD_BLOCK_SIZE];
+
+    printf("sdmmc: ctrl=0x%08x bmod=0x%08x status=0x%08x clkena=0x%08x clkdiv=0x%08x ctype=0x%08x\n",
+           sdmmc_read(SDMMC_CTRL), sdmmc_read(SDMMC_BMOD), sdmmc_read(SDMMC_STATUS),
+           sdmmc_read(SDMMC_CLKENA), sdmmc_read(SDMMC_CLKDIV), sdmmc_read(SDMMC_CTYPE));
+
+    int ret = sdmmc_use_pio();
+    printf("sdmmc: pio ret=%d ctrl=0x%08x bmod=0x%08x\n",
+           ret, sdmmc_read(SDMMC_CTRL), sdmmc_read(SDMMC_BMOD));
+    if (ret != ENO0_NO_ERROR)
+    {
+        return;
+    }
+
+    uint32_t r1 = 0;
+    ret = sdmmc_send_cmd(SD_CMD_SET_BLOCKLEN, SD_BLOCK_SIZE,
+                         SDMMC_CMD_RESP_EXP | SDMMC_CMD_RESP_CRC, &r1);
+    printf("sdmmc: CMD16 ret=%d rintsts=0x%08x r1=0x%08x state=%u (4=tran)\n",
+           ret, sdmmc_last_rintsts, r1, SD_R1_STATE(r1));
+    if (ret != ENO0_NO_ERROR)
+    {
+        return;
+    }
+
+    ret = sdmmc_read_xfer(0, blk, 1);
+    printf("sdmmc: lba0 ret=%d rintsts=0x%08x sig=%02x%02x ptype=0x%02x\n",
+           ret, sdmmc_last_rintsts, blk[510], blk[511], blk[450]);
+    if (ret != ENO0_NO_ERROR)
+    {
+        return;
+    }
+    printf("sdmmc: lba0[0..15] =");
+    for (int i = 0; i < 16; i++)
+    {
+        printf(" %02x", blk[i]);
+    }
+    printf("\n");
+
+    uint64_t start;
+    if (blk[450] == 0xee)
+    {
+        ret = sdmmc_read_xfer(1, blk, 1);
+        printf("sdmmc: gpt header ret=%d sig=%c%c%c%c%c%c%c%c\n",
+               ret, blk[0], blk[1], blk[2], blk[3], blk[4], blk[5], blk[6], blk[7]);
+        if (ret != ENO0_NO_ERROR)
+        {
+            return;
+        }
+        uint64_t entries_lba = le64(blk + 72);
+        ret = sdmmc_read_xfer(entries_lba, blk, 1);
+        start = le64(blk + 32);
+        printf("sdmmc: gpt entries lba=%lu ret=%d part1 first_lba=%lu\n",
+               (unsigned long)entries_lba, ret, (unsigned long)start);
+        if (ret != ENO0_NO_ERROR)
+        {
+            return;
+        }
+    }
+    else
+    {
+        start = le32(blk + 454);
+        printf("sdmmc: mbr part1 start_lba=%lu sectors=%u\n",
+               (unsigned long)start, le32(blk + 458));
+    }
+
+    for (int attempt = 0; attempt < 2; attempt++)
+    {
+        ret = sdmmc_read_xfer(start, blk, 1);
+        bool fat = blk[510] == 0x55 && blk[511] == 0xaa &&
+                   (memcmp(blk + 0x36, "FAT", 3) == 0 || memcmp(blk + 0x52, "FAT", 3) == 0);
+        printf("sdmmc: part1 lba=%lu addr=%s ret=%d rintsts=0x%08x sig=%02x%02x oem=%c%c%c%c%c%c%c%c fat=%d\n",
+               (unsigned long)start, sdmmc_block_addressing ? "block" : "byte", ret, sdmmc_last_rintsts,
+               blk[510], blk[511], blk[3], blk[4], blk[5], blk[6], blk[7], blk[8], blk[9], blk[10],
+               fat ? 1 : 0);
+        if (fat || ret != ENO0_NO_ERROR || !sdmmc_block_addressing)
+        {
+            break;
+        }
+        sdmmc_block_addressing = false;
+    }
 }
 #endif
 

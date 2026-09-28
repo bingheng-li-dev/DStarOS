@@ -21,6 +21,7 @@
 #include "ktime.h"
 #include "fpu.h"
 #include "fdt.h"
+#include "probes.h"
 
 #if DEBUG_INIT_main
 extern int main(int argc, char **args);

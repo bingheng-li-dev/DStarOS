@@ -69,16 +69,4 @@ void   vmm_unmap_range(mm_t *mm, virAddr_t start, virAddr_t end);
 virAddr_t vmm_mmap_find_free_area(mm_t *mm, uint64_t len);
 void   vmm_page_fault_handler(virAddr_t badva, int fault_type);
 
-#if DEBUG_PTE_AD_PROBE
-void   vmm_probe_pte_ad(void);
-#endif
-
-#if DEBUG_MMIO_PROBE
-void   vmm_probe_mmio(void);
-#endif
-
-#if DEBUG_BRINGUP
-void   vmm_dump_boot_mappings(void);
-#endif
-
 #endif
