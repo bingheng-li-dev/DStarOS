@@ -1131,7 +1131,7 @@ static file_operations_t fatfs_file_ops = {
  * 文件系统类型描述符与注册函数
  * ============================================================ */
 
-file_system_type_t fatfs_fs_type = {
+static file_system_type_t fatfs_fs_type = {
     .name    = "fatfs",
     .mount   = fatfs_mount_cb,
     .kill_sb = NULL,  /* 卸载由 sb_ops.unmount 回调处理 */
