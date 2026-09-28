@@ -193,6 +193,36 @@ void pmm_free_pages(pframe_t *base_frame)
     spinlock_release(&pmm_lock, PmmLock_key);
 }
 
+/* 按块大小升序插进 pmm_free_list：排在第一个不小于它的块之前，都比它小就放末尾 */
+static void free_list_insert_by_size(pframe_t *frame)
+{
+    struct list_head *pos;
+    list_for_each(pos, &(pmm_free_list.list_linker))
+    {
+        if (list_entry(pos, pframe_t, free_list_linker)->nsize >= frame->nsize)
+        {
+            list_add_tail(&(frame->free_list_linker), pos);
+            return;
+        }
+    }
+    list_add_tail(&(frame->free_list_linker), &(pmm_free_list.list_linker));
+}
+
+/* 按地址升序插进 pmm_free_addr_list */
+static void free_addr_list_insert(pframe_t *frame)
+{
+    struct list_head *pos;
+    list_for_each(pos, &(pmm_free_addr_list.list_linker))
+    {
+        if (list_entry(pos, pframe_t, free_addr_list_linker) > frame)
+        {
+            list_add_tail(&(frame->free_addr_list_linker), pos);
+            return;
+        }
+    }
+    list_add_tail(&(frame->free_addr_list_linker), &(pmm_free_addr_list.list_linker));
+}
+
 static pframe_t *delete_and_reinsert(pgcount_t nsize)
 {
     pframe_t *ret = NULL, *current_frame;
@@ -208,75 +238,27 @@ static pframe_t *delete_and_reinsert(pgcount_t nsize)
     }
     if (ret != NULL)
     {
+        struct list_head *addr_prev = ret->free_addr_list_linker.prev;
         list_del(&(ret->free_list_linker));
         list_del(&(ret->free_addr_list_linker));
         if (ret->nsize > nsize)
         {
+            /* 剩下的后半块在地址链表里接替原块的位置，地址顺序不变 */
             pframe_t *reinsert_frame = ret + nsize;
             reinsert_frame->nsize = ret->nsize - nsize;
-            if ((&(pmm_free_list.list_linker))->next == &(pmm_free_list.list_linker))
-            {
-                list_add(&(reinsert_frame->free_list_linker), &(pmm_free_list.list_linker));
-                list_add(&(reinsert_frame->free_addr_list_linker), &(pmm_free_addr_list.list_linker));
-                goto f1;
-            }
-            list_for_each(current_entry, &(pmm_free_list.list_linker))
-            {
-                if ((list_entry(current_entry, pframe_t, free_list_linker))->nsize >= reinsert_frame->nsize)
-                {
-                    list_add_tail(&(reinsert_frame->free_list_linker), current_entry);
-                    list_add(&(reinsert_frame->free_addr_list_linker), (ret->free_addr_list_linker).prev);
-                    break;
-                }
-                else if ((list_entry(current_entry, pframe_t, free_list_linker))->nsize < reinsert_frame->nsize && current_entry->next == &(pmm_free_list.list_linker))
-                {
-                    list_add(&(reinsert_frame->free_list_linker), current_entry);
-                    list_add(&(reinsert_frame->free_addr_list_linker), (ret->free_addr_list_linker).prev);
-                    break;
-                }
-            }
+            list_add(&(reinsert_frame->free_addr_list_linker), addr_prev);
+            free_list_insert_by_size(reinsert_frame);
         }
-    f1:
         pmm_free_list.fnsize = pmm_free_list.fnsize - nsize;
         pmm_free_addr_list.fnsize = pmm_free_addr_list.fnsize - nsize;
     }
     return ret;
 }
 
-/**
- * @brief 把回收的块插回空闲链表，并与地址相邻的空闲块合并
- * @param[in] base_frame 被回收块的首个页帧
- * @param[in] nsize      被回收块的页数
- */
-static void insert_and_merge(pframe_t *base_frame, pgcount_t nsize)
+/* 刚插进地址链表的 base_frame 与地址上紧邻的前后空闲块合并，返回合并后的块首。
+ * 被并掉的块从两条链表里摘下；返回的块此时不在 pmm_free_list 里，由调用方插回。 */
+static pframe_t *merge_neighbors(pframe_t *base_frame)
 {
-    pframe_t *current_frame;
-    struct list_head *current_entry;
-
-    /* 顺序固定：先插进按地址排的链表，按需合并，最后才插进按大小排的链表 */
-    pmm_free_addr_list.fnsize = pmm_free_addr_list.fnsize + nsize;
-    if (list_empty(&(pmm_free_addr_list.list_linker)))
-    {
-        list_add(&(base_frame->free_addr_list_linker), &(pmm_free_addr_list.list_linker));
-    }
-    else
-    {
-        list_for_each(current_entry, &(pmm_free_addr_list.list_linker))
-        {
-            current_frame = list_entry(current_entry, pframe_t, free_addr_list_linker);
-            if (current_frame > base_frame)
-            {
-                list_add_tail(&(base_frame->free_addr_list_linker), current_entry);
-                break;
-            }
-            else if (current_entry->next == &(pmm_free_addr_list.list_linker))
-            {
-                list_add(&(base_frame->free_addr_list_linker), current_entry);
-                break;
-            }
-        }
-    }
-
     pframe_t *prev_frame_in_addr_list, *next_frame_in_addr_list;
     if (pmm_free_addr_list.list_linker.next == &(base_frame->free_addr_list_linker))
     {
@@ -297,49 +279,35 @@ static void insert_and_merge(pframe_t *base_frame, pgcount_t nsize)
     pframe_t *merged_frame = base_frame;
 
     /* 先与后面的合并，因为可能存在需要同时合并前面和后面的情况。 */
-    pframe_t *frame_closest_after = base_frame + base_frame->nsize;
-    if (next_frame_in_addr_list != NULL)
+    if (next_frame_in_addr_list != NULL && base_frame + base_frame->nsize == next_frame_in_addr_list)
     {
-        if (frame_closest_after == next_frame_in_addr_list)
-        {
-            list_del(&(next_frame_in_addr_list->free_addr_list_linker));
-            list_del(&(next_frame_in_addr_list->free_list_linker));
-            /* base_frame->nsize 在这里变成合并后的总大小，后面要用回收大小时取参数 nsize */
-            base_frame->nsize = base_frame->nsize + next_frame_in_addr_list->nsize;
-            merged_frame = base_frame;
-        }
+        list_del(&(next_frame_in_addr_list->free_addr_list_linker));
+        list_del(&(next_frame_in_addr_list->free_list_linker));
+        base_frame->nsize = base_frame->nsize + next_frame_in_addr_list->nsize;
     }
-    if (prev_frame_in_addr_list != NULL)
+    if (prev_frame_in_addr_list != NULL &&
+        prev_frame_in_addr_list + prev_frame_in_addr_list->nsize == base_frame)
     {
-        pframe_t *frame_closest_forward = prev_frame_in_addr_list + prev_frame_in_addr_list->nsize;
-        if (frame_closest_forward == base_frame)
-        {
-            list_del(&(base_frame->free_addr_list_linker));
-            list_del(&(prev_frame_in_addr_list->free_list_linker));
-            prev_frame_in_addr_list->nsize = prev_frame_in_addr_list->nsize + base_frame->nsize;
-            merged_frame = prev_frame_in_addr_list;
-        }
+        list_del(&(base_frame->free_addr_list_linker));
+        list_del(&(prev_frame_in_addr_list->free_list_linker));
+        prev_frame_in_addr_list->nsize = prev_frame_in_addr_list->nsize + base_frame->nsize;
+        merged_frame = prev_frame_in_addr_list;
     }
+    return merged_frame;
+}
 
+/**
+ * @brief 把回收的块插回空闲链表，并与地址相邻的空闲块合并
+ * @param[in] base_frame 被回收块的首个页帧
+ * @param[in] nsize      被回收块的页数
+ */
+static void insert_and_merge(pframe_t *base_frame, pgcount_t nsize)
+{
+    /* 顺序固定：先插进按地址排的链表，按需合并，最后才插进按大小排的链表。
+     * 合并后 base_frame->nsize 已是总大小，计数只能加参数 nsize。 */
+    pmm_free_addr_list.fnsize = pmm_free_addr_list.fnsize + nsize;
+    free_addr_list_insert(base_frame);
+    pframe_t *merged_frame = merge_neighbors(base_frame);
     pmm_free_list.fnsize = pmm_free_list.fnsize + nsize;
-    if (list_empty(&(pmm_free_list.list_linker)))
-    {
-        list_add(&(merged_frame->free_list_linker), &(pmm_free_list.list_linker));
-    }
-    else
-    {
-        list_for_each(current_entry, &(pmm_free_list.list_linker))
-        {
-            if ((list_entry(current_entry, pframe_t, free_list_linker))->nsize >= merged_frame->nsize)
-            {
-                list_add_tail(&(merged_frame->free_list_linker), current_entry);
-                break;
-            }
-            else if ((list_entry(current_entry, pframe_t, free_list_linker))->nsize < merged_frame->nsize && current_entry->next == &(pmm_free_list.list_linker))
-            {
-                list_add(&(merged_frame->free_list_linker), current_entry);
-                break;
-            }
-        }
-    }
+    free_list_insert_by_size(merged_frame);
 }
