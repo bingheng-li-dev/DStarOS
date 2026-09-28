@@ -202,6 +202,8 @@ int16_t create_kernel_thread_by_fork(void *func(void *), void *args, uint32_t cl
 pcb_t *proc_find_by_pid(int16_t pid);
 /* 当前进程的父进程 pid（getppid），没有父进程返回 0 */
 int16_t proc_get_ppid(void);
+/* 进程 pid 所在的进程组（getpgid）；没有这个进程返回 ENO25_NO_SUCH_PROC */
+int16_t proc_get_pgid(int16_t pid);
 
 /* 在 proc_list_lock 保护下按 pid / pgid 找到进程并**立刻**对它调用 fn。
  * kill 这类"查到就要动手"的场景必须用它，而不是先 proc_find_by_pid 再动手——

@@ -1155,16 +1155,6 @@ static void set_pgid_cb(pcb_t *p, int pgid)
     p->proc_pgid = (int16_t)pgid;
 }
 
-/* proc_apply_by_pid 的回调没有出参，借一个文件作用域变量把 pgid 带出来。
- * 回调是在 proc_list_lock 里执行的，那把锁同时也是这个变量的保护者 */
-static int16_t pgid_result;
-
-static void get_pgid_cb(pcb_t *p, int arg)
-{
-    (void)arg;
-    pgid_result = p->proc_pgid;
-}
-
 static long sys_setpgid(int pid, int pgid)
 {
     pcb_t *cur = proc_get_current();
@@ -1193,11 +1183,7 @@ static long sys_getpgid(int pid)
     {
         return cur->proc_pgid;
     }
-    if (!proc_apply_by_pid((int16_t)pid, get_pgid_cb, 0))
-    {
-        return ENO25_NO_SUCH_PROC;
-    }
-    return pgid_result;
+    return proc_get_pgid((int16_t)pid);
 }
 
 /* a0=path, a1=argv, a2=envp。成功后 sp 已被改写为进入新程序的帧，本函数返回 0；
@@ -1473,6 +1459,10 @@ static void ns_to_timespec(uint64_t ns, struct timespec *ts)
     ts->tv_nsec = (int64_t)(ns % NSEC_PER_SEC);
 }
 
+/* 换算结果的上限，约 146 年：秒数大到乘上 1e9 会溢出时饱和到这里，
+ * 调用方再加上 ktime_get_ns() 也不会回绕成一个"马上到期"的时刻 */
+#define SYS_TIME_NS_MAX (1ULL << 62)
+
 /* struct timespec 合到纳秒；字段非法（负数 / tv_nsec 越界）返回 -EINVAL */
 static long timespec_to_ns(const struct timespec *ts, uint64_t *out_ns)
 {
@@ -1480,7 +1470,34 @@ static long timespec_to_ns(const struct timespec *ts, uint64_t *out_ns)
     {
         return ENO6_INVAL_PARAM;
     }
+    if ((uint64_t)ts->tv_sec >= SYS_TIME_NS_MAX / NSEC_PER_SEC)
+    {
+        *out_ns = SYS_TIME_NS_MAX;
+        return ENO0_NO_ERROR;
+    }
     *out_ns = (uint64_t)ts->tv_sec * NSEC_PER_SEC + (uint64_t)ts->tv_nsec;
+    return ENO0_NO_ERROR;
+}
+
+static void ns_to_timeval(uint64_t ns, struct timeval *tv)
+{
+    tv->tv_sec  = (int64_t)(ns / NSEC_PER_SEC);
+    tv->tv_usec = (int64_t)((ns % NSEC_PER_SEC) / NSEC_PER_USEC);
+}
+
+/* struct timeval 合到纳秒；规则同 timespec_to_ns */
+static long timeval_to_ns(const struct timeval *tv, uint64_t *out_ns)
+{
+    if (tv->tv_sec < 0 || tv->tv_usec < 0 || tv->tv_usec >= (int64_t)USEC_PER_SEC)
+    {
+        return ENO6_INVAL_PARAM;
+    }
+    if ((uint64_t)tv->tv_sec >= SYS_TIME_NS_MAX / NSEC_PER_SEC)
+    {
+        *out_ns = SYS_TIME_NS_MAX;
+        return ENO0_NO_ERROR;
+    }
+    *out_ns = (uint64_t)tv->tv_sec * NSEC_PER_SEC + (uint64_t)tv->tv_usec * NSEC_PER_USEC;
     return ENO0_NO_ERROR;
 }
 
@@ -1607,11 +1624,13 @@ static long sys_settimeofday(const struct timeval *utv, const void *utz)
     {
         return ENO8_NULL_POINTER;
     }
-    if (tv.tv_sec < 0 || tv.tv_usec < 0 || tv.tv_usec >= (int64_t)USEC_PER_SEC)
+    uint64_t ns;
+    long ret = timeval_to_ns(&tv, &ns);
+    if (ret != ENO0_NO_ERROR)
     {
-        return ENO6_INVAL_PARAM;
+        return ret;
     }
-    ktime_set_real_ns((uint64_t)tv.tv_sec * NSEC_PER_SEC + (uint64_t)tv.tv_usec * NSEC_PER_USEC);
+    ktime_set_real_ns(ns);
     return ENO0_NO_ERROR;
 }
 
@@ -1706,22 +1725,6 @@ static long sys_clock_nanosleep(int clock_id, int flags,
 /* ============================================================
  * ITIMER_REAL 定时器
  * ============================================================ */
-
-static void ns_to_timeval(uint64_t ns, struct timeval *tv)
-{
-    tv->tv_sec  = (int64_t)(ns / NSEC_PER_SEC);
-    tv->tv_usec = (int64_t)((ns % NSEC_PER_SEC) / NSEC_PER_USEC);
-}
-
-static long timeval_to_ns(const struct timeval *tv, uint64_t *out_ns)
-{
-    if (tv->tv_sec < 0 || tv->tv_usec < 0 || tv->tv_usec >= (int64_t)USEC_PER_SEC)
-    {
-        return ENO6_INVAL_PARAM;
-    }
-    *out_ns = (uint64_t)tv->tv_sec * NSEC_PER_SEC + (uint64_t)tv->tv_usec * NSEC_PER_USEC;
-    return ENO0_NO_ERROR;
-}
 
 /**
  * @brief 装/改 ITIMER_REAL 定时器，到期向本进程投 SIGALRM

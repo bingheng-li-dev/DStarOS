@@ -1075,6 +1075,29 @@ int16_t proc_get_ppid(void)
     return ppid;
 }
 
+/**
+ * @brief 进程 pid 所在的进程组
+ * @retval >=0 进程组号
+ * @retval ENO25_NO_SUCH_PROC 没有这个进程
+ */
+int16_t proc_get_pgid(int16_t pid)
+{
+    int16_t pgid = ENO25_NO_SUCH_PROC;
+    irq_key_t plist_key = spinlock_acquire(&proc_list_lock);
+    struct list_head *pos;
+    list_for_each(pos, &proc_list)
+    {
+        pcb_t *p = list_entry(pos, pcb_t, proc_list_linker);
+        if (p->proc_pid == pid)
+        {
+            pgid = p->proc_pgid;
+            break;
+        }
+    }
+    spinlock_release(&proc_list_lock, plist_key);
+    return pgid;
+}
+
 /* 按 pid 查找 pcb 的公开包装，供 do_wait 之外的模块（如调度回归测试）使用。 */
 pcb_t *proc_find_by_pid(int16_t pid)
 {
