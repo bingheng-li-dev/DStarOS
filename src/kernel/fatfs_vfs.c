@@ -343,6 +343,47 @@ static super_block_operations_t fatfs_sb_ops = {
  * 挂载回调（file_system_type_t.mount）
  * ============================================================ */
 
+/* 卷号字符串 → 物理驱动器号；NULL 表示 0 号 */
+static bool fatfs_parse_volume(const char *s, BYTE *pdrv)
+{
+    *pdrv = 0;
+    if (s == NULL)
+    {
+        return true;
+    }
+    if (s[0] < '0' || s[0] >= '0' + _VOLUMES || s[1] != '\0')
+    {
+        printf("fatfs_mount: bad volume \"%s\"\n", s);
+        return false;
+    }
+    *pdrv = (BYTE)(s[0] - '0');
+    return true;
+}
+
+/* 挂上卷并读取 BPB；只有 0 号卷读不到 FAT 时先格式化再挂。失败时已打印原因 */
+static bool fatfs_mount_volume(fatfs_volume_t *vol, BYTE pdrv)
+{
+    FRESULT fr = f_mount(&vol->fs, vol->prefix, 1);
+    if (fr == FR_NO_FILESYSTEM && pdrv == 0)
+    {
+        printf("fatfs_mount: no filesystem, formatting ramdisk...\n");
+        BYTE work[512];
+        fr = f_mkfs(vol->prefix, 0, sizeof(work));
+        if (fr != FR_OK)
+        {
+            printf("fatfs_mount: f_mkfs failed, fr=%d\n", (int)fr);
+            return false;
+        }
+        fr = f_mount(&vol->fs, vol->prefix, 1);
+    }
+    if (fr != FR_OK)
+    {
+        printf("fatfs_mount: disk %u f_mount failed, fr=%d\n", (unsigned)pdrv, (int)fr);
+        return false;
+    }
+    return true;
+}
+
 /**
  * @brief FatFS 挂载回调入口
  * @param[in] data 卷号字符串，"1" 表示 1 号物理驱动器（VF2 的 SD 卡）；NULL 表示 0 号（RAM 盘）
@@ -358,16 +399,10 @@ static dentry_t *fatfs_mount_cb(file_system_type_t *fst,
     (void)fst;
     (void)source;
 
-    BYTE pdrv = 0;
-    if (data != NULL)
+    BYTE pdrv;
+    if (!fatfs_parse_volume((const char *)data, &pdrv))
     {
-        const char *s = (const char *)data;
-        if (s[0] < '0' || s[0] >= '0' + _VOLUMES || s[1] != '\0')
-        {
-            printf("fatfs_mount: bad volume \"%s\"\n", s);
-            return NULL;
-        }
-        pdrv = (BYTE)(s[0] - '0');
+        return NULL;
     }
 
     fatfs_volume_t *vol = (fatfs_volume_t *)kmalloc(sizeof(fatfs_volume_t));
@@ -388,28 +423,11 @@ static dentry_t *fatfs_mount_cb(file_system_type_t *fst,
         return NULL;
     }
 
-    /* opt=1：立即挂载并读取 BPB */
-    FRESULT fr = f_mount(&vol->fs, vol->prefix, 1);
-    if (fr == FR_NO_FILESYSTEM && pdrv == 0)
+    super_block_t *sb = NULL;
+    inode_t *root_inode = NULL;
+    if (!fatfs_mount_volume(vol, pdrv))
     {
-        printf("fatfs_mount: no filesystem, formatting ramdisk...\n");
-        BYTE work[512];
-        fr = f_mkfs(vol->prefix, 0, sizeof(work));
-        if (fr != FR_OK)
-        {
-            printf("fatfs_mount: f_mkfs failed, fr=%d\n", (int)fr);
-            f_mount(NULL, vol->prefix, 0);
-            kfree(vol);
-            return NULL;
-        }
-        fr = f_mount(&vol->fs, vol->prefix, 1);
-    }
-    if (fr != FR_OK)
-    {
-        printf("fatfs_mount: disk %u f_mount failed, fr=%d\n", (unsigned)pdrv, (int)fr);
-        f_mount(NULL, vol->prefix, 0);
-        kfree(vol);
-        return NULL;
+        goto fail_mount;
     }
 
     /* 拿不到扇区数（SD 卡只读挂载不提供）时记 0，只影响 statfs 类信息 */
@@ -418,26 +436,16 @@ static dentry_t *fatfs_mount_cb(file_system_type_t *fst,
     {
         sector_count = 0;
     }
-    super_block_t *sb = alloc_super_block(
-        "fatfs",
-        512,
-        (uint64_t)sector_count,
-        &fatfs_sb_ops,
-        vol);
+    sb = alloc_super_block("fatfs", 512, (uint64_t)sector_count, &fatfs_sb_ops, vol);
     if (!sb)
     {
-        f_mount(NULL, vol->prefix, 0);
-        kfree(vol);
-        return NULL;
+        goto fail_mount;
     }
 
-    inode_t *root_inode = fatfs_alloc_inode_internal(sb);
+    root_inode = fatfs_alloc_inode_internal(sb);
     if (!root_inode)
     {
-        destroy_super_block(sb);
-        f_mount(NULL, vol->prefix, 0);
-        kfree(vol);
-        return NULL;
+        goto fail_sb;
     }
     root_inode->i_mode = S_IFDIR | 0755;
     root_inode->i_size = 0;
@@ -447,11 +455,7 @@ static dentry_t *fatfs_mount_cb(file_system_type_t *fst,
     dentry_t *root_dentry = dentry_create("", root_inode, NULL, NULL);
     if (!root_dentry)
     {
-        fatfs_destroy_inode_cb(root_inode);
-        destroy_super_block(sb);
-        f_mount(NULL, vol->prefix, 0);
-        kfree(vol);
-        return NULL;
+        goto fail_inode;
     }
     root_inode->i_dentry = root_dentry;
     sb->s_root_inode     = root_inode;
@@ -466,6 +470,15 @@ static dentry_t *fatfs_mount_cb(file_system_type_t *fst,
                (dstat & STA_PROTECT) ? " (read-only)" : "");
     }
     return root_dentry;
+
+fail_inode:
+    fatfs_destroy_inode_cb(root_inode);
+fail_sb:
+    destroy_super_block(sb);
+fail_mount:
+    f_mount(NULL, vol->prefix, 0);
+    kfree(vol);
+    return NULL;
 }
 
 /* ============================================================
