@@ -939,20 +939,10 @@ static int16_t copy_proc_mm(uint32_t clone_flags, pcb_t *pcb)
     }
 
     /* 必须先建立独立 PGD 并设好 mm->pgd_ppn，vmm_mm_copy 才能向正确的页表写 PTE */
-    pframe_t *new_pgd_frame = slab_alloc_page_retry();
-    if (!new_pgd_frame)
+    if (vmm_mm_alloc_pgd(mm) != ENO0_NO_ERROR)
     {
         panic("Failed to pmm_alloc_pages new page for child process PGD!\n");
     }
-    memset((void *)convert_pframe2kva(new_pgd_frame), 0, PGSIZE);
-    new_pgd_frame->reference += 1;
-    mm->pgd_ppn = convert_pframe2ppn(new_pgd_frame);
-    /* 复制内核半段（PGD[256..511]），使子进程能访问内核地址空间 */
-    memcpy(
-        (void *)pa_to_kva(convert_ppn2pa(mm->pgd_ppn)) + sizeof(pte_t) * 256,
-        (void *)pa_to_kva(convert_ppn2pa(vmm_kernel_pgd_ppn)) + sizeof(pte_t) * 256,
-        sizeof(pte_t) * 256
-    );
 
     vmm_mm_copy(mm, proc_get_current()->proc_mm);
 
@@ -1160,9 +1150,8 @@ void idle(void)
 /**
  * @brief 建一个独立的用户地址空间（新 PGD + 复制内核高半段）
  * @return 新 mm；失败返回 NULL
- * @details 复用 copy_proc_mm 用户分支的套路：分配根页表帧、清零、复制内核半段 PGD[256..511]，
- *   使新地址空间也能访问内核。不切 satp、不挂到任何 pcb——由调用方决定何时切换
- *   （run_user_program 首次进入 / do_exec 换脑）。
+ * @details 不切 satp、不挂到任何 pcb——由调用方决定何时切换
+ *   （proc_run_user_program 首次进入 / do_exec 换脑）。
  */
 static mm_t *create_user_mm(void)
 {
@@ -1171,17 +1160,10 @@ static mm_t *create_user_mm(void)
     {
         return NULL;
     }
-    pframe_t *pgd = slab_alloc_page_retry();
-    if (pgd == NULL)
+    if (vmm_mm_alloc_pgd(mm) != ENO0_NO_ERROR)
     {
         return NULL; /* OOM 极端边界：此处不回收 mm（系统已濒临耗尽），可接受 */
     }
-    memset((void *)convert_pframe2kva(pgd), 0, PGSIZE);
-    pgd->reference += 1;
-    mm->pgd_ppn = convert_pframe2ppn(pgd);
-    memcpy((void *)pa_to_kva(convert_ppn2pa(mm->pgd_ppn)) + sizeof(pte_t) * 256,
-           (void *)pa_to_kva(convert_ppn2pa(vmm_kernel_pgd_ppn)) + sizeof(pte_t) * 256,
-           sizeof(pte_t) * 256);
 
     /* 每个用户地址空间都要有 sigpage，否则装了 handler 的进程一从 handler 返回
      * 就是取指缺页。放在这里而不是各调用点，exec 与首个用户程序两条路径自动都有 */

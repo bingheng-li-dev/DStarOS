@@ -56,6 +56,7 @@ void   vmm_remove_identity_mapping(void);
 int    vmm_map_2m_page(ppn_t pgd_ppn, virAddr_t va, phyAddr_t pa, pteflg_t flags, bool mmu_enabled);
 void   vmm_map_mmio_range(phyAddr_t pa_start, phyAddr_t pa_end);
 mm_t  *vmm_mm_create(void);
+int    vmm_mm_alloc_pgd(mm_t *mm);
 void   vmm_mm_destroy(mm_t *mm);
 int    vmm_mm_copy(mm_t *dst, mm_t *src);
 vma_t *vmm_vma_create(virAddr_t va_start, virAddr_t va_end, pgprot_t flag);

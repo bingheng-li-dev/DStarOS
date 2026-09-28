@@ -303,8 +303,7 @@ vma_t *vmm_vma_get(mm_t *mm, virAddr_t va)
 /**
  * @brief 分配并初始化一个进程地址空间描述符（mm_t）
  * @return 成功返回新的 mm_t 指针；内存不足返回 NULL
- * @note 这里只把 pgd_ppn 置成内核页表。用户进程的独立 PGD 由 proc.c 的 create_user_mm()
- *   与 copy_proc_mm() 在此之后分配，并复制内核半段 PGD[256..511]。
+ * @note 这里只把 pgd_ppn 置成内核页表，用户进程的独立 PGD 由调用方再经 vmm_mm_alloc_pgd() 配上。
  */
 mm_t *vmm_mm_create(void)
 {
@@ -318,6 +317,28 @@ mm_t *vmm_mm_create(void)
         INIT_LIST_HEAD(&ret->mmap_list);
     }
     return ret;
+}
+
+/**
+ * @brief 给 mm 配一张独立的根页表：清零后复制内核半段，使新地址空间也能访问内核
+ * @retval ENO0_NO_ERROR   成功，mm->pgd_ppn 指向新页表
+ * @retval ENO1_NOMORE_MEM 分配不到页表帧，mm 不变
+ */
+int vmm_mm_alloc_pgd(mm_t *mm)
+{
+    pframe_t *frame = slab_alloc_page_retry();
+    if (frame == NULL)
+    {
+        return ENO1_NOMORE_MEM;
+    }
+    pte_t *pgd = (pte_t *)convert_pframe2kva(frame);
+    pte_t *kpgd = (pte_t *)pa_to_kva(convert_ppn2pa(vmm_kernel_pgd_ppn));
+    memset(pgd, 0, PGSIZE);
+    memcpy(pgd + PGD_KERNEL_START, kpgd + PGD_KERNEL_START,
+           sizeof(pte_t) * (PGD_ENTRIES - PGD_KERNEL_START));
+    frame->reference += 1;
+    mm->pgd_ppn = convert_pframe2ppn(frame);
+    return ENO0_NO_ERROR;
 }
 
 /**
@@ -576,7 +597,7 @@ static void free_user_page_table(mm_t *mm)
     }
 
     pte_t *pgd = (pte_t *)pa_to_kva(convert_ppn2pa(mm->pgd_ppn));
-    for (uint64_t i = 0; i < 256; i++)
+    for (uint64_t i = 0; i < PGD_KERNEL_START; i++)
     {
         if (!pte_is_valid(pgd[i]) || pte_is_readable(pgd[i]) ||
             pte_is_writable(pgd[i]) || pte_is_executable(pgd[i]))

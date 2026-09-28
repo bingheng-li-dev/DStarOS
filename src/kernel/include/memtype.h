@@ -39,6 +39,10 @@
 #define PMD(va) (((va) >> PMD_OFFSET) & 0x1FF)
 #define PTE(va) (((va) >> PTE_OFFSET) & 0x1FF)
 
+/* PGD 的 [0, PGD_KERNEL_START) 归用户，其余是所有地址空间共享的内核高位映射 */
+#define PGD_ENTRIES      512
+#define PGD_KERNEL_START 256
+
 /*
  * 链接脚本导出的内核镜像边界符号。
  */
