@@ -6,7 +6,7 @@
 #   ROOTFS_SIZE_KB=8192 bash tools/build_rootfs.sh
 #
 # 为什么用 mtools 而不是 loop mount：mcopy/mmd 直接读写镜像文件里的 FAT 结构，
-# **不需要任何特权**；loop mount 要 CAP_SYS_ADMIN，容器里未必给。
+# 不需要任何特权；loop mount 要 CAP_SYS_ADMIN，容器里未必给。
 #
 # 镜像最终由 QEMU 的 -device loader 原样写进 rootfs 预留区（见 memtype.h 的
 # ROOTFS_PHYS_BASE），内核侧看到的就是一块内存，不经过任何块设备驱动。
@@ -15,7 +15,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="${ROOTFS_IMG:-$ROOT_DIR/build/rootfs.img}"
 
-# 镜像大小。只有一条硬约束：**必须 <= memtype.h 的 ROOTFS_MAX_SIZE（16 MB）**，
+# 镜像大小。只有一条硬约束：必须 <= memtype.h 的 ROOTFS_MAX_SIZE（16 MB），
 # 否则 -device loader 会写出预留区。
 # 不需要等于 diskio.c 报给 FatFS 的扇区数——那个数是整个预留区的大小，只被 f_mkfs
 # 用来决定格式化多大；f_mount 读的是镜像自己引导扇区里记的总扇区数。
@@ -26,7 +26,7 @@ ROOTFS_SIZE_KB="${ROOTFS_SIZE_KB:-4096}"
 SECTOR_SIZE=512
 
 # 预留区上限，与 memtype.h 的 ROOTFS_MAX_SIZE 对齐（16 MB）。超了 -device loader
-# 会把内容写到 PMM 的页帧池里去，那是**静默**的内存损坏，必须在这里挡住。
+# 会把内容写到 PMM 的页帧池里去，那是静默的内存损坏，必须在这里挡住。
 ROOTFS_MAX_KB=16384
 if [ "$ROOTFS_SIZE_KB" -gt "$ROOTFS_MAX_KB" ]; then
     echo "build_rootfs: ${ROOTFS_SIZE_KB}KB 超过预留区上限 ${ROOTFS_MAX_KB}KB" >&2
@@ -57,7 +57,7 @@ dd if=/dev/zero of="$OUT" bs=1024 count="$ROOTFS_SIZE_KB" status=none
 
 # -F 16：显式指定 FAT16，不让 mkfs 按体积自己挑（挑出来的类型会随镜像大小变，
 #        而内核侧的行为最好是确定的）。
-# -s 1 ：1 扇区/簇。**4 MB 下这个不能省**——FAT16 要求至少 4085 个簇，
+# -s 1 ：1 扇区/簇。4 MB 下这个不能省——FAT16 要求至少 4085 个簇，
 #        默认的 4 扇区/簇只能分出 2048 个，mkfs 会直接报
 #        "Attempting to create a too small or a too large filesystem"。
 #        镜像放大到 16 MB 以上时可以去掉 -s 1。
@@ -66,7 +66,7 @@ dd if=/dev/zero of="$OUT" bs=1024 count="$ROOTFS_SIZE_KB" status=none
 mkfs.vfat -F 16 -s 1 -S "$SECTOR_SIZE" -n DSTAROS "$OUT" >/dev/null
 
 # 目录树。
-# **刻意不建 /dev**：内核 fs_init() 挂完根文件系统之后自己 vfs_mkdir("/dev") 再挂 devfs，
+# 刻意不建 /dev：内核 fs_init() 挂完根文件系统之后自己 vfs_mkdir("/dev") 再挂 devfs，
 # 而那句 mkdir 一旦返回非 0 就直接 return、devfs 挂不上（见 src/kernel/fs.c）。
 # 镜像里预先建好 /dev 会让它撞 EEXIST，整个 /dev 就没了。
 for d in bin sbin etc tmp; do
@@ -90,8 +90,8 @@ fi
 mcopy -i "$OUT" "${elves[@]}" ::/bin/
 echo "build_rootfs: 拷入 ${#elves[@]} 个用户程序"
 
-# /sbin/init：阶段 11 起 PID 1 直接变身成它（见 src/kernel/proc.c 的 BOOT_AS_INIT）。
-# **不存在时不报错**，理由同下面的 busybox：纯内核回归不需要它。
+# /sbin/init：PID 1 直接变身成它（见 src/kernel/proc.c 的 BOOT_AS_INIT）。
+# 不存在时不报错，理由同下面的 busybox：纯内核回归不需要它。
 INIT_BIN="$ROOT_DIR/user/init.elf"
 if [ -f "$INIT_BIN" ]; then
     mcopy -i "$OUT" "$INIT_BIN" ::/sbin/init
@@ -100,7 +100,7 @@ else
     echo "build_rootfs: 未找到 $INIT_BIN，本次不放 /sbin/init（先在 user/ 里 make）"
 fi
 
-# BusyBox（tools/build_busybox.sh 的产物）。**不存在时不报错**：纯内核回归
+# BusyBox（tools/build_busybox.sh 的产物）。不存在时不报错：纯内核回归
 # （sched/slab/vfs/dcache）不需要它，照"镜像不存在时内核仍能启动"的同一条思路。
 # 只放一个文件、不造任何链接——FAT 没有符号链接，applet 分发靠 BusyBox 自己的
 # CONFIG_FEATURE_SH_STANDALONE（见 configs/busybox_dstar.config）。

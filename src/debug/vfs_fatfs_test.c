@@ -136,10 +136,10 @@ static void vfs_dir_test(void)
     check("getdents with 24B buf -> exactly one record", none == 24);
     check("that one record is '.'", find_dirent(buf, none, ".", NULL) == DT_DIR);
 
-    /* ---- pending 暂存路径（本步骤最容易错的一条）----
+    /* ---- pending 暂存路径（最容易错的一条）----
      * 上面 24B 那条只验证了"不截断"，并没有触发 pending：'.'/'..' 来自合成阶段，
-     * 放不下时只要不推进阶段机、下次重新生成即可。真正需要暂存的是**来自
-     * f_readdir 的条目**——它的游标已经被 FatFS 消费掉了，放不下又不存起来就永久丢失。
+     * 放不下时只要不推进阶段机、下次重新生成即可。真正需要暂存的是来自
+     * f_readdir 的条目——它的游标已经被 FatFS 消费掉了，放不下又不存起来就永久丢失。
      * 这里给 64 字节：刚好装下 '.'(24) + '..'(24)，第三条 sub.txt 需要 32 装不下，
      * 必须进 pending，并在下一次调用被原样吐出来。 */
     vfs_lseek(d, 0, SEEK_SET);

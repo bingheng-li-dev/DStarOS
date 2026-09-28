@@ -243,7 +243,7 @@ _Static_assert(sizeof(struct utsname) == 390, "utsname size must match Linux ker
  * times()
  *
  * 四个字段与返回值的单位都是 clock_t，即 AT_CLKTCK = 100 Hz，
- * **不是**本内核的 200 Hz tick——直接给 tick 计数会让所有时间翻倍。
+ * 不是本内核的 200 Hz tick——直接给 tick 计数会让所有时间翻倍。
  * ============================================================ */
 #define USER_HZ 100
 
@@ -293,7 +293,7 @@ _Static_assert(sizeof(struct elf64_auxv) == 16, "elf64_auxv size must match ELF 
 #define PR_SET_NAME 15
 #define PR_GET_NAME 16
 
-/* 进程名（comm）的长度上限。**必须是 16**：Linux 的 TASK_COMM_LEN 就是这个数，
+/* 进程名（comm）的长度上限。必须是 16：Linux 的 TASK_COMM_LEN 就是这个数，
  * PR_GET_NAME 的调用方按它开缓冲区（BusyBox 的 re_execed_comm() 就是 char comm[16]），
  * 写多了就是往用户栈上越界写。 */
 #define TASK_COMM_LEN 16

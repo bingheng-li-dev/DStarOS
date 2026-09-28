@@ -10,9 +10,8 @@
 
 static virAddr_t uart_base;
 
-/* 访问宽度与寄存器间隔一样按平台区分：JH7110 的 dw-apb-uart 要求 32 位访问
- * （reg-io-width 4）；QEMU virt 的 16550 是字节宽寄存器，且整个 MMIO 区只有 8 字节，
- * 按 32 位读 base+5 就是一发跨界访问（实测是访问异常）。 */
+/* 访问宽度与寄存器间隔按平台区分：JH7110 的 dw-apb-uart 要求 32 位访问（reg-io-width 4）；
+ * QEMU virt 的 16550 是字节宽寄存器，整个 MMIO 区只有 8 字节，按 32 位读 base+5 会跨界。 */
 #if defined(VF2)
 static inline uint32_t uart_read(uint32_t reg)
 {
@@ -38,11 +37,10 @@ static inline void uart_write(uint32_t reg, uint32_t val)
 /**
  * @brief 设置 UART 寄存器基址
  * @param[in] base 寄存器块起始地址：MMU 开启前传物理地址，开启后传 pa_to_kva() 换算的高 VA
- * @details **不写任何寄存器**，完整继承固件 / U-Boot 留下的配置：
- *   1. 不重配波特率——配错的表现是满屏乱码，而那时串口是唯一的观察手段；
- *      JH7110 上 24 MHz 配 115200 的分频本来就不是整数，重算也不会更准；
- *   2. 不写 FCR——FIFO 使能位一旦变化，收发两个 FIFO 会被一并清空。
- *      VF2 实测进内核时发送 FIFO 里还有固件没发完的字节（USR=0x03），清掉就截断开机日志。
+ * @details 不写任何寄存器，完整继承固件 / U-Boot 留下的配置：
+ *   1. 不重配波特率：配错就是满屏乱码，而那时串口是唯一的观察手段；
+ *   2. 不写 FCR：FIFO 使能位一变，收发两个 FIFO 会被一并清空，而进内核时发送 FIFO 里
+ *      还有固件没发完的字节，清掉就截断开机日志。
  * @note 由 console_init() 调用，MMU 开启前后各一次。基址设置之前调用收发函数会访问 0 地址。
  */
 void uart_init(virAddr_t base)
@@ -95,10 +93,9 @@ void uart_enable_rx_irq(void)
 /**
  * @brief UART 中断的控制器侧确认，必须在读接收 FIFO 之前调用
  * @details DesignWare APB UART 有一个 16550 没有的中断源：busy detect（IIR 低 4 位 = 0x7）。
- *   UART 忙时写 LCR 会把它置位，**不受 IER 屏蔽**，读 LSR / RBR 清不掉，只有读 USR 才清除。
- *   U-Boot 初始化串口若恰好碰上正在发送，进内核时这个中断就已经挂着——PLIC 一使能
- *   UART 中断即刻投递，处理完、complete 之后又立刻重新挂起，主流程被饿死（板上实测）。
- *   做法同 Linux 8250_dw 的 dw8250_handle_irq()。
+ *   UART 忙时写 LCR 会把它置位，不受 IER 屏蔽，读 LSR / RBR 清不掉，只有读 USR 才清除。
+ *   U-Boot 初始化串口若恰好碰上正在发送，进内核时这个中断就已经挂着——PLIC 一使能即刻投递，
+ *   complete 之后又立刻重新挂起，主流程被饿死。做法同 Linux 8250_dw 的 dw8250_handle_irq()。
  * @note QEMU 的 16550 没有 busy detect，也没有 USR，这里什么都不做。
  */
 void uart_handle_irq(void)

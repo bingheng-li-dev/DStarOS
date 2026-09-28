@@ -47,7 +47,7 @@ static long do_write_locked(file_t *f, const char *ubuf, uint64_t len, char *kbu
         ssize_t w = f->f_op->write(f, kbuf, n);
         if (w < 0)
         {
-            return done ? (long)done : (long)w; /* 透传底层错误码，而非折叠成固定值 */
+            return done ? (long)done : (long)w;
         }
         done += (uint64_t)w;
         if ((uint64_t)w < n) /* 短写：底层没接收完，停 */
@@ -70,7 +70,7 @@ static long do_read_locked(file_t *f, char *ubuf, uint64_t len, char *kbuf)
     ssize_t r = f->f_op->read(f, kbuf, n);
     if (r < 0)
     {
-        return (long)r; /* 透传底层错误码，而非折叠成固定值 */
+        return (long)r;
     }
     if (r > 0 && copy_to_user(ubuf, kbuf, (uint64_t)r) != 0)
     {
@@ -292,8 +292,6 @@ static long sys_readv(int fd, const struct iovec *uiov, int iovcnt)
  * @note `dirfd` 只支持 `AT_FDCWD` 或路径本身是绝对路径这两种情况（此时 dirfd 被忽略）；
  *   传入其它 dirfd 值一律返回 `-EBADF`——真正的"相对某个已打开目录 fd 解析路径"需要
  *   `vfs_lookup` 支持从任意 dentry 起点解析，当前 VFS 没有这个能力，留给以后实测撞上再补。
- * @note 失败原因取自 vfs_open 带出的错误码（EROFS / EEXIST / EISDIR / ENOTDIR 等），
- *   不再一律按 ENOENT 回填。
  */
 static long sys_openat(int dirfd, const char *upath, int flags, int mode)
 {
@@ -337,10 +335,8 @@ static long sys_openat(int dirfd, const char *upath, int flags, int mode)
     return fd;
 }
 
-/* lseek(fd, offset, whence)：vfs_lseek 已经处理了 SEEK_SET/CUR/END 与越界校验，
- * 这里只是薄壳。目录 fd 的特殊语义（仅允许 SEEK_SET 到 0 = rewinddir）留给
- * 目录读取通路落地之后——当前 vfs_open 还不支持打开目录，这个分支永远走不到，
- * 现在加上只是死代码。 */
+/* lseek(fd, offset, whence)：薄壳，SEEK_* 语义与越界校验在 vfs_lseek 与底层的 lseek 回调里
+ * （目录只支持 SEEK_SET 到 0，即 rewinddir）。 */
 static long sys_lseek(int fd, long offset, int whence)
 {
     file_t *f = proc_fd_get(fd);
@@ -365,11 +361,10 @@ static long sys_lseek(int fd, long offset, int whence)
  * @brief 内核内部 stat_t（4 字段）→ Linux riscv64 ABI 的 struct linux_stat（128 字节）
  * @details 布局填充：
  *   `st_mode`/`st_size`/`st_nlink` 直接搬；`st_blksize` 固定 512（FatFS 扇区大小）；
- *   `st_blocks` 按 512 字节块数向上取整；`st_dev`/`st_rdev`/uid/gid/三个时间戳
- *   FAT 没有对应概念或目前没有时钟源，统一填 0（时间戳待 `clock_gettime` 实现后再回填）。
- *   **`st_mode` 不能是 0**——BusyBox `ls` 靠 `S_ISDIR(st_mode)` 判类型，
- *   `ash` 执行程序前靠 `st_mode & 0111` 判可执行位，这也是 fatfs_vfs.c 建 inode 时
- *   必须真的填权限位的原因（见该文件的改动）。
+ *   `st_blocks` 按 512 字节块数向上取整；`st_dev`/`st_rdev`/uid/gid 没有对应概念，
+ *   FAT 的时间戳也没接出来，统一填 0。
+ *   `st_mode` 不能是 0——BusyBox `ls` 靠 `S_ISDIR(st_mode)` 判类型，
+ *   `ash` 执行程序前靠 `st_mode & 0111` 判可执行位，所以 fatfs_vfs.c 建 inode 时要填权限位。
  */
 static void stat_to_linux(const stat_t *ks, struct linux_stat *ls)
 {
@@ -438,22 +433,16 @@ static long sys_fstat(int fd, struct linux_stat *ustatbuf)
 }
 
 /**
- * @brief newfstatat(dirfd, path, statbuf, flags)
- * @note `dirfd` 的支持范围与 `sys_openat` 一致：只认 `AT_FDCWD` 或绝对路径。
- * @note 支持 `AT_EMPTY_PATH`——path 为空串时退化成对 `dirfd` 本身做 fstat，
- *   代价只是多一个分支，musl 的 `fstat()` 在某些实现路径上就是这么包装 `newfstatat` 的。
- */
-/**
  * @brief faccessat(2)：查询对某个路径是否具备请求的权限
  * @param[in] mode  F_OK / R_OK / W_OK / X_OK 的按位或
  * @param[in] flags AT_EACCESS / AT_SYMLINK_NOFOLLOW，单用户 + FAT 下都无意义，忽略
  * @retval 0 具备
  * @retval ENO28_ACCESS 目标存在但不具备（当前只可能是对只读文件请求 W_OK）
  * @retval <0 其它 ENO*（路径不存在时是 vfs_stat 给的 ENOENT）
- * @details 唯一有真实依据的是**写权限**：FAT 的只读属性由 fatfs 适配层映射成
+ * @details 唯一有真实依据的是写权限：FAT 的只读属性由 fatfs 适配层映射成
  *   i_mode 的 0555（见 fatfs_vfs.c 的 lookup_cb），这里据它判定。
  *   读与执行位在 FAT 上不存在、i_mode 里那两位是编造的恒真值，所以对 R_OK/X_OK
- *   一律放行——**这不是偷懒，是"文件存在即可读可执行"在本文件系统上的真实语义**，
+ *   一律放行——这不是偷懒，是"文件存在即可读可执行"在本文件系统上的真实语义，
  *   do_exec 本来也不检查执行位。
  *
  *   不实现的后果不是报错而是行为跑偏：BusyBox 的 rm 用 access(path, W_OK) 决定
@@ -489,6 +478,13 @@ static long sys_faccessat(int dirfd, const char *upath, int mode, int flags)
     }
     return 0;
 }
+
+/**
+ * @brief newfstatat(dirfd, path, statbuf, flags)
+ * @note `dirfd` 的支持范围与 `sys_openat` 一致：只认 `AT_FDCWD` 或绝对路径。
+ * @note 支持 `AT_EMPTY_PATH`——path 为空串时退化成对 `dirfd` 本身做 fstat，
+ *   musl 的 `fstat()` 在某些实现路径上就是这么包装 `newfstatat` 的。
+ */
 static long sys_newfstatat(int dirfd, const char *upath, struct linux_stat *ustatbuf, int flags)
 {
     char kpath[VFS_PATH_MAX];
@@ -641,11 +637,10 @@ static long sys_unlinkat(int dirfd, const char *upath, int flags)
 /**
  * @brief renameat2(2)：改名/移动
  * @param[in] flags RENAME_NOREPLACE / RENAME_EXCHANGE / RENAME_WHITEOUT，一律不支持
- * @note flags 非 0 时返回 EINVAL 而不是忽略：那三个标志都要求**原子**语义
+ * @note flags 非 0 时返回 EINVAL 而不是忽略：那三个标志都要求原子语义
  *   （不覆盖 / 互换 / 留白），底下的 FatFS 一个都给不了，静默忽略等于骗调用方。
  * @note riscv64 的 asm-generic ABI 没有 renameat(38)，musl 的 rename()/renameat()
- *   发的都是这个号。此前内核接的是 38——那个号在本 ABI 上根本不存在，
- *   只有我们自己手写的 filetest 在用它，所以一直没被发现。
+ *   发的都是这个号。
  */
 static long sys_renameat2(int olddirfd, const char *uoldpath,
                           int newdirfd, const char *unewpath, int flags)
@@ -692,7 +687,7 @@ static long sys_chdir(const char *upath)
 
 /**
  * @brief getcwd(buf, size)
- * @note **返回值不是 0**：Linux 的 getcwd 成功时返回写入缓冲区的字节数（含结尾 '\0'），
+ * @note 返回值不是 0：Linux 的 getcwd 成功时返回写入缓冲区的字节数（含结尾 '\0'），
  *   musl 靠这个判断是否成功。而内核内部的 vfs_getcwd 返回的是 ENO0_NO_ERROR，
  *   所以这里要自己 strlen 后换算——直接透传 vfs_getcwd 的返回值是错的。
  */
@@ -889,8 +884,7 @@ static long sys_fcntl(int fd, int cmd, long arg)
 /**
  * @brief ioctl(fd, cmd, arg)
  * @note 只服务 TTY（`tty_from_file` 判定，不是简单看 `f_kind==FILE_KIND_DEVICE`——
- *   以后加了 `/dev/null` 之类的其它字符设备，那些 file 的 `f_private` 不是
- *   `tty_t*`，用 `f_kind` 单独判断会把它们的 `f_private` 错当 `tty_t*` 解释）。
+ *   `/dev/null` 这类其它字符设备的 `f_private` 不是 `tty_t*`）。
  *   非 TTY 的 fd 一律 `-ENOTTY`——BusyBox/ash 靠这个错码判断"是不是在终端里跑"。
  * @note `TCSETS`/`TCSETSW`/`TCSETSF` 当前行为完全相同：不做 drain/flush，
  *   TTY 缓冲很小，区别在交互上不可见，是有意的简化。改 `tio` 要持 `tty->lock`——
@@ -993,7 +987,7 @@ static long sys_dup3(int oldfd, int newfd, int flags)
     }
     atomic_add(&f->f_count, 1);
     proc_fd_install(newfd, f);
-    /* dup3 的 flags 里只有 O_CLOEXEC 有意义（此前是 (void)flags 丢弃，现已接上）*/
+    /* dup3 的 flags 里只有 O_CLOEXEC 有意义 */
     if (flags & O_CLOEXEC)
     {
         proc_fd_set_flags(newfd, FD_CLOEXEC);
@@ -1027,13 +1021,12 @@ static long sys_clone(intstkf_t *sp)
  * ============================================================ */
 
 /**
- * @name sys_rt_sigaction
  * @brief 装/取一个信号的处理动作
  * @param[in]  sig         信号号
  * @param[in]  uact        用户空间的新动作，NULL 表示只查询
  * @param[out] uoact       用户空间的出参，NULL 表示不关心
  * @param[in]  sigsetsize  sigset_t 的字节数，必须是 8
- * @note struct sigaction 用的是**内核 ABI 的 24 字节布局**（handler/flags/mask），
+ * @note struct sigaction 用的是内核 ABI 的 24 字节布局（handler/flags/mask），
  *   sa_mask 在最后，没有 sa_restorer——riscv64 未定义 SA_RESTORER。
  */
 static long sys_rt_sigaction(int sig, const void *uact, void *uoact, uint64_t sigsetsize)
@@ -1103,10 +1096,9 @@ static long sys_rt_sigpending(void *uset, uint64_t sigsetsize)
 }
 
 /**
- * @name sys_kill
  * @brief 给一个进程或一个进程组发信号
  * @param[in] pid >0 单个进程；==0 调用者所在的进程组；<-1 进程组 -pid；
- *                ==-1 本阶段不支持（广播很容易在测试里把 init 打死）
+ *                ==-1 不支持（广播很容易在测试里把 init 打死）
  * @param[in] sig 信号号；0 只做存在性检查（POSIX 的 kill -0）
  */
 static long sys_kill(int pid, int sig)
@@ -1188,7 +1180,7 @@ static long sys_getpgid(int pid)
 
 /* a0=path, a1=argv, a2=envp。成功后 sp 已被改写为进入新程序的帧，本函数返回 0；
  * trap.c 那句 `sp->x10_a0 = syscall_dispatch(sp)` 于是把 0 写回 a0——这正好符合
- * Linux 进程入口的约定（a0 在 _start 处为 0），而 argc/argv 是从**栈上**读的，
+ * Linux 进程入口的约定（a0 在 _start 处为 0），而 argc/argv 是从栈上读的，
  * 不经过 a0，所以这条写回不会破坏刚铺好的初始栈。失败返回负 ENO*。 */
 static long sys_execve(intstkf_t *sp)
 {
@@ -1202,7 +1194,7 @@ static long sys_execve(intstkf_t *sp)
  * @param[out] ustatus 用户空间的 status 出参，NULL 表示不关心
  * @param[in]  options WNOHANG 生效；WUNTRACED / WCONTINUED 被忽略
  * @param[in]  rusage  未实现，忽略
- * @note WNOHANG 命中时返回 0，此时**不写 ustatus**——没有子进程退出，
+ * @note WNOHANG 命中时返回 0，此时不写 ustatus——没有子进程退出，
  *   status 里没有任何有意义的内容可填，写进去只会让调用方读到上一轮的残留。
  */
 static long sys_wait4(int pid, int *ustatus, int options, void *rusage)
@@ -1227,16 +1219,15 @@ static inline virAddr_t syscall_round_up_page(virAddr_t va)
 }
 
 /**
- * @name sys_brk
  * @brief 查询或调整进程堆顶
  * @param[in] addr 期望的新堆顶；0 表示只查询
  * @return 生效后的 brk 值
- * @details 成功返回新 brk，失败返回**旧 brk**——内核侧的 brk 不返回负 errno。
+ * @details 成功返回新 brk，失败返回旧 brk——内核侧的 brk 不返回负 errno。
  *   musl 的 __expand_heap 判断成功的方式是"返回值 >= 请求的 addr"，返回
  *   -ENOMEM 会被它当成一个合法的天文数字堆顶，随后立刻踩空。
  *
  *   扩张只改 brk_current 这一个整数，物理页留给缺页处理懒分配；收缩则必须真正
- *   解映射并归还物理页，否则 malloc 每次 free 大块后堆都不缩，6 MB 撑不了几轮。
+ *   解映射并归还物理页，否则 malloc 每次 free 大块后堆都不缩。
  */
 static long sys_brk(virAddr_t addr)
 {
@@ -1263,7 +1254,7 @@ static long sys_brk(virAddr_t addr)
 }
 
 /* PROT_NONE（0）在本项目没有对应表示——VMA 存在即可访问，没有"存在但不可访问"
- * 这一档，第一版按 VMP_R 处理。@TODO 需要真实 PROT_NONE 语义时补 VMA 级别的标志。 */
+ * 这一档，按 VMP_R 处理。@todo 需要真实 PROT_NONE 语义时补 VMA 级别的标志。 */
 static pgprot_t prot_to_vmp(int prot)
 {
     pgprot_t flag = 0;
@@ -1287,7 +1278,6 @@ static pgprot_t prot_to_vmp(int prot)
 }
 
 /**
- * @name sys_mmap
  * @brief 匿名私有映射，返回一段新的用户虚拟地址
  * @param[in] addr   建议地址，本实现忽略（不支持 MAP_FIXED）
  * @param[in] len    映射长度，向上取整到页
@@ -1317,7 +1307,7 @@ static long sys_mmap(virAddr_t addr, uint64_t len, int prot, int flags, int fd, 
     }
     if (flags & MAP_FIXED)
     {
-        return ENO6_INVAL_PARAM; /* @TODO musl 若真的需要，再补 MAP_FIXED */
+        return ENO6_INVAL_PARAM;
     }
     if (fd != -1)
     {
@@ -1340,7 +1330,6 @@ static long sys_mmap(virAddr_t addr, uint64_t len, int prot, int flags, int fd, 
 }
 
 /**
- * @name sys_munmap
  * @brief 解除 [addr, addr+len) 的映射，回收物理页并调整/删除/分裂相关 VMA
  * @param[in] addr 起始地址，必须页对齐
  * @param[in] len  长度，向上取整到页
@@ -1355,7 +1344,7 @@ static long sys_mmap(virAddr_t addr, uint64_t len, int prot, int flags, int fd, 
  *
  *   情形 4 的新 vma_t 必须在动原 VMA 之前分配好，分配失败直接返回，
  *   不留"洞已打、VMA 还没分裂"的半截状态。
- * @note 打到堆 VMA 上第一版直接拒绝：本项目的堆边界由 brk_current 单独表达，
+ * @note 打到堆 VMA 上直接拒绝：本项目的堆边界由 brk_current 单独表达，
  *   截断堆 VMA 会与它冲突。musl 与 BusyBox 都不会 munmap 堆区。
  */
 static long sys_munmap(virAddr_t addr, uint64_t len)
@@ -1642,11 +1631,10 @@ static long sys_settimeofday(const struct timeval *utv, const void *utz)
  * @param[out] urem     被信号打断时回填剩余时长；TIMER_ABSTIME 下按 POSIX 不回填
  * @retval ENO0_NO_ERROR    睡满了
  * @retval ENO26_INTERRUPTED 被信号打断
- * @details **被打断时返回 -EINTR 而不是 -ERESTARTSYS，这是有意的**：
+ * @details 被打断时返回 -EINTR 而不是 -ERESTARTSYS，这是有意的：
  *   SA_RESTART 的重启会拿着原始的 req 再睡一遍完整时长，`sleep 10` 每收到一次
- *   SIGCHLD 就多睡 10 秒。Linux 为此有一套 restart_block + restart_syscall 机制，
- *   本项目不做——musl 的 sleep() 自己就在拿 rem 循环重试，续睡由用户态负责。
- *   **前提是 rem 必须填准**，这也正是 sleeping_tasks 改纳秒时基的直接原因。
+ *   SIGCHLD 就多睡 10 秒。Linux 为此有一套 restart_block 机制，本项目不做——
+ *   musl 的 sleep() 自己拿 rem 循环重试，续睡由用户态负责，前提是 rem 必须填准。
  *
  *   绝对/相对两种模式统一成"先算出还要睡多久"：读一次请求时钟的当前值，目标减
  *   当前即可，不需要把墙钟偏移暴露出来。
@@ -1730,7 +1718,7 @@ static long sys_clock_nanosleep(int clock_id, int flags,
  * @brief 装/改 ITIMER_REAL 定时器，到期向本进程投 SIGALRM
  * @note ITIMER_VIRTUAL / ITIMER_PROF 要按进程 CPU 时间计费，依赖 utime/stime 拆分，
  *   本内核没有，一律 -EINVAL。it_value 为 {0,0} 表示取消。
- *   uold 回填的是**剩余时间**，不是原始设定值。
+ *   uold 回填的是剩余时间，不是原始设定值。
  */
 static long sys_setitimer(int which, const struct itimerval *unew, struct itimerval *uold)
 {
@@ -1861,13 +1849,8 @@ static long sys_umask(int mask)
  * @retval 0 成功
  * @retval ENO8_NULL_POINTER 用户指针不可访问
  * @retval ENO6_INVAL_PARAM 其它 option
- * @details BusyBox 的 `main` 一上来就调 `re_execed_comm()`：它 `prctl(PR_GET_NAME, comm)`
- *   拿到自己的进程名，和 `"busybox"` 比对，据此判断本次是不是被自己 re-exec 起来的
- *   （standalone shell 跑 applet 时会走那条路）。**返回 -ENOSYS 时它那个 `char comm[16]`
- *   保持未初始化**，比较的是栈垃圾——答案碰巧对，但下一次栈布局一变就可能翻。
- *
- *   PCB 里本来就有 `proc_pname`，所以这两条有真实语义可落，不是为了让 BusyBox
- *   往下走而返回假成功。
+ * @details BusyBox 的 `main` 一上来就 `prctl(PR_GET_NAME)` 取自己的进程名、与 `"busybox"`
+ *   比对，判断是不是被自己 re-exec 起来的；返回 -ENOSYS 时它比较的是未初始化的栈缓冲。
  * @note 只拷 TASK_COMM_LEN（16）字节：调用方按 Linux 的 TASK_COMM_LEN 开缓冲区，
  *   照 PNAME_MAX_LENGTH（64）拷就是往用户栈上越界写。
  */
@@ -1939,7 +1922,7 @@ static long sys_sched_yield(void)
     return ENO0_NO_ERROR;
 }
 
-/* 存下指针、返回 pid。**不做退出时的 futex 唤醒**——本内核没有 futex，
+/* 存下指针、返回 pid。不做退出时的 futex 唤醒——本内核没有 futex，
  * 且单线程进程没人在等这个字段被清零。musl 的 __init_tp 启动即调本调用。 */
 static long sys_set_tid_address(uint64_t tidptr)
 {
@@ -1948,9 +1931,12 @@ static long sys_set_tid_address(uint64_t tidptr)
     return cur->proc_pid;
 }
 
+/**
+ * @brief 按 a7 分派系统调用，a0..a5 为参数；返回值由 trap 路径写回 a0
+ */
 long syscall_dispatch(intstkf_t *sp)
 {
-    switch (sp->x17_a7) /* a7中存放了系统调用号 */
+    switch (sp->x17_a7)
     {
     case __NR_write:
         return sys_write((int)sp->x10_a0, (const char *)sp->x11_a1, sp->x12_a2);
@@ -2001,7 +1987,7 @@ long syscall_dispatch(intstkf_t *sp)
     case __NR_dup3:
         return sys_dup3((int)sp->x10_a0, (int)sp->x11_a1, (int)sp->x12_a2);
     case __NR_exit:
-    case __NR_exit_group: /* 本阶段暂作 exit 别名，不区分线程组 */
+    case __NR_exit_group: /* 没有线程组，等同 exit */
         return sys_exit((int)sp->x10_a0);
     case __NR_getpid:
         return sys_getpid();

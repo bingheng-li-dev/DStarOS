@@ -15,8 +15,7 @@
 /**
  * @brief 读取调度用的当前时刻
  * @return `time` CSR 的当前值（频率见 tick.h 的 TIMEBASE_FREQ_HZ，按平台不同）
- * @details @TODO
- *   有意**不用** tick 计数（`tick_get_current()`）作为时基：即使按 200 Hz（5 ms/tick）
+ * @details 有意不用 tick 计数（`tick_get_current()`）作为时基：即使按 200 Hz（5 ms/tick）
  *   折算，协作式调度下内核线程往往打印完就让出，运行时长远小于一个 tick ——
  *   那样所有任务的 delta 恒为 0、vruntime 全为 0，红黑树排序完全退化。
  *   直接读 `time` CSR 可获得约 0.1 微秒的分辨率，vruntime 记账才有意义。
@@ -45,7 +44,7 @@ typedef struct cfs_run_queue
 {
     struct rb_root tasks;   /* 按 vruntime 排序，最左即 vruntime 最小者 */
     uint64_t min_vruntime;  /* 单调递增下界，新建/唤醒任务的 vruntime 基准 */
-    uint32_t nr_running;    /* 树中任务数（不含当前z正在运行任务与 idle） */
+    uint32_t nr_running;    /* 树中任务数（不含当前正在运行任务与 idle） */
 } cfs_rq_t;
 
 /* RT 优先级档数：数值越大优先级越高，bitmap 为 uint32_t 故上限 32 */
@@ -67,16 +66,13 @@ typedef struct rt_run_queue
  */
 typedef struct run_queue
 {
-    cfs_rq_t cfs;    /* CFS 子队列（M1 启用） */
-    rt_rq_t rt;      /* RT 子队列（M3 启用，M1 仅初始化） */
+    cfs_rq_t cfs;    /* CFS 子队列 */
+    rt_rq_t rt;      /* RT 子队列 */
     osslock_t lock;  /* 保护整个rq，含两个子队列 */
 } rq_t;
 
 /**
  * @brief 调度类接口（vtable）：CFS（fair）与 RT 各实现一份，通过类链遍历选择
- * @note 与 `proc.h` 中 `pcb_t.proc_sched_class` 的前向声明 `struct sched_class` 是同一类型；
- *   此处补全定义。函数体（`fair_sched_class`/`rt_sched_class` 两份实例）由 sched.c 手动实现，
- *   这里只定义接口形状。
  */
 typedef struct sched_class
 {
@@ -94,16 +90,16 @@ extern const sched_class_t idle_sched_class;  /* idle 类：链尾兜底，pick_
 
 /* 初始化就绪队列（两个子队列 + 锁）；须在 proc_init() 之前调用 */
 void sched_init(void);
-/* 登记为当前任务；由 proc_init() 调用 */
+/* 登记为本 CPU 的当前任务并记下换入时刻（proc_init() 与 sched_schedule() 调用） */
 void sched_set_current(pcb_t *p);
-/* 核心调度：结算当前任务 vruntime、选出最左任务并 switch_to 过去 */
+/* 核心调度：结算当前任务、沿类链选出下一个任务并 switch_to 过去 */
 void sched_schedule(void);
 /* 被 switch_to 换上之后必须调用一次：释放前一条执行流持有的 run_queue.lock
  * （"接力"约定，见 sched_schedule 内注释）。新建执行流的入口 fork_out() 同样要调。 */
 void sched_finish_switch(void);
-/* 入就绪队列（fork / wakeup 路径） */
+/* 入就绪队列，已在队中则为空操作；调用者须持 run_queue.lock */
 void sched_enqueue(pcb_t *p);
-/* 出就绪队列 */
+/* 出就绪队列，不在队中则为空操作；调用者须持 run_queue.lock */
 void sched_dequeue(pcb_t *p);
 /* p 刚变为就绪（唤醒/新建）：入队 + 判断是否该抢占当前任务，两步在同一把锁下完成；
  * do_fork/wakeup 调这一个函数即可，不要自己拆开调 sched_enqueue */
@@ -118,26 +114,26 @@ void sched_setscheduler(pcb_t *p, int policy, uint8_t rt_prio);
 /* 唤醒 proc：置 RUNNING + sched_activate。proc 是已知的目标任务（比如信号量
  * wait_list 里摘下来的那个、或父进程持有的子进程指针），不是"从某个队列弹出"。 */
 void wakeup(pcb_t *proc);
-/* 只负责"标记不可运行 + 让出 CPU"，不维护等待队列——谁负责将来找到并
- * wakeup() 这个任务是调用者的责任。调用者必须在自己的锁保护下完成
- * "检查条件 → 挂入等待结构 → sleep()"整套操作，否则会有检查完条件、
- * 真正睡下去之前被人抢先 wakeup 导致丢失唤醒的风险。
- * @param proc  只能是 proc_get_current()——sched_schedule() 换下的永远是当前
- *              正在这个 CPU 上跑的任务，传别的 pcb 只会误改一个不相关任务
- *              的状态，当前任务该做的让出 CPU 却不会发生。
- * @param state 睡眠时置的状态，INTERRUPTIBLE 或 UNINTERRUPTIBLE，由调用者
- *              按自己的语义决定（比如信号量等待用 UNINTERRUPTIBLE）。 */
+/**
+ * @brief 标记当前任务不可运行并让出 CPU，不维护等待队列
+ * @param[in] proc  只能是 proc_get_current()：sched_schedule() 换下的永远是当前任务，
+ *                  传别的 pcb 只会误改一个不相关任务的状态
+ * @param[in] state INTERRUPTIBLE 或 UNINTERRUPTIBLE，由调用者按语义决定
+ * @note 将来由谁 wakeup() 这个任务是调用者的责任。调用者须在自己的锁保护下完成
+ *   "检查条件 → 挂入等待结构 → sleep()"，否则会在检查完条件、真正睡下之前被人
+ *   抢先唤醒而丢失这次唤醒。
+ */
 void sleep(pcb_t *proc, sta_t state);
 
 /* 当前任务定时睡眠 ns 纳秒后被 tick 中断唤醒；期间从就绪队列摘下，不占用 CPU
- * （区别于 tick_delay() 的忙等自旋）。**到期检查点是每个 tick 一次**，所以实际
+ * （区别于 tick_delay() 的忙等自旋）。到期检查点是每个 tick 一次，所以实际
  * 睡眠时长会向上取整到 tick 边界；纳秒时基买到的是"剩余时间可以算准"。
  * 可被信号唤醒（置 INTERRUPTIBLE）——返回后调用者应自行检查 signal_pending()。 */
 void sched_sleep_ns(uint64_t ns);
 /* 同上，以 tick 为单位。 */
 void sched_sleep_ticks(uint64_t ticks);
 /* 把任务从 sleeping_tasks 上摘下来；幂等（不在链上时是空操作）。
- * **被信号唤醒的定时睡眠必须走这里**：signal_send() 只把任务置 RUNNING 并入就绪
+ * 被信号唤醒的定时睡眠必须走这里：signal_send() 只把任务置 RUNNING 并入就绪
  * 队列，节点仍留在 sleeping_tasks 上，到点 sched_check_timers() 会对同一个 pcb
  * 再 list_del + wakeup 一次（若进程已退出，pcb 已还给 slab，就是拿悬空指针操作链表）。 */
 void sched_timer_remove(pcb_t *p);

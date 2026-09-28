@@ -15,9 +15,7 @@
 #define OS_TICK cpu_get_by_index(0)->tick
 
 osslock_t tick_lock;
-/* 频率常量与 tick 频率见 tick.h 的 TIMEBASE_FREQ_HZ / TICK_HZ——那里也解释了
- * 两个平台的折算值为何不可混用。clock_gettime 需要的是频率本身，所以常量必须
- * 有名字、不能只以除法结果的形式存在。 */
+/* 频率常量见 tick.h 的 TIMEBASE_FREQ_HZ / TICK_HZ */
 static uint64_t timebase = TICK_PERIOD_COUNTS;
 
 static void tick_set_next_int(uint64_t stime)
@@ -28,6 +26,9 @@ static void tick_set_next_int(uint64_t stime)
 #endif
 }
 
+/**
+ * @brief 用设备树里的 /cpus/timebase-frequency 核对编译期常量 TIMEBASE_FREQ_HZ
+ */
 void tick_check_timebase(void)
 {
     if (!fdt_is_available())
@@ -52,10 +53,8 @@ void tick_check_timebase(void)
         return;
     }
 
-    /* 不自动改用 DTB 的值：TIMEBASE_FREQ_HZ 是编译期常量，被 ktime.h 的内联函数与
-     * syscall.c 当除数用（常量除法才会被优化成乘加移位），运行时改不了。
-     * 这里只负责把"猜错了"这件事喊得足够响——否则它的症状是打字发粘、sleep 时长
-     * 整体偏，很容易被当成别的问题查半天。 */
+    /* 不自动改用 DTB 的值：TIMEBASE_FREQ_HZ 是编译期常量（被当除数用），运行时改不了，
+     * 这里只负责把"猜错了"喊得足够响。 */
     printf("timebase: *** MISMATCH *** compile-time %lu Hz, dtb says %lu Hz\n",
            TIMEBASE_FREQ_HZ, (unsigned long)hz);
     printf("timebase: tick rate and all sleep durations will be off by %lu/%lu"
@@ -63,7 +62,10 @@ void tick_check_timebase(void)
            (unsigned long)hz, TIMEBASE_FREQ_HZ);
 }
 
-/* 必须在trap_init()之后被调用 */
+/**
+ * @brief 初始化本 hart 的时钟中断
+ * @note 必须在 trap_init() 之后调用。
+ */
 void tick_init(void)
 {
     /* tick_lock 是所有 hart 共享的一把锁，只能初始化一次 */
@@ -73,9 +75,12 @@ void tick_init(void)
     }
     tick_set_next_int(timebase);
     cpu_get_current()->tick = 0;
-    printf("%s::core %d tick inited!\n", __FUNCTION__, cpu_get_core_id());
+    printf("%s::core %d tick inited!\n", __func__, cpu_get_core_id());
 }
 
+/**
+ * @brief 时钟中断处理：本 hart 的 tick 加一，并驱动调度、TTY 轮询与各类定时器
+ */
 void tick_int_handler(void)
 {
     irq_key_t tick_lock_key = spinlock_acquire(&tick_lock);
@@ -87,10 +92,8 @@ void tick_int_handler(void)
     }
 #endif
     spinlock_release(&tick_lock, tick_lock_key);
-    /* 以下几步都必须在 tick_lock 释放之后，它们各自要抢别的锁，叠在 tick_lock
-     * 里面只会多一层没必要的锁序：
-     *   sched_task_tick 要抢 run_queue.lock（它读就绪队列，必须与 enqueue/dequeue 互斥）；
-     *   tty_poll_input 会抢 tty_lock 并可能触发 waitq_wake_all -> sched_wakeup -> 就绪队列锁。 */
+    /* 以下几步都在 tick_lock 释放之后做，它们各自要抢别的锁：sched_task_tick 抢
+     * run_queue.lock，tty_poll_input 抢 tty_lock 并可能经 wakeup 再抢就绪队列锁。 */
     sched_task_tick();
     tty_poll_input();
     sched_check_timers();
@@ -98,23 +101,33 @@ void tick_int_handler(void)
     tick_set_next_int(timebase);
 }
 
+/**
+ * @brief 延时函数用的全局 tick，取核 0 的计数
+ */
 uint64_t tick_get_os_tick(void)
 {
     return OS_TICK;
 }
 
+/**
+ * @brief 本 hart 自己的 tick 计数（各 hart 各有定时器中断）
+ */
 uint64_t tick_get_current(void)
 {
     return cpu_get_current()->tick;
 }
 
+/**
+ * @brief 设置全局 tick（核 0 的计数）
+ */
 void tick_set_os_tick(uint64_t tick)
 {
-    //interrupt_disable
     OS_TICK = tick;
-    //interrupt_enable
 }
 
+/**
+ * @brief 核忙等待延时，以 tick 为单位
+ */
 void tick_delay(uint64_t ticks)
 {
     uint64_t tick_start = tick_get_os_tick();
@@ -123,6 +136,8 @@ void tick_delay(uint64_t ticks)
     {
         tick = tick_get_os_tick();
         if (tick - tick_start == ticks)
+        {
             return;
+        }
     } while (1);
 }

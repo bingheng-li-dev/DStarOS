@@ -35,14 +35,10 @@ uint64_t dtb_phys_addr;
 int boot_trace_armed;
 #endif
 
-/**
- * @brief 打印启动字符画
- */
 static void init_print_banner(void)
 {
-    /* 此时 MMU 尚未开启、按物理地址运行：指针数组里存的是链接时的高位虚拟地址，
-     * 一解引用就访问异常（trap 还没初始化，表现为一个字都不打印就卡死）。
-     * 二维字符数组的内容就地存放，取址走 PC 相对寻址，没有这个问题。 */
+    /* 必须是二维字符数组：指针数组存的是链接时的高位虚拟地址，而此时 MMU 未开、按
+     * 物理地址运行，一解引用就访问异常（trap 未初始化，表现为一个字都打不出来）。 */
     static const char banner[][64] = {
         " ____   ____   _                  ___   ____         /\\",
         "|  _ \\ / ___| | |_   __ _  _ __  / _ \\ / ___|   ____/  \\____",
@@ -62,7 +58,9 @@ static void init_print_banner(void)
 #endif
 }
 
-/* 在 MMU 开启前调用，返回 satp 寄存器值 */
+/**
+ * @brief 引导核开 MMU 之前的初始化：控制台、SBI、设备树、探测 hart、PMM 与内核页表
+ */
 void os_init_before_mmu_enable(void)
 {
     console_init();
@@ -70,10 +68,8 @@ void os_init_before_mmu_enable(void)
     printf("DStarOS is starting...\n");
     sbi_init();
     printf("dtb: phys addr 0x%lx\n", dtb_phys_addr);
-    /* 解析一次 DTB，把要用的都读出来。**这三步必须排在 MMU 开启之前**——
-     * 一开 MMU，DTB 那块地址就不在内核偏移映射范围内了（VF2 上它甚至在
-     * KERNEL_MAP_END 之外）。fdt_init 单独一行而不是藏在下面某个函数里，
-     * 是因为下面两个都依赖它，藏起来会变成靠调用顺序维系的隐式约定。 */
+    /* 这三步必须排在 MMU 开启之前：一开 MMU，DTB 就不在内核偏移映射范围内了
+     * （VF2 上它甚至在 KERNEL_MAP_END 之外）。 */
     fdt_init((phyAddr_t)dtb_phys_addr);
     tick_check_timebase();
     cpu_probe_harts();
@@ -85,25 +81,23 @@ void os_init_before_mmu_enable(void)
 #endif
 }
 
-/* 从核报到标志，按**逻辑 cpu 号**索引；每个从核只写自己那一格，引导核只读，
- * 于是不需要任何原子操作或锁。 */
+/* 从核报到标志，按逻辑 cpu 号索引。每格只由对应从核写、引导核只读，不需要锁。 */
 static volatile int secondary_up[CORE_NUMBER];
-/* 等从核报到的自旋上限。取值只要"远大于正常唤醒耗时、又不至于让上不来时干等太久"
- * 即可：QEMU 上实测正常几万圈以内就置位，这里给了三个数量级的余量。 */
+/* 等从核报到的自旋上限，宽到不可能误判，又不至于挂住太久。 */
 #define SECONDARY_UP_SPIN_LIMIT 100000000UL
 
-/* 此时MMU已打开，并且PC已通过trampoline跳高地址。
- * 参数是**逻辑 cpu 号**（引导核恒为 0），不是 hartid——见 startup.S 的说明。 */
+/**
+ * @brief 各 hart 开 MMU、经 trampoline 跳到高地址之后的初始化
+ * @param[in] cpu_id 逻辑 cpu 号（引导核恒为 0），不是 hartid
+ */
 void os_init_after_mmu_enable(uint64_t cpu_id)
 {
     cpu_set_core_id(cpu_id);
     if (cpu_id == 0)
     {
 #if DEBUG_BRINGUP
-        /* 这一行**必须绕开 printf**：init_printf 存的 stdout_putc 还是物理地址，
-         * 而恒等映射只覆盖 trampoline 那一页，经函数指针调过去当场就 fault。
-         * sbi_console_putchar 是直接调用、链接在高 VA，此刻可用。
-         * 只让引导核打：这里还没有 ConsoleLock，多核逐字符输出会交错成乱码。 */
+        /* 必须绕开 printf：它存的 stdout_putc 还是物理地址，此刻经函数指针调过去会 fault。
+         * 只让引导核打——这里还没有 ConsoleLock，多核输出会交错。 */
         for (const char *p = "mmu: high VA reached\n"; *p != '\0'; p++)
         {
             sbi_console_putchar((int)*p);
@@ -116,9 +110,8 @@ void os_init_after_mmu_enable(uint64_t cpu_id)
         trap_init();
         fpu_init();   /* 必须早于任何可能执行浮点指令的代码，含 fpu_save/fpu_restore 自身 */
 #if DEBUG_MMIO_PROBE
-        /* 必须排在 trap_init() 之后：设备区映射不对时，读 LSR 是一发内核缺页，
-         * 而 trap_init 之前 stvec 还是 0，表现是**串口完全静默**——与阶段 12 那个
-         * A 位 bug 无法区分。放在后面，同一个故障会变成一条带 scause/stval 的 panic。 */
+        /* 必须排在 trap_init() 之后：映射不对时这里会缺页，而 stvec 未设时表现为
+         * 串口完全静默，无从诊断。 */
         vmm_probe_mmio();
 #endif
 #if defined(VF2) && DEBUG_SDMMC_PROBE
@@ -147,22 +140,11 @@ void os_init_after_mmu_enable(uint64_t cpu_id)
         BOOT_TRACE("after uart_enable_rx_irq");
         fs_init();
         BOOT_TRACE("after fs_init");
-        sched_init();   /* 全局就绪队列只能由 hart 0 初始化一次，否则 hart 1 会把 init 冲掉 */
-        proc_early_init(); /* proc_list / proc_list_lock / pid_stack，必须早于启动 hart 1 */
+        sched_init();   /* 全局就绪队列只能由引导核初始化一次，否则后起的从核会把 init 冲掉 */
+        proc_early_init(); /* proc_list / proc_list_lock / pid_lock，必须早于启动从核 */
 
-        /* 启动 hart 1（HSM）。成功则等它过了 trampoline 再移除 trampoline 恒等映射——
-         * hart 1 的 trampoline 依赖内核页表里这段恒等映射，提前移除会让它一 csrw satp 就崩。
-         * 若 HSM 不支持/失败则退回单核，直接移除。
-         *
-         * **这一段必须排在 proc_init() 之前**（2026-09-01 修）。原来排在后面，而
-         * proc_init() 里 fork 出 init 时 sched_activate() 会当场把本执行流（此时已经
-         * 是 hart0 的 idle 任务）抢占掉，剩下的启动代码要等 idle 被重新调度才继续——
-         * 实测 30 次里只有 3 次轮得上，也就是**九成的运行里 hart 1 根本没启动、
-         * 整个系统是单核跑的**，`-smp 2` 形同虚设。少数轮得上的运行里，hart 1 又是在
-         * 系统已经在多任务调度之后才半路加入，比在启动阶段加入脆弱得多。
-         *
-         * hart 探测本身已挪到 os_init_before_mmu_enable()——它要读设备树，
-         * 而 DTB 只在 MMU 开启之前可访问。 */
+        /* 启动从核必须排在 proc_init() 之前：fork 出 init 时引导核会被抢占，剩下的
+         * 启动代码要等 idle 重新被调度才继续。HSM 不支持或启动失败则退回单核。 */
         int started = 0;
         for (int id = 1; id < cpu_get_present_count(); id++)
         {
@@ -172,9 +154,8 @@ void os_init_after_mmu_enable(uint64_t cpu_id)
             }
         }
 
-        /* 有界等待：SBI 报了 SUCCESS 不代表从核真的活着走到了高 VA。
-         * 死等的代价是整机停住、串口再无一个字（这个卡死曾经真实发生过），
-         * 有界之后最坏也只是少几个核继续跑，还留下一条可见的日志。 */
+        /* 有界等待：SBI 报 SUCCESS 不代表从核真的走到了高 VA。死等会整机停住、串口
+         * 再无一个字；有界之后最坏也只是少几个核，还留下一条可见日志。 */
         int up = 0;
         for (uint64_t spin = 0; spin < SECONDARY_UP_SPIN_LIMIT && up < started; spin++)
         {
@@ -190,10 +171,9 @@ void os_init_after_mmu_enable(uint64_t cpu_id)
             printf("core 0: only %d/%d secondary cpu(s) came up\n", up, started);
         }
 
-        /* 拆 trampoline 恒等映射的前提：**所有已请求启动的从核都已过了 trampoline**。
-         * 等超时那一路不能拆——万一某个从核姗姗来迟，trampoline 里一 csrw satp 就跑飞。
-         * 留着它只是多占一段内核低半区 VA——用户页表只复制内核高半段 [256..511]，
-         * 这段映射对 U 态完全不可见，留着无害。 */
+        /* 所有已请求启动的从核都过了 trampoline 才能拆恒等映射——超时那一路不能拆，
+         * 姗姗来迟的从核一 csrw satp 就跑飞。留着只多占一段内核低半区 VA：用户页表
+         * 只复制内核高半段 [256..511]，对 U 态不可见。 */
         if (up == started)
         {
             vmm_remove_identity_mapping();

@@ -7,18 +7,18 @@
 #   bash tools/build_busybox.sh menuconfig   # 改配置，退出时自动把增量存回 configs/
 #   BUSYBOX_SRC=/path/to/busybox bash tools/build_busybox.sh
 #
-# 源码树**不进 git**（10 MB+，是外部项目），进 git 的是本脚本记的版本号与
+# 源码树不进 git（10 MB+，是外部项目），进 git 的是本脚本记的版本号与
 # configs/busybox_dstar.config——那两样合起来就是"这个 busybox 是怎么来的"的完整记录。
-# 这条原则与阶段 9 处理 musl 工具链的方式一致：工具链 103 MB 不进 git，
+# musl 工具链同理：工具链 103 MB 不进 git，
 # 但 docker/Dockerfile 里的版本 + URL + sha256 进了。
 #
-# **out-of-tree 构建**（Kbuild 的 O=）：产物全部落在 BUSYBOX_BUILD，源码树保持干净。
+# out-of-tree 构建（Kbuild 的 O=）：产物全部落在 BUSYBOX_BUILD，源码树保持干净。
 # 这样源码树可以是一个只读的 git checkout，切 tag 不会撞上未跟踪的构建产物。
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# 源码树。busybox.net 实测不可达（30 s 超时），源码走 GitHub 镜像：
+# 源码树。busybox.net 不可达，源码走 GitHub 镜像：
 #   git clone https://github.com/mirror/busybox /root/riscv/busybox_mirror
 #   cd /root/riscv/busybox_mirror && git checkout 1_38_0
 BUSYBOX_SRC="${BUSYBOX_SRC:-/root/riscv/busybox_mirror}"
@@ -43,7 +43,7 @@ need() {
     }
 }
 need make make
-need gcc build-essential          # BusyBox 要用**宿主** gcc 编它自己的构建工具
+need gcc build-essential          # BusyBox 要用宿主 gcc 编它自己的构建工具
 [ -x "${CROSS_COMPILE}gcc" ] || {
     echo "build_busybox: 找不到交叉编译器 ${CROSS_COMPILE}gcc" >&2
     exit 1
@@ -55,7 +55,7 @@ need gcc build-essential          # BusyBox 要用**宿主** gcc 编它自己的
     exit 1
 }
 
-# 版本核对只警告不拦：换版本试问题是正常操作，但**必须让它出现在日志里**，
+# 版本核对只警告不拦：换版本试问题是正常操作，但必须让它出现在日志里，
 # 否则"编出来的 busybox 到底是哪个版本"就只能靠记忆了。
 if [ -d "$BUSYBOX_SRC/.git" ]; then
     have=$(cd "$BUSYBOX_SRC" && git rev-parse --short HEAD)
@@ -76,7 +76,7 @@ mk() {
 
 # 把一份 kconfig 片段应用到 .config 上。
 # 片段的格式就是标准的两种行：`CONFIG_X=值` 与 `# CONFIG_X is not set`，其余 # 开头的
-# 行是注释。**先删后加**，这样重复应用是幂等的。
+# 行是注释。先删后加，这样重复应用是幂等的。
 apply_fragment() {
     local frag="$1" cfg="$BUSYBOX_BUILD/.config" sym val
     while IFS= read -r line; do
@@ -95,10 +95,10 @@ apply_fragment() {
     done < "$frag"
 }
 
-# 应用完片段后复核那几条**必须关掉**的开关。
+# 应用完片段后复核那几条必须关掉的开关。
 # oldconfig 会给新出现的符号填默认值，而 ASH_JOB_CONTROL 之类的默认是 y——
 # 一旦哪天它没被关住，症状是运行时才暴露的（内核没有 stop/cont 语义），
-# 那时排查成本高得多。**配置错了要在构建期就响。**
+# 那时排查成本高得多。配置错了要在构建期就响。
 verify_must_be_off() {
     local cfg="$BUSYBOX_BUILD/.config" sym rc=0
     for sym in CONFIG_ASH_JOB_CONTROL CONFIG_FEATURE_EDITING; do
@@ -110,7 +110,7 @@ verify_must_be_off() {
     return $rc
 }
 
-# BusyBox 1.38 的 kconfig **没有 olddefconfig**，只有会逐项提问的 oldconfig；
+# BusyBox 1.38 的 kconfig 没有 olddefconfig，只有会逐项提问的 oldconfig；
 # 喂空行即取默认值。所有已有符号（allnoconfig 写满了显式值 + 我们的片段）保持原样，
 # 只有因为打开 ASH 等而新可见的子选项会取默认。
 resolve_config() {
@@ -119,7 +119,7 @@ resolve_config() {
 
 case "$MODE" in
     defconfig)
-        # 上游 defconfig：什么都不裁，**只用来证明构建链路本身是通的**。
+        # 上游 defconfig：什么都不裁，只用来证明构建链路本身是通的。
         # 它是动态链接的（CONFIG_STATIC=n），跑不进本内核，这是预期行为。
         echo "build_busybox: 使用上游 defconfig（仅验证构建链路，产物不可用于本内核）"
         mk defconfig >/dev/null
@@ -130,7 +130,7 @@ case "$MODE" in
         apply_fragment "$CONFIG_FILE"
         resolve_config
         mk menuconfig
-        # 改完自动把**增量**存回 configs/：靠人记得手动导出的话，迟早出现
+        # 改完自动把增量存回 configs/：靠人记得手动导出的话，迟早出现
         # "编出来的 busybox 和仓库里记的配置对不上"。
         cp "$BUSYBOX_BUILD/.config" "$BUSYBOX_BUILD/.config.tuned"
         mk allnoconfig >/dev/null 2>&1
@@ -153,7 +153,7 @@ case "$MODE" in
             exit 1
         }
         # 从 allnoconfig 起步而不是 defconfig：defconfig 打开约 390 个 applet，
-        # 要关的比要留的多一个数量级，而且**关漏一个是静默的**（多一个用不上的命令，
+        # 要关的比要留的多一个数量级，而且关漏一个是静默的（多一个用不上的命令，
         # 没人会发现）。从全关起步，片段里写着的就是全部，漏掉什么一目了然。
         mk allnoconfig >/dev/null 2>&1
         apply_fragment "$CONFIG_FILE"

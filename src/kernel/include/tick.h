@@ -10,17 +10,16 @@
 
 extern osslock_t tick_lock;
 
-/* time CSR 的计数频率。**必须与平台实际值一致**：此前长期沿用另一平台的折算值，
- * 实际 tick 周期变成约 0.195 秒（~5 Hz），因为在此之前没有任何功能依赖低延迟轮询，
- * 一直没被察觉，直到 TTY 的输入轮询接上去才暴露。
+/* time CSR 的计数频率。必须与平台实际值一致：写错了不会报错，只会让 tick 周期与
+ * 所有睡眠时长整体偏。
  *
  * 保持编译期常量而不是运行时变量，是因为它被 ktime.h 的内联函数与 syscall.c 当除数用，
  * 常量除法会被优化成乘加移位；改成变量就是每次 clock_gettime 都做一次真 64 位除法。
- * 代价是写错了只能重编——所以 tick_init() 里有一段开机自检去核对它。 */
+ * 代价是写错了只能重编——所以 tick_check_timebase() 在开机时核对它。 */
 #if defined(QEMU)
 #define TIMEBASE_FREQ_HZ 10000000UL     /* -machine dumpdtb 导出的 timebase-frequency 实测确认 */
 #elif defined(VF2)
-#define TIMEBASE_FREQ_HZ 4000000UL      /* JH7110，**待上板核对**；靠 tick_init 的自检兜底 */
+#define TIMEBASE_FREQ_HZ 4000000UL      /* JH7110，待上板核对；靠 tick_check_timebase() 的自检兜底 */
 #else
 #error "未知平台：TIMEBASE_FREQ_HZ 没有对应取值（PLATFORM 只允许 QEMU / VF2）"
 #endif
@@ -44,18 +43,18 @@ static inline uint64_t tick_read_time(void)
 void tick_init(void);
 /**
  * @brief 用设备树里的 /cpus/timebase-frequency 核对上面那个编译期常量
- * @note 必须在 fdt_init() 之后、**MMU 开启之前**调用——DTB 不在内核偏移映射
+ * @note 必须在 fdt_init() 之后、MMU 开启之前调用——DTB 不在内核偏移映射
  *   范围内，MMU 开启后再去读就是个没建过映射的地址。详见 fdt.h。
  * @note 只打印、不改行为：常量是唯一真相来源，DTB 只负责在猜错时喊一声。
  */
 void tick_check_timebase(void);
 void tick_int_handler(void);
-/* 系统TICK是唯一的，既系统暴露给延时函数等的TICK值是唯一的，即核0上的tick计数值。 */
+/* 延时函数用的全局 tick，取核 0 的计数 */
 uint64_t tick_get_os_tick(void);
-/* 多核都有独立的定时器中断和tick计数,tick_get_current()返回当前core的tick计数。 */
+/* 本 hart 自己的 tick 计数（各 hart 各有定时器中断） */
 uint64_t tick_get_current(void);
 void tick_set_os_tick(uint64_t tick);
 /* 核忙等待延时，以tick为单位。 */
 void tick_delay(uint64_t ticks);
 
-#endif
+#endif /* _TICK_H */

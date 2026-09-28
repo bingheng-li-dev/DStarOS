@@ -3,8 +3,8 @@
 #   suite: sched | slab | dcache | vfs | file | pipe | tty | mem | exec | sig | time | seg | wait | trap | musl | msys | mroot | mfp | bb
 # 切换套件前必须自行改 src/debug/debug.h 里对应的开关（U 态那批开关互斥）再 make。
 #
-# 阶段 9 起用户程序**从 rootfs 镜像加载**，不再嵌进内核。于是多了一个陷阱：
-# 镜像比 user/*.elf 旧的话，回归会**静默地测上一版程序**，改了测试却看不到变化。
+# 用户程序从 rootfs 镜像加载：镜像比 user/*.elf 旧的话，回归会静默地测上一版程序，
+# 改了测试却看不到变化。
 # 下面的自动重建就是为了堵这个洞——不要指望自己每次记得敲 make rootfs。
 cd "$(dirname "$0")/.." || exit 1
 
@@ -44,8 +44,8 @@ tty_input()
 
 # 每套件跑完时必然出现的收尾标记。
 #
-# **为什么这些字符串是可靠判据**：内核 printf 与 tty_write 都整段持 ConsoleLock，
-# 所以**一次 sys_write / 一次 printf 内部的字符串不会被另一个 hart 插花**；插花只发生在
+# 为什么这些字符串是可靠判据：内核 printf 与 tty_write 都整段持 ConsoleLock，
+# 所以一次 sys_write / 一次 printf 内部的字符串不会被另一个 hart 插花；插花只发生在
 # 相邻两次 write 之间（"  PASS: " / 名字 / "\n" 是三次 write，所以整行不可靠，
 # 而下面这些标记都在单次 write 里）。
 #
@@ -132,7 +132,7 @@ for i in $(seq 1 "$runs"); do
     fi
 
     # 失败/panic 时把完整串口日志留下来。偶发的 S 态 vmm_segfault 只有拿到 va 和 sepc
-    # 才有可能定位，只 grep 汇总行的话现场就没了（2026-08-27 已经因此错过两次）。
+    # 才有可能定位，只 grep 汇总行的话现场就没了。
     if [ -n "$reason" ]; then
         log="/tmp/regress-$suite-$i-fail.log"
         echo "$out" > "$log"

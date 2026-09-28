@@ -25,14 +25,10 @@ static uint64_t plic_current_s_context(void)
 
 /**
  * @brief 配置 PLIC：把 UART 接收中断只路由给 cpu0
- * @details
- *   1. 其余在位 cpu 的 S context 清掉 UART 的使能位——进内核时 enable 寄存器的
- *      状态取决于固件，不做假设；
- *   2. UART 中断优先级置 1（必须大于阈值才会投递）；
- *   3. cpu0 的 S context 阈值置 0、置上 UART 的使能位。
- *
- *   **只给 cpu0**：tty_poll_input() 只在 cpu0 上真正读接收 FIFO，别的核 claim 到之后
- *   直接返回，FIFO 没被取空，电平触发的 UART 中断会立刻重新挂起。
+ * @details 进内核时 enable 寄存器的状态取决于固件，不做假设：先清掉其余在位 cpu 的 S context
+ *   使能位，再给 cpu0 置上（优先级 1 必须大于阈值 0 才会投递）。
+ *   只给 cpu0：tty_poll_input() 只在 cpu0 上真正读接收 FIFO，别的核 claim 到之后直接返回，
+ *   FIFO 没被取空，电平触发的 UART 中断会立刻重新挂起。
  * @note 只在 cpu0 上调用一次，必须排在 tty_init() 之后、uart_enable_rx_irq() 之前。
  *   只触碰在位 cpu 的 S context——VF2 上 hart 0（S7）的 M context 一个字节都不写。
  */

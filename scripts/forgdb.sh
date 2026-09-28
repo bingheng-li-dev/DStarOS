@@ -16,10 +16,10 @@
 
 #For RustSBI v0.4.0
 # rootfs 镜像由 QEMU 的 -device loader 原样写进内存的 ROOTFS_PHYS_BASE。
-# **这个地址必须与 src/kernel/include/memtype.h 的 ROOTFS_PHYS_BASE 一致**，
+# 这个地址必须与 src/kernel/include/memtype.h 的 ROOTFS_PHYS_BASE 一致，
 # 对不上的话镜像会落在 PMM 的页帧池里，那是静默的内存损坏。
 #
-# 镜像不存在时**不加这个参数**：内核的 fatfs_mount 会退回 f_mkfs 现格式化一张空盘，
+# 镜像不存在时不加这个参数：内核的 fatfs_mount 会退回 f_mkfs 现格式化一张空盘，
 # 所有不依赖镜像内容的回归照常跑。硬加的话没跑过 `make rootfs` 的人连内核都起不来。
 ROOTFS_IMG=build/rootfs.img
 ROOTFS_ADDR=0x87000000

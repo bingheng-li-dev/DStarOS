@@ -11,7 +11,7 @@
 #include "errorcode.h"
 #include "stringops.h"
 
-/* DesignWare MMC 寄存器偏移。VERID >= 2.40a 时数据 FIFO 在 0x200（本板实测 2.90a）。 */
+/* DesignWare MMC 寄存器偏移。VERID >= 2.40a 时数据 FIFO 在 0x200（本板是 2.90a）。 */
 #define SDMMC_CTRL                  0x000
 #define SDMMC_CLKDIV                0x008
 #define SDMMC_CLKENA                0x010
@@ -75,7 +75,7 @@
 #define SD_R1_STATE_TRAN            4
 /* R1 里表示命令执行出错的位：OUT_OF_RANGE .. ERROR（不含 CARD_IS_LOCKED 这类状态位） */
 #define SD_R1_ERROR_MASK            0xfdf80000U
-/* 数据 FIFO 深度，单位是字。实测自 /soc/sdio1@16020000 的 fifo-depth */
+/* 数据 FIFO 深度，单位是字。取自设备树 sdio1@16020000 的 fifo-depth */
 #define SDMMC_FIFO_DEPTH            32U
 
 /* 只要远大于一条命令 / 一个块的正常耗时即可 */
@@ -125,7 +125,7 @@ static bool sdmmc_wait_clear(uint32_t off, uint32_t mask)
  * @brief 把数据通路从 IDMAC（DMA）切到 FIFO（PIO）
  * @retval ENO0_NO_ERROR  切换完成
  * @retval ENO30_TIMEDOUT DMA 复位位迟迟不自清
- * @details U-Boot 离开时 CTRL.USE_IDMAC = 1（实测 CTRL=0x02000000）。不清掉的话数据走
+ * @details U-Boot 离开时 CTRL.USE_IDMAC = 1。不清掉的话数据走
  *   DMA 描述符链、FIFO 永远是空的，表现是"命令成功但读不到数据"。
  *   做法照 Linux dw_mci_idmac_stop_dma()：清 USE_IDMAC、置自清的 DMA_RESET、
  *   再清 BMOD 里的 DE/FB。
@@ -247,7 +247,7 @@ static void sdmmc_finish_multi(uint32_t st)
  * @retval ENO0_NO_ERROR  读满且无数据层错误
  * @retval ENO29_IO       数据 CRC / 超时 / FIFO 溢出等错误，或读到的字数不足
  * @retval ENO30_TIMEDOUT 等不到数据传输结束（DTO）
- * @details FIFO 深度 32 个字（128 字节），一块 128 个字，**必然要分多次搬**：
+ * @details FIFO 深度 32 个字（128 字节），一块 128 个字，必然要分多次搬：
  *   每轮读 STATUS 里的 FIFO 计数，有多少取多少；DTO 置位且 FIFO 取空才算结束。
  *   FIFO 里是小端 32 位字，按字节顺序拆回缓冲区。
  *
@@ -333,7 +333,7 @@ static int sdmmc_read_xfer(uint64_t lba, uint8_t *buf, uint32_t count)
  * @retval ENO0_NO_ERROR 可以直接读块
  * @retval ENO30_TIMEDOUT / ENO29_IO / ENO4_BUSY 见 sdmmc_send_cmd()
  * @details 不重走 CMD0→ACMD41→CMD2→CMD3→CMD7 初始化序列，也不动时钟：
- *   U-Boot 最后一条命令是 CMD17（实测 STATUS 的 response_index = 17），卡大概率仍被选中。
+ *   U-Boot 最后一条命令是 CMD17（STATUS 的 response_index 为 17），卡大概率仍被选中。
  *   用 CMD16（SET_BLOCKLEN）验证——它只在传输态被接受，处于待机态的卡不会应答，
  *   所以一条命令就能区分"能直接接手"与"要重新初始化"。
  */
@@ -416,7 +416,7 @@ static inline uint64_t le64(const uint8_t *p)
  *   3. 读 LBA 0：签名 55aa，分区类型 0xee 表示 GPT，否则按 MBR 取第一个分区；
  *   4. 读第一个分区首扇区：签名 55aa 且在 0x36（FAT12/16）或 0x52（FAT32）处有 "FAT"。
  *      按块寻址对不上就换字节寻址再读一次（SDSC 卡）。
- * @note **只发读命令**。必须在 trap_init() 之后调用。
+ * @note 只发读命令。必须在 trap_init() 之后调用。
  */
 void sdmmc_probe(void)
 {
@@ -512,7 +512,7 @@ void sdmmc_probe(void)
  * @retval ENO29_IO       R1 报错，或数据层错误（写方向的 DCRC 表示卡回的 CRC 状态令牌出错）
  * @retval ENO30_TIMEDOUT 等不到传输结束，或卡一直忙
  * @details 与读对称：FIFO 深度 32 个字，按 STATUS 里的 FIFO 计数算剩余空间，有多少填多少。
- *   DTO 之后卡还在内部编程，数据线保持忙——**必须等忙结束才算写完**，
+ *   DTO 之后卡还在内部编程，数据线保持忙——必须等忙结束才算写完，
  *   否则紧接着断电，这些块可能根本没落盘。
  */
 static int sdmmc_write_xfer(uint64_t lba, const uint8_t *buf, uint32_t count)
@@ -622,7 +622,7 @@ int sdmmc_write_blocks(uint64_t lba, const uint8_t *buf, uint32_t count)
  * @brief 写通路的上板回环测试：只碰分区之前的空闲扇区，不碰任何文件系统
  * @details 目标是 MBR 与第一个分区之间的空洞里的 LBA 4096（本卡第一个分区从 8192 起，FAT 用不到这里）。
  *   1. 确认 LBA0 是 MBR（不是 GPT）且第一个分区起点在目标之后，否则放弃；
- *   2. 读出目标块，**不是全零立即放弃**——说明被别的东西用着，不能覆盖；
+ *   2. 读出目标块，不是全零立即放弃——说明被别的东西用着，不能覆盖；
  *   3. 写测试图案 → 读回逐字节比对；
  *   4. 写回全零 → 读回确认全零，恢复原状。
  * @note 任何一步失败都停下，不再继续写。必须在 trap_init() 之后调用。

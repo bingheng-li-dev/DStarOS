@@ -5,18 +5,29 @@
 #include "uaccess.h"
 #include "errorcode.h"
 
-int copy_from_user(void *kdst, const void *usrc, uint64_t n) /* SUM=1 → 直接读用户指针 */
+/**
+ * @brief 从用户空间拷贝 n 字节到内核缓冲区
+ * @note sstatus.SUM 全程置位，直接解引用用户指针；不做地址校验。
+ */
+int copy_from_user(void *kdst, const void *usrc, uint64_t n)
 {
     memcpy(kdst, usrc, n);
     return 0;
 }
 
-int copy_to_user(void *udst, const void *ksrc, uint64_t n) /* SUM=1 → 直接写用户指针 */
+/**
+ * @brief 从内核缓冲区拷贝 n 字节到用户空间
+ * @note 同 copy_from_user()。
+ */
+int copy_to_user(void *udst, const void *ksrc, uint64_t n)
 {
     memcpy(udst, ksrc, n);
     return 0;
 }
 
+/**
+ * @brief 从用户空间拷贝一个以 '\0' 结尾的字符串（参数与返回值见 uaccess.h）
+ */
 long strncpy_from_user(char *kdst, const char *usrc, size_t n)
 {
     if (usrc == NULL || (uint64_t)usrc >= USER_STACK_TOP)

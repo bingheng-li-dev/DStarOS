@@ -10,25 +10,25 @@
 #include "memtype.h"
 
 /*
- * 扁平化设备树（Flattened Device Tree）的**最小只读**读取器。
+ * 扁平化设备树（Flattened Device Tree）的最小只读读取器。
  *
- * ⚠️ 这不是 libfdt 的子集，API 与之不兼容。将来若真要引入 libfdt，本文件整体退役，
+ * 这不是 libfdt 的子集，API 与之不兼容。将来若真要引入 libfdt，本文件整体退役，
  * 不要试图让两者共存或互相兼容。
  *
- * **刻意不做的三件事**（它们才是 FDT 解析真正的复杂度来源）：
- *   - `reg` 属性的 `#address-cells` / `#size-cells` **继承**：只有 /soc 那种嵌套才需要，
+ * 刻意不做的三件事（它们才是 FDT 解析真正的复杂度来源）：
+ *   - `reg` 属性的 `#address-cells` / `#size-cells` 继承：只有 /soc 那种嵌套才需要，
  *     而 /memory 是根节点的直接子节点，cells 从根节点直接读一个普通属性就够；
  *   - `ranges` 总线地址翻译：读 /soc 下外设地址才需要，我们的外设地址一律硬编码；
  *   - 全树 `compatible` 匹配：那是通用内核为支持成千上万块板子才需要的。
  *
- * **使用纪律**：DTB 只用于校验与可选增强，**不作为唯一真相来源**。所有值都必须有
+ * 使用纪律：DTB 只用于校验与可选增强，不作为唯一真相来源。所有值都必须有
  * 编译期常量兜底；读到了就比对/覆盖，读不到就静默退回常量。这样解析器出错的最坏
  * 后果是"少一条自检"，而不是"拿到垃圾值然后炸掉"。
  *
- * @note **必须在 MMU 开启之前调用**：DTB 由固件放置，**不在内核偏移映射范围内**，
+ * @note 必须在 MMU 开启之前调用：DTB 由固件放置，不在内核偏移映射范围内，
  *   MMU 开启后再去读就是一个没建过映射的地址。两个平台各差一头：
- *     QEMU+RustSBI 实测 0x8005c000，在 KERNEL_START 之下；
- *     VF2 用 U-Boot 的 fdtcontroladdr，实测 0xfffc56a0，在 KERNEL_MAP_END 之上。
+ *     QEMU+RustSBI 放在 0x8005c000，在 KERNEL_START 之下；
+ *     VF2 用 U-Boot 的 fdtcontroladdr（0xfffc56a0），在 KERNEL_MAP_END 之上。
  *   正确用法是开机时解析一次、把需要的值抄进全局，此后再不碰 DTB。
  */
 
@@ -66,7 +66,7 @@ const void *fdt_first_subnode(const void *node);
  * @brief 取同一层的下一个兄弟节点
  * @param[in] subnode 当前子节点（来自 fdt_first_subnode / fdt_next_subnode）
  * @return 下一个兄弟的属性区起点；已是最后一个返回 NULL
- * @note 会整体跳过当前节点的**子树**——/cpus/cpu@N 下面还挂着 interrupt-controller，
+ * @note 会整体跳过当前节点的子树——/cpus/cpu@N 下面还挂着 interrupt-controller，
  *   只找下一个 BEGIN_NODE 会掉进子节点里去。
  */
 const void *fdt_next_subnode(const void *subnode);

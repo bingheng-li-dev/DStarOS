@@ -17,8 +17,8 @@
 /* UART0 的寄存器排布。两个平台的基址相同，但访问方式不同：
  * QEMU virt 的 ns16550a 是 8 位寄存器逐字节排列（reg-shift 0）；
  * JH7110 的 snps,dw-apb-uart 要求 32 位访问、寄存器间隔 4 字节
- * （reg-shift 2 + reg-io-width 4，实测自 /soc/serial@10000000）。
- * 下面的寄存器号是 16550 的**逻辑编号**，取字节偏移要按 UART_REG_SHIFT 左移。 */
+ * （reg-shift 2 + reg-io-width 4，取自设备树 serial@10000000）。
+ * 下面的寄存器号是 16550 的逻辑编号，取字节偏移要按 UART_REG_SHIFT 左移。 */
 #if defined(VF2)
 #define UART_REG_SHIFT          2
 #else
@@ -61,13 +61,13 @@
 #define PLIC_THRESHOLD_OFF(ctx)         (0x200000 + (ctx) * 0x1000)
 #define PLIC_CLAIM_OFF(ctx)             (0x200004 + (ctx) * 0x1000)
 
-/* hart 的 S 态 context 编号。**两个平台不能共用一个公式**：PLIC 按 hart 顺序排 context，
+/* hart 的 S 态 context 编号。两个平台不能共用一个公式：PLIC 按 hart 顺序排 context，
  * 支持 S 态的 hart 占 M、S 两个，而 JH7110 的 hart 0 是没有 S 态的 S7，只占一个 M，
  * 其后整体错位一格。
  *   QEMU virt：每个 hart 都是 <M 11><S 9>          → S context = 2 * hart + 1
- *   VF2：实测 PLIC 节点 interrupts-extended 为
+ *   VF2：取自设备树 PLIC 节点 interrupts-extended
  *        <h0 11><h1 11><h1 9><h2 11><h2 9>...       → S context = 2 * hart（hart >= 1）
- * ⚠️ VF2 上按此算出的 enable / threshold / claim 地址，数值上恰好等于 xv6 那套
+ * VF2 上按此算出的 enable / threshold / claim 地址，数值上恰好等于 xv6 那套
  * "hart N 的 M 态"宏——纯属巧合，不是在操作 M 态 context。 */
 #if defined(VF2)
 #define PLIC_S_CONTEXT(hart)            (2 * (hart))

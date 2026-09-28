@@ -75,13 +75,7 @@ static int sdcard_find_first_partition(uint64_t *start, uint64_t *sectors)
     return (*start != 0) ? ENO0_NO_ERROR : ENO13_NO_FS;
 }
 
-/**
- * @brief 初始化 SD 分区设备：接手控制器与卡，定位第一个分区
- * @param[in,out] dev 设备描述符，写入分区扇区数
- * @retval ENO0_NO_ERROR 就绪
- * @return 其余为 sdmmc_init() 或分区解析的错误码
- * @note 幂等由 bdev_open() 保证，这里不必防重入。
- */
+/* 接手控制器与卡、定位第一个分区，写入分区扇区数。幂等由 bdev_open() 保证。 */
 static int sdcard_init(bdev_t *dev)
 {
     int ret = sdmmc_init();
@@ -103,28 +97,14 @@ static int sdcard_init(bdev_t *dev)
     return ENO0_NO_ERROR;
 }
 
-/**
- * @brief 读分区内若干块
- * @param[in]  dev   设备描述符（未使用）
- * @param[in]  lba   分区内起始块号
- * @param[out] buf   count * 512 字节
- * @param[in]  count 块数
- * @return 同 sdmmc_read_blocks()
- */
+/* 读分区内若干块。 */
 static int sdcard_read(bdev_t *dev, uint64_t lba, uint8_t *buf, uint32_t count)
 {
     (void)dev;
     return sdmmc_read_blocks(sdcard_part_start + lba, buf, count);
 }
 
-/**
- * @brief 写分区内若干块
- * @param[in] dev   设备描述符（未使用）
- * @param[in] lba   分区内起始块号
- * @param[in] buf   count * 512 字节
- * @param[in] count 块数
- * @return 同 sdmmc_write_blocks()
- */
+/* 写分区内若干块。 */
 static int sdcard_write(bdev_t *dev, uint64_t lba, const uint8_t *buf, uint32_t count)
 {
     (void)dev;

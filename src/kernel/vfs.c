@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright (C) 2021-2026 BingHeng Li <bingheng-li@outlook.com> */
 
-/**
+/*
  * vfs.c - 虚拟文件系统（VFS）核心实现
  *
  * 实现 Linux 风格的四层 VFS 抽象：
@@ -63,10 +63,10 @@ vfsmount_t *vfs_root_mount  = NULL;
  *
  * 引用归零的目录项不再立即释放，而是挂到这条 LRU 上：对象仍然活着、仍挂在
  * 父目录的 d_subdirs 里，下一次 dentry_lookup 能直接命中并"复活"，省掉一整趟
- * i_op->lookup（在 FatFS 上就是一次 f_stat，上板后是一次真实 SPI 扇区传输）。
+ * i_op->lookup（在 FatFS 上就是一次 f_stat，SD 卡上是一次真实的扇区读）。
  *
  * 保护：沿用 vfs_big_lock，不引入新锁——所有增删都发生在 dentry_get/dentry_put
- * 里，而这两个函数只被 vfs.c 内部以及 proc.c 的 fork 路径调用，全部在大锁之内。
+ * 里，vfs.c 内部与 proc.c 的 fork / exit 路径都在大锁之内调用它们。
  * ============================================================ */
 
 /* LRU 链表（哨兵头）：头部最近使用，尾部最久未使用，从尾部回收 */
@@ -85,16 +85,12 @@ static uint32_t dcache_nr_unused;
 /**
  * @brief 从路径字符串中提取下一个分量
  * @param[in,out] path    指向路径当前位置的指针（解析后向前推进）
- * @param[out]    name    存放分量名称的缓冲区
- * @param[in]     namelen 缓冲区最大长度（含 '\0'）
  * @retval >0 分量长度
  * @retval  0 路径已结束
  * @retval <0 分量名过长（ENO11_NAME_TOO_LONG）
- * @return 从文件路径里提取目录 / 文件名下一个分量（比如 /a/b/c.txt 会依次拆出 a、b、c.txt）
  */
 static int path_next_component(const char **path, char *name, int namelen)
 {
-    /* 跳过连续的 '/' */
     while (**path == '/')
     {
         (*path)++;
@@ -102,10 +98,9 @@ static int path_next_component(const char **path, char *name, int namelen)
 
     if (**path == '\0')
     {
-        return 0;  /* 路径结束 */
+        return 0;
     }
 
-    /* 找到分量结尾 */
     const char *start = *path;
     while (**path != '/' && **path != '\0')
     {
@@ -127,9 +122,7 @@ static int path_next_component(const char **path, char *name, int namelen)
  * @brief 将路径分割为父目录路径和文件名
  * @param[in]  path   输入路径（如 "/dir/file.txt"）
  * @param[out] parent 输出父路径缓冲区（如 "/dir"）
- * @param[in]  psz    parent 缓冲区大小
  * @param[out] name   输出文件名缓冲区（如 "file.txt"）
- * @param[in]  nsz    name 缓冲区大小
  * @note 特殊情况："/file" → parent="/", name="file"；
  *       "file" → parent=".", name="file"；
  *       "/" → parent="/", name=""
@@ -147,7 +140,6 @@ static int split_path(const char *path,
 
     int plen = (int)strlen(path);
 
-    /* 找最后一个 '/' 的位置 */
     int last_slash = -1;
     for (int i = 0; i < plen; i++)
     {
@@ -159,7 +151,6 @@ static int split_path(const char *path,
 
     if (last_slash < 0)
     {
-        /* 没有 '/'：父目录为 "."，文件名为整个路径 */
         if (2 > psz || plen + 1 > nsz)
         {
             return ENO11_NAME_TOO_LONG;
@@ -170,7 +161,6 @@ static int split_path(const char *path,
     }
     else if (last_slash == 0)
     {
-        /* 路径形如 "/file"：父目录为 "/" */
         if (2 > psz)
         {
             return ENO11_NAME_TOO_LONG;
@@ -186,7 +176,6 @@ static int split_path(const char *path,
     }
     else
     {
-        /* 一般情况：分割 */
         if (last_slash + 1 > psz || plen - last_slash > nsz)
         {
             return ENO11_NAME_TOO_LONG;
@@ -203,12 +192,7 @@ static int split_path(const char *path,
  * dentry 引用计数
  * ============================================================ */
 
-/**
- * @brief 把目录项从 LRU 上摘下来（若它在 LRU 上）
- * @param[in] d 目录项指针
- * @retval true  确实摘掉了一个 LRU 条目
- * @retval false 它本来就不在 LRU 上
- */
+/* 把目录项从 LRU 上摘下来；返回它原本是否在 LRU 上 */
 static bool dcache_lru_del(dentry_t *d)
 {
     if (list_empty(&d->d_lru))
@@ -222,13 +206,12 @@ static bool dcache_lru_del(dentry_t *d)
 
 /**
  * @brief 判断一个目录项是否值得放进 LRU 缓存
- * @param[in] d 引用刚归零的目录项
  * @details 两类不值得：
- *   -# **已脱链**（d_parent 指向自身）——unlink/rmdir 过的目录项永远不可能再被
+ *   -# 已脱链（d_parent 指向自身）——unlink/rmdir 过的目录项永远不可能再被
  *      dentry_lookup 命中，缓存它纯属浪费；文件系统局部根同样满足这个条件，
  *      但它的引用被 vfs_root_dentry/挂载点钉着，正常情况下走不到这里。
- *   -# **负目录项**（d_inode == NULL）——只在 create/mkdir/rename 途中临时存在，
- *      缓存"不存在"这件事需要一整套逐出规则（见开发计划的 D4），本版不做。
+ *   -# 负目录项（d_inode == NULL）——只在 create/mkdir/rename 途中临时存在，
+ *      缓存"不存在"需要一整套逐出规则，目前不做。
  */
 static bool dcache_should_cache(dentry_t *d)
 {
@@ -244,9 +227,9 @@ static bool dcache_should_cache(dentry_t *d)
  *
  *   写成沿 d_parent 向上的循环而不是递归——内核栈只有 KERNEL_STACKPSIZE 页，
  *   深路径递归会踩爆。
- * @note 这里是**唯一**归还父引用的地方；dentry_put 引用归零转入 LRU 时不归还
+ * @note 这里是唯一归还父引用的地方；dentry_put 引用归零转入 LRU 时不归还
  *   （否则父目录会在子项还缓存着的时候被提前释放）。
- * @note 由"LRU 上的目录项一定是叶子"可知：本函数除了可能往 LRU 头部**插入**
+ * @note 由"LRU 上的目录项一定是叶子"可知：本函数除了可能往 LRU 头部插入
  *   一个父目录之外，绝不会释放链表上的其它条目——dcache_shrink_to 和
  *   dcache_prune_subtree 的遍历安全性都建立在这条性质上。
  */
@@ -269,7 +252,7 @@ static void dcache_evict(dentry_t *d)
         }
 
         /* inode 与 dentry 是一对一的，dentry 消失时 inode 必须一起回收，
-         * 否则每解析一次路径就漏掉一个 inode 加它的 i_private。 */
+         * 否则每解析一次路径就漏掉一个 inode。 */
         if (d->d_inode != NULL)
         {
             destory_inode(d->d_inode);
@@ -302,7 +285,6 @@ static void dcache_evict(dentry_t *d)
 
 /**
  * @brief 从 LRU 尾部批量回收，直到条目数降到 target
- * @param[in] target 目标驻留条目数
  * @details 每轮取尾部（最久未使用）的一条真正释放。dcache_evict 归还父引用时可能
  *   把刚变成叶子的父目录插到 LRU 头部，于是 nr_unused 在循环中途是会回升的——
  *   但循环仍然一定收敛：每一轮至少 kfree 掉一个目录项，而缓存中活着的目录项
@@ -320,8 +302,6 @@ static void dcache_shrink_to(uint32_t target)
 
 /**
  * @brief 判断 d 是否为 ancestor 的后代
- * @param[in] d        待判断的目录项
- * @param[in] ancestor 祖先目录项
  * @note guard 只是防御 d_parent 意外成环，正常目录树走不满。
  */
 static bool dcache_is_descendant(dentry_t *d, dentry_t *ancestor)
@@ -342,17 +322,16 @@ static bool dcache_is_descendant(dentry_t *d, dentry_t *ancestor)
 /**
  * @brief 把 ancestor 子树下所有仍在 LRU 上的目录项真正释放（ancestor 本身不动）
  * @param[in] ancestor 子树根，调用者必须持有它的一个引用
- * @details **unmount 这一处是非用不可的**：LRU 上的目录项持有指向该文件系统 inode
+ * @details unmount 这一处是非用不可的：LRU 上的目录项持有指向该文件系统 inode
  *   的指针，而 inode 又指向马上要被 destroy_super_block 销毁的超级块。不清干净
  *   就是一批悬空引用。正在被使用的（d_ref > 0）动不了，那是卸载忙碌文件系统本身
  *   的问题，不在本处理范围。
  *
  *   rmdir 那一处是防御性的：缓存里只会有磁盘上真实存在的条目，所以判空看到子项
  *   就是真非空，本身并不会误判；剪一遍是为了让 list_empty(&d_subdirs) 的语义
- *   收窄成"还有人在用的子项"，日后真加了负目录项缓存（D4）不至于悄悄变成误报。
+ *   收窄成"还有人在用的子项"，日后真加了负目录项缓存不至于悄悄变成误报。
  *
- *   rename **不需要**剪：路径不再被 inode 缓存（fatfs 适配层改成沿 dentry 链现推），
- *   把目录项挂到新父目录之后整棵子树的路径自然全部跟着变，缓存继续有效。
+ *   rename 不需要剪：路径不缓存，目录项挂到新父目录后整棵子树的路径自然跟着变。
  *
  *   用"反复扫 LRU"而不是递归下降——内核栈只有一页，目录深度不可控。每一轮至多
  *   释放掉当前这层的叶子，它们的父目录归零后进入 LRU，下一轮再被扫到，
@@ -383,7 +362,6 @@ static void dcache_prune_subtree(dentry_t *ancestor)
 
 /**
  * @brief 增加目录项引用计数（内部使用）
- * @param[in] d 目录项指针
  * @note 引用从 0 提到 1 时必须把它从 LRU 摘掉，否则一个正在被使用的目录项还挂在
  *   回收链上，下一次 shrink 会把它释放掉。这里与 dentry_put 的入队严格成对——
  *   放在 dentry_get 而不是只放在 dentry_lookup 里，是为了让配对关系是结构性的：
@@ -404,8 +382,7 @@ static void dentry_get(dentry_t *d)
 
 /**
  * @brief 减少目录项引用计数，归零时转入 LRU 缓存（内部使用）
- * @param[in] d 目录项指针
- * @details 引用归零**不等于**释放：值得缓存的目录项挂到 dcache_lru 头部就返回，
+ * @details 引用归零不等于释放：值得缓存的目录项挂到 dcache_lru 头部就返回，
  *   对象继续活着、继续挂在父目录的 d_subdirs 里、继续能被 dentry_lookup 命中，
  *   下一次访问同一路径就省掉一趟 i_op->lookup。真正的释放推迟到水位线触发的
  *   dcache_shrink_to()，或 dcache_prune_subtree()。不值得缓存的（已脱链、
@@ -413,7 +390,7 @@ static void dentry_get(dentry_t *d)
  * @note d_ref 的含义是"外部持有者数量 + 子目录项数量"。外部持有者包括
  *   vfs_lookup() 返回给调用者的那一个、proc_cwd、file_t.f_dentry、
  *   以及挂载点的 vfsmount.mnt_host_dentry。
- * @note 转入 LRU 时**不**归还对父目录的引用——缓存一个叶子会顺带把它整条祖先链
+ * @note 转入 LRU 时不归还对父目录的引用——缓存一个叶子会顺带把它整条祖先链
  *   钉在内存里，这正是想要的（祖先目录本来就最该缓存），也保证了 LRU 上的目录项
  *   永远不会有一个已被释放的 d_parent。归还统一由 dcache_evict() 负责。
  */
@@ -446,7 +423,6 @@ static void dentry_put(dentry_t *d)
 
 /**
  * @brief 把目录项从父目录的子链表中摘除，并释放它对父目录持有的引用
- * @param[in] d 要脱链的目录项
  * @details 用于 unlink/rmdir/rename——这些操作必须让后续 lookup 看不到这个
  *   目录项，不能等到引用归零才摘。脱链后 d_parent 指向自身，既标记"已脱链"
  *   使重复调用无副作用，也让仍持有它的进程做 ".." 时原地不动而不是解引用悬空指针。
@@ -464,8 +440,7 @@ static void dentry_detach(dentry_t *d)
 }
 
 /**
- * @brief 引用计数 +1（供 proc.c、fatfs_vfs.c 等外部模块使用）
- * @param[in] d 目录项指针
+ * @brief 引用计数 +1（供 proc.c 等外部模块使用）
  */
 void dentry_get_pub(dentry_t *d)
 {
@@ -473,8 +448,7 @@ void dentry_get_pub(dentry_t *d)
 }
 
 /**
- * @brief 引用计数 -1，归零时释放（供外部模块使用）
- * @param[in] d 目录项指针
+ * @brief 引用计数 -1，归零时转入 LRU 或回收（供外部模块使用）
  */
 void dentry_put_pub(dentry_t *d)
 {
@@ -484,8 +458,7 @@ void dentry_put_pub(dentry_t *d)
 /**
  * @brief 回收至多 nr 条缓存目录项，供内存压力路径调用
  * @param[in] nr 期望回收的条目数
- * @note 缓存目录项是**真正可以丢弃**的数据，比 slab 的空闲页更该先吐出来，
- *   所以内存不足重试路径应当先调本函数、再调 slab_reclaim_all()。
+ * @note 目前只有自检用例调用；内存压力路径走 vfs_dcache_reclaim()。
  * @note 调用者必须已持有 vfs 大锁（vfs_lock）——本函数会改动 dentry 树。
  */
 void vfs_dcache_shrink(uint32_t nr)
@@ -499,7 +472,7 @@ void vfs_dcache_shrink(uint32_t nr)
  * @details 缓存目录项是真正可以丢弃的数据，比 slab 的空闲页更该先吐出来，
  *   所以 kmalloc 重试时先调本函数、再调 slab_reclaim_all()。压力来临时不留情面，
  *   直接清空整条 LRU。
- * @note **只在调用者恰好是 vfs_big_lock 的持有者时才真的干活**。dentry 树由大锁
+ * @note 只在调用者恰好是 vfs_big_lock 的持有者时才真的干活。dentry 树由大锁
  *   保护，而 kmalloc 可能在任何上下文（含持自旋锁、含根本没进过 VFS 的路径）里
  *   失败；ossem_t 没有 trydown，就地 sem_down 要么自锁死要么在关中断状态下睡眠。
  *   好在最需要它的场合恰好满足这个条件——正是在 VFS 调用内部创建 dentry/inode
@@ -550,8 +523,6 @@ void vfs_dcache_stats(void)
 
 /**
  * @brief 在已注册链表中查找文件系统类型
- * @param[in] name 文件系统名称
- * @param[in] len  名称长度
  * @return 指向对应节点指针域的指针（用于原地插入/删除）
  */
 static file_system_type_t **find_filesystem_by_name(const char *name, int len)
@@ -609,7 +580,6 @@ int16_t register_filesystem(file_system_type_t *fs_type)
     }
     else
     {
-        /* 插入到链表尾部 */
         *fs_type_ptr = fs_type;
     }
 
@@ -652,11 +622,7 @@ int16_t unregister_filesystem(file_system_type_t *fs_type)
     return ENO5_NOSUCH_ENTRY;
 }
 
-/**
- * @brief 按名称获取已注册的文件系统类型
- * @param[in] name 文件系统名称字符串
- * @return 匹配的 file_system_type_t 指针；未找到返回 NULL
- */
+/* 按名称取已注册的文件系统类型，未找到返回 NULL */
 static file_system_type_t *get_fs_type_by_name(const char *name)
 {
     if (!name)
@@ -716,7 +682,7 @@ super_block_t *alloc_super_block(
 /**
  * @brief 从全局链表摘除并释放超级块
  * @param[in] sb 要销毁的超级块指针
- * @note 只摘链 + 释放超级块本身。根 dentry / 根 inode **不在这里回收**——它们的
+ * @note 只摘链 + 释放超级块本身。根 dentry / 根 inode 不在这里回收——它们的
  *   destory_inode 要经 inode->i_sb->s_op 分发，必须赶在本函数之前放掉，
  *   见 vfs_unmount() 里的处理。调用前应先完成文件系统的卸载（unmount）。
  */
@@ -788,7 +754,6 @@ dentry_t *dentry_create(const char *name, inode_t *inode,
         return NULL;
     }
 
-    /* 复制名称字符串（生命周期独立于调用者），调用者可以随便释放自己的字符串 */
     int len = (int)strlen(name);
     d->d_name = (char *)kmalloc(len + 1);
     if (!d->d_name)
@@ -803,12 +768,11 @@ dentry_t *dentry_create(const char *name, inode_t *inode,
     d->d_ref     = 1;
     d->d_mounted = NULL;
 
-    /* 初始化子目录链表头（空子目录列表）*/
     INIT_LIST_HEAD(&d->d_subdirs);
     /* 孤立的 d_lru 节点表示"不在 LRU 上"，d_ref 从 1 起步本来就不该在 LRU 上 */
     INIT_LIST_HEAD(&d->d_lru);
 
-    if (!parent) /* 没有父目录 → 这是文件系统根目录 */
+    if (!parent)
     {
         /* 文件系统局部根：父指向自身，d_child 为孤立节点，不挂到任何父链表 */
         d->d_parent = d;
@@ -857,9 +821,7 @@ dentry_t *dentry_lookup(dentry_t *parent, const char *name)
     return NULL;
 }
 
-/* ============================================================
- * 辅助：获取挂载在指定 super_block 上的 vfsmount
- * ============================================================ */
+/* 找挂载了 sb 的 vfsmount；调用者持 vfs_fs_lock */
 static vfsmount_t *find_mount_by_sb(super_block_t *sb)
 {
     struct list_head *pos;
@@ -882,7 +844,7 @@ static vfsmount_t *find_mount_by_sb(super_block_t *sb)
 
 /**
  * @brief 初始化 VFS 全局数据结构
- * @note 必须在 fs_init() 中最先调用。
+ * @note 必须早于任何文件系统注册与挂载。
  */
 void vfs_init(void)
 {
@@ -932,12 +894,8 @@ void vfs_unlock(void)
  * @return 穿越后的目录项（可能是被挂载文件系统的根，也可能是形参 d 本身），
  *   同样持有一个引用计数——调用者不需要关心是否发生了穿越，统一按"消费掉传入的
  *   引用、拿到一个新的引用"来处理
- * @note vfs_lookup() 里两处调用：循环内部（准备处理下一个路径分量之前）、
- *   以及循环正常退出、path 恰好在这个分量结束时（比如解析 "/dev" 而不是
- *   "/dev/console"）——后一处如果漏掉，路径恰好等于某个挂载点时，返回的会是
- *   宿主文件系统那个空目录，而不是真正挂载上去的文件系统根目录；多分量路径
- *   之所以不受影响，是因为下一个分量会在循环顶部触发这个检查，只有"路径正好
- *   在挂载点本身结束"这一种情况会被漏掉。
+ * @note vfs_lookup() 里两处调用：循环内处理下一个分量之前、以及分量耗尽之后。后者不能省，
+ *   否则路径恰好是挂载点（如 "/dev"）时返回的是宿主那个空目录，不是被挂载文件系统的根。
  */
 static dentry_t *cross_mountpoints(dentry_t *d)
 {
@@ -985,10 +943,8 @@ dentry_t *vfs_lookup(const char *path)
 
     if (path[0] == '/')
     {
-        /* 绝对路径：从全局根出发 */
         cur = vfs_root_dentry;
         dentry_get(cur);
-        /* 跳过开头的所有 '/' */
         while (*path == '/')
         {
             path++;
@@ -996,7 +952,6 @@ dentry_t *vfs_lookup(const char *path)
     }
     else
     {
-        /* 相对路径：从当前进程的工作目录出发 */
         pcb_t *cur_proc = proc_get_current();
         if (cur_proc && cur_proc->proc_cwd)
         {
@@ -1010,7 +965,7 @@ dentry_t *vfs_lookup(const char *path)
     }
 
     /* 纯 "/" 路径或空相对路径：直接返回当前节点 */
-    if (*path == '\0') // while (*path == '/') path++;
+    if (*path == '\0')
     {
         return cur;
     }
@@ -1026,21 +981,17 @@ dentry_t *vfs_lookup(const char *path)
         }
         if (len < 0)
         {
-            /* 分量名过长 */
             dentry_put(cur);
             return NULL;
         }
 
-        /* 穿越挂载点：若当前节点被某文件系统挂载，则进入被挂载文件系统的根 */
         cur = cross_mountpoints(cur);
 
-        /* 处理 "." 分量（保持不动）*/
         if (comp[0] == '.' && comp[1] == '\0')
         {
             continue;
         }
 
-        /* 处理 ".." 分量（向上一级）*/
         if (comp[0] == '.' && comp[1] == '.' && comp[2] == '\0')
         {
             /* 已在全局根，".." 原地不动 */
@@ -1072,7 +1023,6 @@ dentry_t *vfs_lookup(const char *path)
                 continue;
             }
 
-            /* 普通 ".." 向上一级 */
             dentry_t *parent = cur->d_parent;
             dentry_get(parent);
             dentry_put(cur);
@@ -1080,7 +1030,6 @@ dentry_t *vfs_lookup(const char *path)
             continue;
         }
 
-        /* 确认当前节点是目录 */
         if (!cur->d_inode || !S_ISDIR(cur->d_inode->i_mode))
         {
             dentry_put(cur);
@@ -1090,7 +1039,6 @@ dentry_t *vfs_lookup(const char *path)
         /* 先查内存缓存（dentry_lookup 已包含 dentry_get）*/
         dentry_t *next = dentry_lookup(cur, comp);
 
-        /* 缓存未命中：委托底层文件系统查找 */
         if (!next)
         {
             if (!cur->d_inode->i_op || !cur->d_inode->i_op->lookup)
@@ -1101,7 +1049,7 @@ dentry_t *vfs_lookup(const char *path)
             next = cur->d_inode->i_op->lookup(cur->d_inode, comp);
         }
 
-        if (!next) /* 底层文件系统也未找到 */
+        if (!next)
         {
             dentry_put(cur);
             return NULL;
@@ -1111,10 +1059,7 @@ dentry_t *vfs_lookup(const char *path)
         cur = next;
     }
 
-    /* 路径分量耗尽时也要做一次穿越检查——path 恰好等于某个挂载点本身时
-     * （比如 "/dev"），循环顶部的检查只会在"还有下一个分量要处理"时触发，
-     * 这里补上路径正好在挂载点结束的情况，否则返回的是宿主文件系统那个
-     * 空目录，不是真正挂载上去的文件系统根目录。 */
+    /* 路径恰好在挂载点结束时也要穿越，见 cross_mountpoints() */
     return cross_mountpoints(cur);
 }
 
@@ -1163,21 +1108,18 @@ int vfs_mount(const char *path, const char *fs_type, void *data)
         return ENO8_NULL_POINTER;
     }
 
-    /* 1. 查找文件系统类型 */
     file_system_type_t *fst = get_fs_type_by_name(fs_type);
     if (!fst)
     {
         return ENO5_NOSUCH_ENTRY;
     }
 
-    /* 2. 调用文件系统挂载回调，获取根目录项 */
-    dentry_t *root_dentry = fst->mount(fst, path, data); // mount后会生成一个新的超级块、inode和根目录项
+    dentry_t *root_dentry = fst->mount(fst, path, data);
     if (!root_dentry)
     {
         return ENO13_NO_FS;
     }
 
-    /* 3. 分配 vfsmount_t */
     vfsmount_t *mnt = (vfsmount_t *)kmalloc(sizeof(vfsmount_t));
     if (!mnt)
     {
@@ -1185,7 +1127,6 @@ int vfs_mount(const char *path, const char *fs_type, void *data)
         return ENO1_NOMORE_MEM;
     }
 
-    /* 复制挂载点路径字符串 */
     int plen = (int)strlen(path);
     mnt->mnt_path = (char *)kmalloc(plen + 1);
     if (!mnt->mnt_path)
@@ -1196,22 +1137,19 @@ int vfs_mount(const char *path, const char *fs_type, void *data)
     }
     memcpy(mnt->mnt_path, path, plen + 1);
 
-    /* 挂载根文件系统时，在某些实现中，sb尚未初始化，此时为唯一合法mnt->mnt_sb=NULL。Fatfs出现该情况非法 */
+    /* 挂载回调理应已建好超级块；根 dentry 没有 inode 时 mnt_sb 记 NULL */
     mnt->mnt_sb = root_dentry->d_inode ? root_dentry->d_inode->i_sb : NULL;
     mnt->mnt_host_dentry = NULL;
     INIT_LIST_HEAD(&mnt->mnt_list_linker);
 
-    /* 4. 挂载点处理 */
     if (path[0] == '/' && path[1] == '\0')
     {
-        /* 挂载为根文件系统 */
         vfs_root_dentry = root_dentry;
         vfs_root_mount  = mnt;
         mnt->mnt_host_dentry = NULL;
     }
     else
     {
-        /* 挂载到已有路径上 */
         dentry_t *host = vfs_lookup(path);
         if (!host)
         {
@@ -1228,7 +1166,7 @@ int vfs_mount(const char *path, const char *fs_type, void *data)
             vfs_mount_undo(root_dentry);
             return ENO9_NOT_DIR;
         }
-        if (host->d_mounted) /* 当前目录项已经挂载了其他文件系统 */
+        if (host->d_mounted)
         {
             dentry_put(host);
             kfree(mnt->mnt_path);
@@ -1241,7 +1179,6 @@ int vfs_mount(const char *path, const char *fs_type, void *data)
         /* 持有宿主 dentry 的引用（挂载期间不允许删除）*/
     }
 
-    /* 同步挂载信息到超级块 */
     if (mnt->mnt_sb)
     {
         mnt->mnt_sb->s_mount = mnt;
@@ -1269,13 +1206,11 @@ int vfs_unmount(const char *path)
         return ENO8_NULL_POINTER;
     }
 
-    /* 不允许卸载根文件系统 */
     if (path[0] == '/' && path[1] == '\0')
     {
         return ENO16_PERM;
     }
 
-    /* 在挂载点链表中查找 */
     vfsmount_t *target = NULL;
     irq_key_t vfs_fs_lock_key = spinlock_acquire(&vfs_fs_lock);
     struct list_head *pos;
@@ -1308,7 +1243,7 @@ int vfs_unmount(const char *path)
 
     /* 剪枝之后根目录项若还剩不止 dentry_create 那一个引用，说明这个文件系统里仍有
      * 活着的目录项（子项各持父目录一个引用）或外部持有者（cwd、打开的文件）。
-     * 此时**必须拒绝**：超级块一销毁，那些还活着的 inode 的 i_sb 就成了悬空指针，
+     * 此时必须拒绝：超级块一销毁，那些还活着的 inode 的 i_sb 就成了悬空指针，
      * 比泄漏严重得多。devfs 会走到这里——它没有 i_op->lookup，只能靠创建时的引用
      * 把四个设备条目钉住不让逐出，根引用数因此恒 > 1，暂时不支持卸载。 */
     if (fs_root && fs_root->d_ref != 1)
@@ -1316,7 +1251,6 @@ int vfs_unmount(const char *path)
         return ENO4_BUSY;
     }
 
-    /* 同步底层文件系统 */
     if (target->mnt_sb && target->mnt_sb->s_op && target->mnt_sb->s_op->sync_fs)
     {
         target->mnt_sb->s_op->sync_fs(target->mnt_sb);
@@ -1332,26 +1266,22 @@ int vfs_unmount(const char *path)
         dentry_put(fs_root);
     }
 
-    /* 卸载底层文件系统 */
     if (target->mnt_sb && target->mnt_sb->s_op && target->mnt_sb->s_op->unmount)
     {
         target->mnt_sb->s_op->unmount(target->mnt_sb);
     }
 
-    /* 清除宿主目录项上的挂载标记 */
     if (target->mnt_host_dentry)
     {
         target->mnt_host_dentry->d_mounted = NULL;
         dentry_put(target->mnt_host_dentry);
     }
 
-    /* 销毁超级块 */
     if (target->mnt_sb)
     {
         destroy_super_block(target->mnt_sb);
     }
 
-    /* 从链表中摘除并释放 vfsmount */
     vfs_fs_lock_key = spinlock_acquire(&vfs_fs_lock);
     list_del(&target->mnt_list_linker);
     spinlock_release(&vfs_fs_lock, vfs_fs_lock_key);
@@ -1366,12 +1296,7 @@ int vfs_unmount(const char *path)
  * 文件操作
  * ============================================================ */
 
-/**
- * @brief vfs_open 的失败出口：记下原因并返回 NULL
- * @param[out] err  非 NULL 时写入 code
- * @param[in]  code 负的 ENO* 错误码
- * @return 恒为 NULL
- */
+/* vfs_open 的失败出口：err 非 NULL 时写入 code，恒返回 NULL */
 static file_t *vfs_open_fail(int *err, int code)
 {
     if (err != NULL)
@@ -1387,7 +1312,6 @@ static file_t *vfs_open_fail(int *err, int code)
  * @param[in] mode 打开模式标志（O_RDONLY/O_WRONLY/O_RDWR/O_CREAT 等）
  * @param[out] err  非 NULL 时写入结果：成功为 ENO0_NO_ERROR，失败为负的 ENO* 错误码
  * @return 成功返回打开的 file_t 指针；失败返回 NULL，原因见 err
- * @note 流程：路径解析 → O_CREAT 时创建文件 → 分配 file_t → 调用底层 open 回调
  */
 file_t *vfs_open(const char *path, int mode, int *err)
 {
@@ -1404,20 +1328,17 @@ file_t *vfs_open(const char *path, int mode, int *err)
 
     if (!target)
     {
-        /* 文件不存在 */
         if (!(mode & O_CREAT))
         {
             return vfs_open_fail(err, ENO5_NOSUCH_ENTRY);
         }
 
-        /* 分离父目录路径和文件名 */
         char ppath[VFS_PATH_MAX], fname[VFS_NAME_MAX];
         if (split_path(path, ppath, VFS_PATH_MAX, fname, VFS_NAME_MAX) < 0)
         {
             return vfs_open_fail(err, ENO11_NAME_TOO_LONG);
         }
 
-        /* 查找父目录 */
         dentry_t *parent = vfs_lookup(ppath);
         if (!parent)
         {
@@ -1429,7 +1350,6 @@ file_t *vfs_open(const char *path, int mode, int *err)
             return vfs_open_fail(err, ENO9_NOT_DIR);
         }
 
-        /* 创建负目录项（d_inode = NULL），然后调底层 create */
         dentry_t *new_d = dentry_create(fname, NULL, parent, NULL);
         if (!new_d)
         {
@@ -1457,10 +1377,8 @@ file_t *vfs_open(const char *path, int mode, int *err)
     }
     else
     {
-        /* 文件已存在 */
         if ((mode & O_CREAT) && (mode & O_EXCL))
         {
-            /* O_CREAT | O_EXCL：文件已存在则失败 */
             dentry_put(target);
             return vfs_open_fail(err, ENO7_EXISTS);
         }
@@ -1491,7 +1409,6 @@ file_t *vfs_open(const char *path, int mode, int *err)
         return vfs_open_fail(err, ENO9_NOT_DIR);
     }
 
-    /* 分配 file_t */
     file_t *file = (file_t *)slab_cache_alloc(file_cache);
     if (!file)
     {
@@ -1512,14 +1429,13 @@ file_t *vfs_open(const char *path, int mode, int *err)
 
     file->f_inode   = target->d_inode;
     file->f_dentry  = target;          /* 持有引用，防止 dentry 被释放 */
-    file->f_op      = target->d_inode->i_fop;  /* 从 inode 获取操作集 */
+    file->f_op      = target->d_inode->i_fop;
     file->f_mode    = mode;
     file->f_count   = 1;
     file->f_private = NULL;
     file->f_vfsmount = NULL;
     file->f_kind    = FILE_KIND_VFS;
 
-    /* O_APPEND 模式：初始位置设为文件末尾 */
     if (mode & O_APPEND)
     {
         file->f_pos = (off_t)target->d_inode->i_size;
@@ -1576,13 +1492,11 @@ int vfs_close(file_t *file)
         return ENO0_NO_ERROR;
     }
 
-    /* 调用底层关闭回调（释放底层资源，如 FIL*）*/
     if (file->f_op && file->f_op->close)
     {
         file->f_op->close(file);
     }
 
-    /* 释放持有的目录项引用 */
     if (file->f_dentry)
     {
         dentry_put(file->f_dentry);
@@ -1607,7 +1521,6 @@ ssize_t vfs_read(file_t *file, void *buf, size_t len)
         return ENO8_NULL_POINTER;
     }
 
-    /* 检查访问权限：只写文件不允许读 */
     if ((file->f_mode & O_ACCMODE) == O_WRONLY)
     {
         return ENO16_PERM;
@@ -1635,7 +1548,6 @@ ssize_t vfs_write(file_t *file, const void *buf, size_t len)
         return ENO8_NULL_POINTER;
     }
 
-    /* 检查访问权限：只读文件不允许写 */
     if ((file->f_mode & O_ACCMODE) == O_RDONLY)
     {
         return ENO16_PERM;
@@ -1646,7 +1558,6 @@ ssize_t vfs_write(file_t *file, const void *buf, size_t len)
         return ENO8_NULL_POINTER;
     }
 
-    /* O_APPEND 模式：每次写操作前将位置移到文件末尾 */
     if (file->f_mode & O_APPEND)
     {
         file->f_pos = (off_t)file->f_inode->i_size;
@@ -1688,7 +1599,6 @@ int vfs_truncate(const char *path, uint64_t size)
         return ENO5_NOSUCH_ENTRY;
     }
 
-    /* 目录不允许截断 */
     if (S_ISDIR(d->d_inode->i_mode))
     {
         dentry_put(d);
@@ -1773,13 +1683,11 @@ off_t vfs_lseek(file_t *file, off_t offset, int whence)
         return (off_t)ENO6_INVAL_PARAM;
     }
 
-    /* 若底层文件系统提供了 lseek 回调，委托给它处理 */
     if (file->f_op && file->f_op->lseek)
     {
         return file->f_op->lseek(file, offset, whence);
     }
 
-    /* 默认 VFS 层实现：直接更新 f_pos */
     file->f_pos = new_pos;
     return new_pos;
 }
@@ -1808,7 +1716,6 @@ int vfs_mkdir(const char *path, mode_t mode)
         return ENO13_NO_FS;
     }
 
-    /* 检查目录是否已存在 */
     dentry_t *ex = vfs_lookup(path);
     if (ex)
     {
@@ -1816,14 +1723,12 @@ int vfs_mkdir(const char *path, mode_t mode)
         return ENO7_EXISTS;
     }
 
-    /* 分离父路径和目录名 */
     char ppath[VFS_PATH_MAX], dname[VFS_NAME_MAX];
     if (split_path(path, ppath, VFS_PATH_MAX, dname, VFS_NAME_MAX) < 0)
     {
         return ENO11_NAME_TOO_LONG;
     }
 
-    /* 查找父目录 */
     dentry_t *parent = vfs_lookup(ppath);
     if (!parent)
     {
@@ -1835,7 +1740,6 @@ int vfs_mkdir(const char *path, mode_t mode)
         return ENO9_NOT_DIR;
     }
 
-    /* 创建负目录项，然后调底层 mkdir */
     dentry_t *nd = dentry_create(dname, NULL, parent, NULL);
     if (!nd)
     {
@@ -1853,10 +1757,7 @@ int vfs_mkdir(const char *path, mode_t mode)
     int ret = parent->d_inode->i_op->mkdir(parent->d_inode, nd,
                                             S_IFDIR | (mode & 0777));
     dentry_put(parent);
-    /* 成功与否都要释放 nd：本函数只返回错误码，不把目录项交给调用者。
-     * 成功路径以前漏了这一次 put，把新目录永久钉在缓存里（vfs_rmdir 那边
-     * 还得靠 "d_ref > 1" 猜出这笔多余引用再补一次 put）——那个猜测在别的进程
-     * 正好把该目录当 cwd 时会猜错，把人家的引用给释放掉。 */
+    /* 成功与否都要放掉 nd：本函数不把目录项交给调用者 */
     dentry_put(nd);
     return ret;
 }
@@ -1887,7 +1788,6 @@ int vfs_rmdir(const char *path)
         return ENO5_NOSUCH_ENTRY;
     }
 
-    /* 必须是目录 */
     if (!d->d_inode || !S_ISDIR(d->d_inode->i_mode))
     {
         dentry_put(d);
@@ -1897,14 +1797,12 @@ int vfs_rmdir(const char *path)
     /* 判空之前先剪掉子树里纯缓存的目录项，让下面这一步看到的是"还有人在用的子项" */
     dcache_prune_subtree(d);
 
-    /* 目录非空：不允许删除 */
     if (!list_empty(&d->d_subdirs))
     {
         dentry_put(d);
         return ENO12_NOT_EMPTY;
     }
 
-    /* 目录是挂载点：忙 */
     if (d->d_mounted)
     {
         dentry_put(d);
@@ -1954,7 +1852,6 @@ int vfs_unlink(const char *path)
         return ENO5_NOSUCH_ENTRY;
     }
 
-    /* 不允许删除目录（应使用 rmdir）*/
     if (d->d_inode && S_ISDIR(d->d_inode->i_mode))
     {
         dentry_put(d);
@@ -2005,7 +1902,6 @@ int vfs_rename(const char *oldpath, const char *newpath)
         return ENO5_NOSUCH_ENTRY;
     }
 
-    /* 分离新路径的父目录和文件名 */
     char new_ppath[VFS_PATH_MAX], new_name[VFS_NAME_MAX];
     if (split_path(newpath, new_ppath, VFS_PATH_MAX, new_name, VFS_NAME_MAX) < 0)
     {
@@ -2026,7 +1922,6 @@ int vfs_rename(const char *oldpath, const char *newpath)
         return ENO9_NOT_DIR;
     }
 
-    /* 不允许跨挂载点重命名 */
     if (old_d->d_inode && new_parent->d_inode &&
         old_d->d_inode->i_sb != new_parent->d_inode->i_sb)
     {
@@ -2035,7 +1930,6 @@ int vfs_rename(const char *oldpath, const char *newpath)
         return ENO14_CROSS_DEV;
     }
 
-    /* 创建用于传递给底层的新目录项（负目录项）*/
     dentry_t *new_d = dentry_create(new_name, NULL, new_parent, NULL);
     if (!new_d)
     {
@@ -2044,7 +1938,6 @@ int vfs_rename(const char *oldpath, const char *newpath)
         return ENO1_NOMORE_MEM;
     }
 
-    /* 调用底层 rename 回调 */
     int ret = ENO0_NO_ERROR;
     if (old_d->d_parent && old_d->d_parent->d_inode &&
         old_d->d_parent->d_inode->i_op &&
@@ -2057,7 +1950,6 @@ int vfs_rename(const char *oldpath, const char *newpath)
 
     if (ret != ENO0_NO_ERROR)
     {
-        /* 失败：清理临时新目录项 */
         dentry_put(new_d);
         dentry_put(old_d);
         dentry_put(new_parent);
@@ -2092,7 +1984,6 @@ int vfs_rename(const char *oldpath, const char *newpath)
         dentry_put(old_parent);
     }
 
-    /* 释放用于传递的临时新目录项 */
     dentry_put(new_d);
 
     dentry_put(old_d);
@@ -2110,7 +2001,7 @@ int vfs_link(const char *oldpath, const char *newpath)
 {
     (void)oldpath;
     (void)newpath;
-    return ENO16_PERM;  /* FAT 文件系统不支持硬链接 */
+    return ENO16_PERM;
 }
 
 /**
@@ -2123,7 +2014,7 @@ int vfs_symlink(const char *target, const char *linkpath)
 {
     (void)target;
     (void)linkpath;
-    return ENO16_PERM;  /* FAT 文件系统不支持符号链接 */
+    return ENO16_PERM;
 }
 
 /* ============================================================
@@ -2335,7 +2226,7 @@ int vfs_fstat(file_t *file, stat_t *statbuf)
  * @param[in]  len  buf 容量（字节）
  * @retval >0 已填字节数
  * @retval 0  目录已读完（EOF）
- * @retval ENO10_IS_DIR 反过来的情况：file 不是目录
+ * @retval ENO9_NOT_DIR file 不是目录
  * @retval ENO6_INVAL_PARAM 底层不支持 readdir，或缓冲区连一条记录都放不下
  * @details 薄转发——真正的记录组装（`.`/`..` 合成、`d_reclen` 8 字节对齐、
  *   放不下时的 pending 暂存）由具体文件系统的 readdir 回调负责。

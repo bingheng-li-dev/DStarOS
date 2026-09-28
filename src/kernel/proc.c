@@ -19,42 +19,32 @@
 #include "ktime.h"
 #include "fpu.h"
 
-/* List of all processes. */
+/* 全部进程的链表（各 hart 的 idle 不在其中） */
 struct list_head proc_list;
-/* 保护 proc_list 的插入/删除/遍历。sys_kill 要遍历它找目标，而 do_wait 收割 ZOMBIE 时
- * 会 list_del + kfree(pcb)，两者并发就是必现的 use-after-free（slab 会立刻把那块内存
- * 交给别人）。锁序：tty->lock → proc_list_lock → sighand->lock → run_queue.lock，
- * 单向；持有本锁期间不得睡眠、不得取 VFS 大锁。 */
+/* 保护 proc_list，以及进程父子链（proc_children / proc_sibling_linker / proc_parent）。
+ * sys_kill 遍历找目标、孤儿过继给 init，都会与 do_wait 收割（摘链 + kfree）并发。
+ * 锁序：tty->lock → proc_list_lock → sighand->lock → run_queue.lock，单向；
+ * 持有本锁期间不得睡眠、不得取 VFS 大锁。 */
 static osslock_t proc_list_lock;
 /* pid 位图：第 n 位为 1 表示 pid n 已被占用（ZOMBIE 也算，收割时才释放）。
  * 用独立的锁，不与 proc_list_lock 嵌套。 */
 static osslock_t pid_lock;
 static uint64_t pid_bitmap[PID_MAX_VALUE / 64 + 1];
-/* Amount of processes. */
+/* 进程数（含各 hart 的 idle） */
 uint16_t task_count = 0;
 
 #define USER_STACK_LEN  (16 * PGSIZE)      /* 64 KB，懒分配 */
 
-/* Alloc a new empty pcb(proc). */
 static pcb_t *alloc_new_proc(void);
-/* Alloc the kernel stack of a proc. */
 static int16_t alloc_kernel_stack(pcb_t *pcb);
-/* Dealloc the kernel stack of a proc.Attention that it doesn't pmm_free_pages the memory pointed by pointers of the pcb!! */
 static int16_t dealloc_kernel_stack(pcb_t *pcb);
-/* Copy the virtual memory management struct of a proc. */
 static int16_t copy_proc_mm(uint32_t clone_flags, pcb_t *pcb);
-/* Copy the stack which is up to the param stack(if stack==0, It means to fork a kernel thread). */
 static void copy_proc_stk(pcb_t *pcb, uintptr_t stack, intstkf_t *regs);
-/* Create task idle. */
 static pcb_t *create_first_proc_idle(void);
-/* 建一个独立用户地址空间（新 PGD + 复制内核高半段）；失败返回 NULL。不切 satp、不挂 pcb。 */
 static mm_t *create_user_mm(void);
-/* Find the pcb of a proc by its pid. */
 static pcb_t *find_proc_by_pid(int16_t pid);
-/* Alloc a unique pid for process. */
 static int16_t alloc_pid_map(void);
 static void dealloc_pid_map(int16_t pid);
-/* Kernel's init process which pid is 1. */
 static int16_t init(void);
 static void fork_out(void);
 #if DEBUG_PROC_CTXSTK
@@ -63,11 +53,6 @@ static void print_ctx_stk(ctx_t *ctx) __attribute__((used));
 
 /**
  * @brief 设置进程名，超长截断
- * @details 原来写的是 `memcpy(..., name, sizeof(name))`——`name` 是 `const char *`，
- *   `sizeof` 恒为 8，于是无论名字多长都只拷 8 字节：短名字会**越过字面量末尾读**
- *   （UB，实测落在 .rodata 里没 fault，且第 5 字节恰好是结束符所以结果看着是对的），
- *   长名字则被静默截断到 8 个字符。清零长度也少了一个字节（数组是
- *   `[PNAME_MAX_LENGTH + 1]`，最后一格从未初始化）。两处一并改正。
  */
 char *set_proc_name(pcb_t *proc, const char *name)
 {
@@ -80,7 +65,11 @@ char *set_proc_name(pcb_t *proc, const char *name)
     return memcpy(proc->proc_pname, name, n);
 }
 
-/* @param stack the parent's user stack pointer. if stack==0, It means to fork a kernel thread. */
+/**
+ * @brief 复制当前进程
+ * @param[in] stack 子进程的用户栈指针；0 表示 fork 内核线程
+ * @return 子进程 pid；负值为错误码
+ */
 int16_t do_fork(uint32_t clone_flags, uintptr_t stack, intstkf_t *regs)
 {
     if (task_count > PROC_MAX_AMOUNT)
@@ -99,7 +88,7 @@ int16_t do_fork(uint32_t clone_flags, uintptr_t stack, intstkf_t *regs)
         goto f2;
     }
 
-    /* 信号：继承屏蔽字与全部 handler，但 **挂起集清零**——父进程还没处理完的信号
+    /* 信号：继承屏蔽字与全部 handler，但 挂起集清零——父进程还没处理完的信号
      * 不该让子进程再收一遍（POSIX）。父进程是内核线程（proc_sighand == NULL）时
      * 子进程也是内核线程，什么都不用做。
      * 放在 copy_proc_mm 之前是为了让失败路径只需要还内核栈与 PCB——一旦建了新
@@ -129,7 +118,7 @@ int16_t do_fork(uint32_t clone_flags, uintptr_t stack, intstkf_t *regs)
 
     /* 浮点上下文按 fork 的语义整份继承：子进程从 fork 返回那一刻起，看到的寄存器
      * 必须和父进程一模一样。此刻父进程正跑在内核里、它的 f 寄存器还活在硬件上，
-     * 所以要先存一次再拷——只拷 PCB 里那份的话，拿到的是父进程**上一次被换出时**
+     * 所以要先存一次再拷——只拷 PCB 里那份的话，拿到的是父进程上一次被换出时
      * 的旧值。 */
     fpu_save(proc_get_current());
     memcpy(new_proc->proc_fp_regs, proc_get_current()->proc_fp_regs,
@@ -139,7 +128,6 @@ int16_t do_fork(uint32_t clone_flags, uintptr_t stack, intstkf_t *regs)
     /* umask 由 fork 继承（ITIMER_REAL 相反，POSIX 要求不继承，alloc_new_proc 已清零） */
     new_proc->proc_umask = proc_get_current()->proc_umask;
 
-    /* 子进程继承父进程的当前工作目录 */
     new_proc->proc_cwd = proc_get_current()->proc_cwd;
     if (new_proc->proc_cwd)
     {
@@ -197,11 +185,17 @@ f3:
  */
 static void exit_common(int16_t error_code, uint8_t sig) __attribute__((noreturn));
 
+/**
+ * @brief 以退出码 error_code 结束当前进程
+ */
 void do_exit(int16_t error_code)
 {
     exit_common(error_code, 0);
 }
 
+/**
+ * @brief 当前进程被信号 sig 杀死
+ */
 void do_exit_signal(int sig)
 {
     exit_common(0, (uint8_t)sig);
@@ -213,7 +207,7 @@ static void exit_common(int16_t error_code, uint8_t sig)
 
     /* PID 1 退出 = 系统失去 init：孤儿从此无人收割、shell 也再起不来，
      * 与其带着这个空洞继续跑，不如就地 panic（与 Linux 一致，也好定位）。
-     * **必须放在最前面**——下面的孤儿过继要 find_proc_by_pid(1)，那正是自己。
+     * 必须放在最前面——下面的孤儿过继要 find_proc_by_pid(1)，那正是自己。
      * 回归形态下 PID 1 是内核线程、永远走不到这里，这条判断只对生产形态生效。 */
     if (curr->proc_pid == 1)
     {
@@ -307,11 +301,11 @@ static void exit_common(int16_t error_code, uint8_t sig)
  *   `pid > 0` 这一档是 ash 的刚需：它按 pid 跟踪作业，收错一个就是 `$?` 错、
  *   或者一个已经死掉的作业永远等不到。`WNOHANG` 同理——ash 每次打提示符之前都会做
  *   一次非阻塞收割，忽略这个标志会让整个 shell 睡死在提示符之前。
- * @note WUNTRACED / WCONTINUED 恒被忽略：本内核**没有 STOPPED 状态**
+ * @note WUNTRACED / WCONTINUED 恒被忽略：本内核没有 STOPPED 状态
  *   （`signal.h` 的 `SIG_UNCATCHABLE` 注释写明 SIGSTOP 只是拒绝装 handler），
  *   没有"停住的子进程"可报，所以忽略是当前语义下唯一诚实的做法。
  * @note 按进程组等待（`pid == 0` / `pid < -1`）返回 ENO20_NOSYS 而不是退化成
- *   "等任意"：ash 关掉 job control 之后不该走到这里，**走到了就说明配置没关净**，
+ *   "等任意"：ash 关掉 job control 之后不该走到这里，走到了就说明配置没关净，
  *   这个信号比一个含糊的实现有价值。
  */
 int16_t do_wait(int16_t pid, int *status, int options)
@@ -358,14 +352,9 @@ int16_t do_wait(int16_t pid, int *status, int options)
         {
             cur->proc_state = RUNNING;
 
-            /* 子进程在 do_exit 里的顺序是"先置 ZOMBIE + wakeup(父进程)，再
-             * sched_schedule()"，所以父进程被唤醒时，子进程很可能还站在自己的
-             * 内核栈上往 switch_to 走（接上 IPI 之后父进程会被立刻唤醒到另一个
-             * hart 上）。必须等它真正把上下文保存完、
-             * 彻底离开 CPU，才能回收它的内核栈和 PCB——否则就是在它脚下把正在
-             * 使用的栈释放掉，典型表现是内核线程（proc_mm 为 NULL）在随机地址
-             * 上页错误。proc_on_cpu 由 sched_finish_switch() 在 switch_to 完成后
-             * 清零，单核下父进程能跑起来就说明子进程早已让出，循环不会真的转。 */
+            /* 子进程置 ZOMBIE、唤醒父进程之后才 sched_schedule()，父进程醒来时它可能
+             * 还站在自己的内核栈上。必须等 proc_on_cpu 清零（switch_to 已写完上下文），
+             * 才能回收它的内核栈和 PCB。 */
             while (child->proc_on_cpu)
             {
                 sched_schedule();
@@ -382,7 +371,7 @@ int16_t do_wait(int16_t pid, int *status, int options)
             }
 
             /* times() 的 tms_cutime：把子进程（及它已收割的孙辈）的累计执行时间
-             * 归并到父进程。**必须赶在下面 kfree(child) 之前**，顺序反了就是读
+             * 归并到父进程。必须赶在下面 kfree(child) 之前，顺序反了就是读
              * 已释放内存。 */
             cur->proc_sum_exec_runtime_children +=
                 child->proc_sum_exec_runtime + child->proc_sum_exec_runtime_children;
@@ -408,7 +397,7 @@ int16_t do_wait(int16_t pid, int *status, int options)
         }
 
         /* 有匹配的子进程但都还活着：WNOHANG 要求立刻返回 0（不是错误）。
-         * **必须在置 INTERRUPTIBLE 之后、sched_schedule() 之前把状态改回来**，
+         * 必须在置 INTERRUPTIBLE 之后、sched_schedule() 之前把状态改回来，
          * 否则就带着 INTERRUPTIBLE 返回用户态了——与下面 signal_pending 那条同型。 */
         if (options & WNOHANG)
         {
@@ -431,9 +420,6 @@ int16_t do_wait(int16_t pid, int *status, int options)
 
 /* ============================================================
  * 进程启动约定：argv / envp / auxv 初始栈
- *
- * BusyBox 靠 argv[0] 分发 applet（/bin/ls 是指向 /bin/busybox 的链接），
- * 没有 argv 就没有 BusyBox——这不是"少一个特性"，是整个 BusyBox 阶段跑不起来。
  * ============================================================ */
 
 #define EXEC_MAX_ARGS       64          /* argc + envc 的合计上限 */
@@ -442,9 +428,9 @@ int16_t do_wait(int16_t pid, int *status, int options)
 
 /**
  * @brief execve 参数在内核侧的暂存区
- * @details argv/envp 是**二级指针**：先要读指针数组、再逐个跟着指针读字符串，
+ * @details argv/envp 是二级指针：先要读指针数组、再逐个跟着指针读字符串，
  *   两级都在旧地址空间里，所以必须赶在切 satp 之前全部拷进内核。
- *   这里只存紧凑排列的字符串与它们的偏移，**不存指针**——暂存区里的地址与最终
+ *   这里只存紧凑排列的字符串与它们的偏移，不存指针——暂存区里的地址与最终
  *   要写进用户栈的地址毫无关系。
  */
 typedef struct exec_args
@@ -562,10 +548,10 @@ static int exec_args_copy_from_user(exec_args_t *a, char *const *uvec, int *coun
  *   USER_STACK_TOP
  *
  *   三条硬约束，写错的症状都离现场很远：
- *   1. **sp 必须 16 字节对齐**（riscv64 ABI）；
- *   2. argv/envp 里存的是**指向字符串区的用户虚拟地址**，所以要先定下字符串区
+ *   1. sp 必须 16 字节对齐（riscv64 ABI）；
+ *   2. argv/envp 里存的是指向字符串区的用户虚拟地址，所以要先定下字符串区
  *      的最终地址再填指针——实现上就是"先量尺寸、再填"两趟；
- *   3. **argv[argc] 与 envp[envc] 的 NULL 都不能省**：musl 靠 envp 的 NULL
+ *   3. argv[argc] 与 envp[envc] 的 NULL 都不能省：musl 靠 envp 的 NULL
  *      定位 auxv 的起点，少一个就是整个 auxv 错位、AT_PAGESZ 读成随机值。
  * @note 此刻已经切到新页表，写的是懒分配的用户栈 VMA。S 态带 SUM=1 访问用户地址
  *   触发的缺页由 vmm_page_fault_handler 正常服务，与 copy_to_user 走的是同一条路。
@@ -607,7 +593,7 @@ static int setup_user_stack(const exec_args_t *args, const elf_info_t *info,
     }
 
     /* 字符串区与 AT_RANDOM 种子。种子是弱熵（启动至今的纳秒数 + pid），
-     * 只够喂 musl 的栈保护 canary，**不可作密码学用途** */
+     * 只够喂 musl 的栈保护 canary，不可作密码学用途 */
     memcpy((void *)str_base, args->buf, args->used);
     uint64_t seed = ktime_get_ns() ^ ((uint64_t)proc_get_current()->proc_pid << 48);
     ((uint64_t *)rand_va)[0] = seed;
@@ -628,7 +614,7 @@ static int setup_user_stack(const exec_args_t *args, const elf_info_t *info,
     *slot++ = 0;
     memcpy(slot, aux, (size_t)na * sizeof(struct elf64_auxv));
 
-    /* 自检：初始栈写错是最难从用户态症状反推的一类 bug，在这里花三行确认一次很值 */
+    /* 自检：初始栈写错的症状离现场很远 */
     if (*(long *)sp != args->argc)
     {
         panic("setup_user_stack: argc readback mismatch (sp=%lx)", sp);
@@ -647,8 +633,8 @@ static int setup_user_stack(const exec_args_t *args, const elf_info_t *info,
  * @retval ENO0_NO_ERROR 成功——trap 帧已指向新程序，返回后 sret 即进入新程序，旧程序视角看不到此返回值
  * @retval <0 失败（负 ENO*）——旧地址空间原封不动，exec 失败不致命，返回值传回旧程序
  * @details 保留 PCB / PID / 父子关系 / fd 表 / cwd，只把地址空间整个换掉。顺序极其关键：
- *   1. **先**把 path / argv / envp 从用户空间拷进内核（切 satp 后用户指针失效）；
- *   2. **先**把整个 ELF 读进内核堆（内核偏移映射，切 satp 后仍可达）；
+ *   1. 先把 path / argv / envp 从用户空间拷进内核（切 satp 后用户指针失效）；
+ *   2. 先把整个 ELF 读进内核堆（内核偏移映射，切 satp 后仍可达）；
  *   3. 建新 mm、切到新地址空间（旧 mm 先留着，加载失败要回滚）；
  *   4. elf_load 到新 mm；失败则切回旧 mm、销毁半成品新 mm、返回错误；
  *   5. 成功后才销毁旧 mm（此刻已不站在它的页表上），随即关闭带 FD_CLOEXEC 的 fd；
@@ -791,25 +777,24 @@ int do_exec(intstkf_t *sp, const char *path, char *const *argv, char *const *env
     sp->sepc    = einfo.entry;
     sp->x2_sp   = user_sp;
     sp->x4_tp   = cpu_get_core_id();
-    /* 清 SIE 的理由同 enter_user_mode（那里有详细说明）。本函数是在真正的 syscall trap
-     * 里被调用的，`read_csr(sstatus)` 的 SIE 本来就已被硬件清掉，这一句现在是冗余的；
-     * 写出来是为了不让这条不变式依赖"调用者恰好在 trap 上下文里"这个隐含前提。 */
+    /* 清 SIE 的理由同 enter_user_mode。在 syscall trap 里硬件已清过 SIE，这里再清一次，
+     * 是为了不让这条不变式依赖"调用者恰好在 trap 上下文里"。 */
     sp->sstatus = (read_csr(sstatus) & ~SSTATUS_SPP & ~SSTATUS_SIE & ~SSTATUS_FS)
                   | SSTATUS_SPIE | SSTATUS_SUM | SSTATUS_FS_INITIAL;
 
     return ENO0_NO_ERROR;
 }
 
+/**
+ * @brief fork 一个执行 func(args) 的内核线程（与父进程共享地址空间）
+ */
 int16_t create_kernel_thread_by_fork(void *func(void *), void *args, uint32_t clone_flags)
 {
     intstkf_t regs;
     memset(&regs, 0, sizeof(intstkf_t));
     regs.x8_s0 = (uint64_t)func;
     regs.x9_s1 = (uint64_t)args;
-    /* Make sure that the os is interrupt-enabled and the proc will response interrupt. */
-    /* SSTATUS_SPP: Set 1 to make sure S-mode.
-     * SSTATUS_SPIE:Set 1 to make sure the interrupt will be enable when goes out of trap.Cause SPIE restores the value of SIE.
-     * SSTATUS_SIE: Set 1 to enable global interrupt.Here disable the interrupt in order to simulate a in-trap envirnment. */
+    /* SPP=1 返回 S 态；SPIE=1 返回后开中断；SIE=0 模拟"在 trap 里"的环境 */
     regs.sstatus = ((read_csr(sstatus) | SSTATUS_SPP | SSTATUS_SPIE) & ~SSTATUS_SIE & ~SSTATUS_FS)
                    | SSTATUS_FS_INITIAL;
     extern void kernel_thread_entry(void);
@@ -819,10 +804,9 @@ int16_t create_kernel_thread_by_fork(void *func(void *), void *args, uint32_t cl
 
 /**
  * @brief 进程子系统的全局结构初始化，只由 hart0 调用一次
- * @note **必须在启动 hart1 之前调用**。从 proc_init() 里拆出来的理由：hart1 一上电就会
- *   跑自己的 proc_init()，那里会碰 task_count（受 proc_list_lock 保护）。若把
- *   spinlock_init 留在 proc_init() 里，就成了"hart1 可能先拿锁、hart0 随后把这把锁
- *   重新初始化"——正持有的锁被清零，之后谁都进不去。
+ * @note 必须在启动从核之前调用。从 proc_init() 里拆出来的理由：从核一上电就会跑自己的
+ *   proc_init()，那里会取 proc_list_lock；锁若留在 proc_init() 里初始化，就可能在被
+ *   别的核持有时被清零。
  */
 void proc_early_init(void)
 {
@@ -831,9 +815,11 @@ void proc_early_init(void)
     spinlock_init(&pid_lock);
 }
 
+/**
+ * @brief 每个 hart 建自己的 idle 并登记为当前任务；hart0 另外 fork 出 init（pid 1）
+ */
 void proc_init(void)
 {
-    /* 每个 hart 各自的 idle 任务则必须每 hart 都建 */
     pcb_t *idle = create_first_proc_idle();
     if (idle == NULL)
     {
@@ -968,7 +954,6 @@ static int16_t copy_proc_mm(uint32_t clone_flags, pcb_t *pcb)
         return ENO0_NO_ERROR;
     }
 
-    /* 用户线程fork */
     mm_t *mm = vmm_mm_create();
     if (!mm)
     {
@@ -1003,7 +988,7 @@ static void copy_proc_stk(pcb_t *pcb, uintptr_t stack, intstkf_t *regs)
 {
     pcb->proc_int_stack = (intstkf_t *)(PROC_KSTACK_TOP(pcb) - sizeof(intstkf_t));
     *(pcb->proc_int_stack) = *(regs);
-    /* For child process,"fork" returns 0. */
+    /* 子进程里 fork 返回 0 */
     pcb->proc_int_stack->x10_a0 = 0;
     pcb->proc_int_stack->x2_sp = (stack == 0) ? (uintptr_t)pcb->proc_int_stack : stack;
     pcb->proc_context.x1_ra = (uint64_t)fork_out;
@@ -1026,7 +1011,7 @@ static pcb_t *create_first_proc_idle(void)
         idle->proc_cwd = NULL;  /* idle 进程使用 VFS 根目录 */
         const char *name = "idle";
         set_proc_name(idle, name);
-        /* 两个 hart 会并发建各自的 idle，task_count 的自增必须串行化 */
+        /* 各 hart 并发建自己的 idle，task_count 的自增必须串行化 */
         irq_key_t plist_key = spinlock_acquire(&proc_list_lock);
         task_count = task_count + 1;
         spinlock_release(&proc_list_lock, plist_key);
@@ -1098,12 +1083,17 @@ int16_t proc_get_pgid(int16_t pid)
     return pgid;
 }
 
-/* 按 pid 查找 pcb 的公开包装，供 do_wait 之外的模块（如调度回归测试）使用。 */
+/**
+ * @brief 按 pid 查找 pcb（find_proc_by_pid 的公开包装），未找到返回 NULL
+ */
 pcb_t *proc_find_by_pid(int16_t pid)
 {
     return find_proc_by_pid(pid);
 }
 
+/**
+ * @brief 在 proc_list_lock 下找到 pid 对应的进程并立刻对它调用 fn
+ */
 bool proc_apply_by_pid(int16_t pid, void (*fn)(pcb_t *p, int arg), int arg)
 {
     bool found = false;
@@ -1123,6 +1113,9 @@ bool proc_apply_by_pid(int16_t pid, void (*fn)(pcb_t *p, int arg), int arg)
     return found;
 }
 
+/**
+ * @brief 在 proc_list_lock 下对进程组 pgid 的每个成员调用 fn，返回成员个数
+ */
 int proc_apply_by_pgid(int16_t pgid, void (*fn)(pcb_t *p, int arg), int arg)
 {
     int count = 0;
@@ -1171,6 +1164,9 @@ static void dealloc_pid_map(int16_t pid)
     spinlock_release(&pid_lock, pid_lock_key);
 }
 
+/**
+ * @brief 每个 hart 的 idle 循环：有活就调度过去，没活就 wfi
+ */
 void idle(void)
 {
     while (1)
@@ -1186,11 +1182,8 @@ void idle(void)
             __FUNCTION__, cur->proc_pid, my_idle->proc_pid);
 #endif
 
-        /* 每轮都尝试调度，不再靠 need_resched 门槛——本 hart 的 need_resched 只有
-         * "别的任务在本 hart 上跑时被抢占"才会置位，本 hart 自己空转时永远不会有人
-         * 帮它置这个标志，靠它当门槛会导致这个 hart 永久看不到共享就绪队列里别的
-         * hart 刚放进去的任务。sched_schedule() 在确实没活干时会退化成挑回自己的
-         * idle_proc，开销很小。 */
+        /* 每轮都调度，不靠 need_resched 当门槛：本 hart 空转时没人会替它置这个标志，
+         * 那样它永远看不到别的 hart 刚放进共享就绪队列的任务。 */
         sched_schedule();
 
         /* 挑完还是自己的 idle_proc，说明真的没活干，wfi 休眠。唤醒有两条路径：
@@ -1207,7 +1200,7 @@ void idle(void)
  * @brief 建一个独立的用户地址空间（新 PGD + 复制内核高半段）
  * @return 新 mm；失败返回 NULL
  * @details 复用 copy_proc_mm 用户分支的套路：分配根页表帧、清零、复制内核半段 PGD[256..511]，
- *   使新地址空间也能访问内核。**不切 satp、不挂到任何 pcb**——由调用方决定何时切换
+ *   使新地址空间也能访问内核。不切 satp、不挂到任何 pcb——由调用方决定何时切换
  *   （run_user_program 首次进入 / do_exec 换脑）。
  */
 static mm_t *create_user_mm(void)
@@ -1262,15 +1255,10 @@ static void proc_signal_init_user(pcb_t *p)
 /**
  * @brief 建独立用户地址空间、从根文件系统加载指定程序并进入 U 态
  * @param[in] path 可执行文件在根文件系统里的绝对路径
- * @details 第一个用户进程的加载路径。**程序来自 rootfs 镜像，不再是编译期嵌进内核的
- *   字节数组**——后者每个 ELF 要膨胀成 6.3 倍的 C 源文件，BusyBox 那个量级根本编不出来。
- *
- *   读法与 `do_exec` 一致：一次 kmalloc 把整个文件读进内核堆，`elf_load` 把各段拷进
+ * @details 第一个用户进程的加载路径，程序来自 rootfs 镜像。读法与 `do_exec` 一致：一次 kmalloc 把整个文件读进内核堆，`elf_load` 把各段拷进
  *   用户页之后立刻归还。区别只在参数来源——`do_exec` 的 path/argv 来自用户空间要
  *   `copy_from_user`，这里的是内核里的字面量。
- * @note argv 由调用方给全，**含 argv[0]**——BusyBox 靠 argv[0] 分发 applet，
- *   写死一个串的话它只会报 `applet not found`。阶段 11 的 /sbin/init 换的只是
- *   路径与这张表，不用再动参数构造。
+ * @note argv 由调用方给全，含 argv[0]——BusyBox 靠 argv[0] 分发 applet。
  * @note noreturn：`enter_user_mode` 内部 `sret` 进入 U 态，不会返回
  * @note 找不到文件时 panic 并提示跑 `make rootfs`：这条路径上没有可降级的余地，
  *   静默失败只会表现成"内核起来了但什么都没发生"。
@@ -1332,8 +1320,7 @@ static void run_user_program(const char *path, const char *const argv[], int arg
     }
 
     /* 4) 用户栈 VMA（懒分配，首次访问由 page fault 落实），并铺上初始栈。
-     * **建栈代码与 do_exec 共用同一份**：写成两份的话，将来真正的 /sbin/init
-     * 上来只会有一条路径被测过。 */
+     * 建栈代码与 do_exec 共用同一份，两条路径同时被测到。 */
     vma_t *stk = vmm_vma_create(USER_STACK_TOP - USER_STACK_LEN, USER_STACK_TOP, VMP_R | VMP_W);
     vmm_vma_insert(mm, stk);
 
@@ -1372,14 +1359,8 @@ static void run_user_program(const char *path, const char *const argv[], int arg
     enter_user_mode(einfo.entry, user_sp);
 }
 
-/* 第一个用户进程跑哪个程序，由 debug.h 里那批互斥的 DEBUG_*_TEST 开关选。
- *
- * 从阶段 9 起**只剩"跑哪个路径"这一个维度**：程序统一放在 rootfs 镜像的 /bin 下，
- * 由 tools/build_rootfs.sh 在宿主机拷进去。此前是"用哪个嵌入的字节数组"——
- * 每个 ELF 都要经 gen_elf_array.sh 膨胀成 6.3 倍的 C 源文件编进内核，
- * 十个测试程序就占掉内核镜像的一大半，BusyBox 那个量级根本编不出来。
- *
- * 路径带 .elf 后缀是因为镜像里就是这么放的；将来 /sbin/init 落地后这里会换成它。 */
+/* 第一个用户进程跑哪个程序，由 debug.h 里那批互斥的 DEBUG_*_TEST 开关选；
+ * 程序都由 tools/build_rootfs.sh 放在 rootfs 镜像的 /bin 下。 */
 #if DEBUG_EXEC_TEST
 #define USER_PROGRAM_PATH "/bin/exectest.elf"
 #elif DEBUG_FILE_TEST
@@ -1415,8 +1396,8 @@ static void run_user_program(const char *path, const char *const argv[], int arg
  * 给它一个跑完就退出的程序占位，收割循环才有东西可收。 */
 #define USER_PROGRAM_PATH "/bin/hello.elf"
 #else
-/* 没有任何测试开关打开 = 生产形态：PID 1 自己变身 /sbin/init（阶段 11）。
- * BOOT_AS_INIT **只在这一支定义**，于是往上面那条链里新加测试开关时不用记得
+/* 没有任何测试开关打开 = 生产形态：PID 1 自己变身 /sbin/init。
+ * BOOT_AS_INIT 只在这一支定义，于是往上面那条链里新加测试开关时不用记得
  * 同步维护它——新开关一旦命中，这一支就走不到，BOOT_AS_INIT 自动是 0。 */
 #define USER_PROGRAM_PATH "/sbin/init"
 #define BOOT_AS_INIT 1
@@ -1432,7 +1413,7 @@ static void run_user_program(const char *path, const char *const argv[], int arg
 #if DEBUG_BUSYBOX_INTERACTIVE
 #define USER_PROGRAM_ARGV { "busybox", "sh" }
 #else
-/* BusyBox 冒烟串。**用 && 串起来**：任何一条失败就短路，收尾的标记打不出来，
+/* BusyBox 冒烟串。用 && 串起来：任何一条失败就短路，收尾的标记打不出来，
  * regress.sh 于是判"suite did not finish"——不然命令挂了也会被当成通过。
  * 每一段对应一类 syscall：echo=write、ls=getdents64/newfstatat、cat=openat/read、
  * mkdir/rmdir=mkdirat/unlinkat、管道=pipe2+clone+wait4、pwd=getcwd、uname、sleep。
@@ -1536,7 +1517,7 @@ static int16_t init(void)
 #endif
 
 #if BOOT_AS_INIT
-    /* 生产形态：PID 1 **自己变身**成 /sbin/init，不 fork、也不再有内核态收割循环。
+    /* 生产形态：PID 1 自己变身成 /sbin/init，不 fork、也不再有内核态收割循环。
      * 收割职责随之搬到用户态——do_exit 的孤儿过继目标仍然是 find_proc_by_pid(1)，
      * 那正是变身之后的这个进程，内核侧的过继机制一行都没改。
      * run_user_program 末尾是 enter_user_mode，正常情况下永不返回。 */
@@ -1550,7 +1531,7 @@ static int16_t init(void)
     }
 
     /* 永久收割循环：孤儿最终都会过继到这里，没有这个循环孤儿僵尸会永久堆积。
-     * **回归形态专用**：scripts/regress.sh 判一套跑完，靠的就是下面那句
+     * 回归形态专用：scripts/regress.sh 判一套跑完，靠的就是下面那句
      * "no more children, shutting down" 之后 QEMU 退出。 */
     while (1)
     {
@@ -1568,7 +1549,6 @@ static int16_t init(void)
         }
         else
         {
-            // @TODO sbi_shutdown测试用
             printf("[init] no more children, shutting down\n");
 #if DEBUG_MEM_TEST || DEBUG_FILE_TEST
             /* 压力用例跑完之后核对各 cache 的 nr_inuse 是否回到基线（vma_cache 尤其）*/
@@ -1585,14 +1565,8 @@ static int16_t init(void)
 static void fork_out(void)
 {
     extern void fork_out_asm(intstkf_t * regs);
-    /* current_proc 已由 sched_schedule() 在调 switch_to() 之前经 sched_set_current()设好 */
-
-    /* 本执行流第一次被 switch_to() 换上：调用方 sched_schedule() 在 switch_to()
-     * 之前 spinlock_acquire(&run_queue.lock) 拿了锁，按"接力"约定应由被换上的执行流
-     * 自己补上这次放锁（sched_schedule() 里 switch_to 之后的 sched_finish_switch()
-     * 配对，这里是同一约定在"从未被调度过的新执行流"这一分支上的对应写法）。
-     * 漏掉会让 run_queue.lock 永远不被释放，整个调度器死锁。
-     * 放锁用的中断 key 取自本任务的 proc_rq_key，alloc_new_proc 已把它初始化成 true。 */
+    /* 新执行流第一次被 switch_to() 换上：按"接力"约定由它补上 sched_schedule() 欠下的
+     * 那次放锁（key 取自 proc_rq_key，alloc_new_proc 已初始化成 true），漏掉就是调度器死锁。 */
     sched_finish_switch();
 
     fork_out_asm(proc_get_current()->proc_int_stack);
@@ -1625,24 +1599,9 @@ static void print_ctx_stk(ctx_t *ctx)
  * @brief 将当前内核线程变身为用户态进程，跳转到用户入口执行
  * @param[in] entry  用户程序入口虚拟地址（将写入 sepc，sret 后 PC 跳至此处）
  * @param[in] ustack 用户栈顶虚拟地址（将写入帧的 x2_sp，须 16 字节对齐）
- * @details
- *   此函数复用 fork_out_asm → trap_return → sret 这条已有的"从 trap 帧恢复并返回"路径，
- *   在内核栈顶伪造一个 trap 帧，使硬件以为这是一次正常的 trap 返回，从而以 U 态身份
- *   跳入用户入口。具体步骤：
- *
- *   1. 在 trap 栈顶（PROC_KSTACK_TOP，即分配区末端再减去 KSTACK_RESERVED）向下
- *      划出 sizeof(intstkf_t) 空间，
- *      清零后填写关键字段：
- *        - sepc    = entry        （sret 后 PC 跳至用户入口）
- *        - x2_sp   = ustack       （用户栈顶）
- *        - sstatus = SPP=0        （sret 返回 U 态）
- *                  | SPIE=1       （返回后恢复中断使能）
- *                  | SUM=1        （内核全程可访问用户页，与 trap_init 保持一致）
- *        - x4_tp   = 当前 tp      （维持 core id，单核足够；SMP 下需在 trap_entry 重载）
- *   2. 写 sscratch = 内核栈顶，建立"下次从 U 态 trap 进来时切回内核栈"的不变式
- *      （trap_entry 用 csrrw sp, sscratch, sp 实现栈切换）。
- *   3. 调用 fork_out_asm(f)：将 sp 设为伪造帧地址，跳入 trap_return，
- *      恢复所有寄存器后执行 sret，进入 U 态。
+ * @details 在内核栈顶（PROC_KSTACK_TOP）伪造一个 trap 帧：sepc=entry、sp=ustack、tp=0、
+ *   sstatus 置 SPP=0 / SPIE=1 / SUM=1，再经 fork_out_asm → trap_return → sret 进入 U 态。
+ *   sscratch 由 trap_return 在关中断的尾段设好，这里不碰。
  *
  * @note 此函数不返回（标注 __attribute__((noreturn))）。
  *   调用前须确保：
@@ -1655,49 +1614,20 @@ void enter_user_mode(virAddr_t entry, virAddr_t ustack)
     extern void fork_out_asm(intstkf_t *regs) __attribute__((noreturn));
 
     pcb_t *cur = proc_get_current();
-    /* 由高地址向低地址开辟帧空间，不会覆盖原有数据，因为该函数noreturn，原栈空间数据已无用 */
     intstkf_t *f = (intstkf_t *)(PROC_KSTACK_TOP(cur) - sizeof(intstkf_t));
 
     memset(f, 0, sizeof(intstkf_t));
     f->sepc    = entry;
     f->x2_sp   = ustack;
-    /* 用户的 tp 归用户：它是 TLS 指针（musl 的 __init_tls 会用一条 mv tp,a0 设好它），
-     * 不是内核的 hart 号。以前这里塞 hart 号，是因为内核靠 tp 认 hart 而 trap_entry
-     * 又不重设它——那个不变式现在由内核栈顶的保留槽维持（见 KSTACK_RESERVED）。 */
+    /* 用户的 tp 是 TLS 指针，不是 hart 号；hart 号由内核栈顶的保留槽维持（见 KSTACK_RESERVED） */
     f->x4_tp   = 0;
-    /* **`~SSTATUS_SIE` 不能少**（2026-09-03 修掉的一个真 bug）。这个帧是软件凭空造的，
-     * `read_csr(sstatus)` 取自一个普通内核线程，此刻 SIE=1；而 `trap_return` 会在
-     * `sret` 之前几条指令处 `csrw sstatus, ra` 把它整个写回去——于是**中断在 S 态被重新
-     * 打开**，而那时 `sscratch` 已经被置成内核栈顶。`trap_entry` 全靠 `sscratch != 0`
-     * 判断 trap 来自 U 态，这一下就会把随后到来的时钟中断误判成来自 U 态、把 sp 换成
-     * 内核栈顶，新 trapframe 正好压在本帧 `f` 头上（f = 栈顶 - sizeof(intstkf_t)）。
-     * 实测症状：`vmm: segfault - no vma va=0xffffffc080213b28 sepc=同值 spp=0`
-     * ——**用户态从 `trap_return` 自己的地址开始取指**。
-     * 真正的硬件 trap 不会有这个问题：进 trap 时硬件已清 SIE，帧里存的本来就是 0。
-     * `create_kernel_thread_by_fork` 早就写了 `& ~SSTATUS_SIE`（注释说"模拟 in-trap 环境"），
-     * 只有本函数漏了。`sret` 会用 SPIE 恢复中断，所以这里清掉不影响返回 U 态后的状态。
-     *
-     * **`~SSTATUS_FS` 同理**：本内核不保存任何 FP 上下文（ctx_t 与 intstkf_t 里没有
-     * 一个 f 寄存器），FS 一旦不是 Off，用户态的浮点值就会在进程切换时被别人覆盖、
-     * 静默算错。关死之后任何 F/D 指令都触发非法指令，由 trap.c 的
-     * trap_illegal_instruction() 打诊断并 SIGILL 杀掉该进程——错得响亮好过错得安静。
-     * 复位值本来就是 Off，但这里写的是"软件凭空造帧就要把每一位都想清楚"，
-     * 而不是"依赖 read_csr 恰好读到 0"——上面那条 SIE 的教训就是这么来的。 */
+    /* 帧是凭空造的，sstatus 每一位都要想清楚。SIE 必须清：trap_return 会在 sret 前把它
+     * 整个写回，中断若在 sscratch 已置为栈顶之后被打开，时钟中断会被误判成来自 U 态、
+     * 新帧压在本帧上（sret 用 SPIE 恢复中断）。FS 置 Initial，用户态可以直接用浮点。 */
     f->sstatus = (read_csr(sstatus) & ~SSTATUS_SPP & ~SSTATUS_SIE & ~SSTATUS_FS)
                  | SSTATUS_SPIE | SSTATUS_SUM | SSTATUS_FS_INITIAL;
-    /* **绝对不能在这里 write_csr(sscratch, 内核栈顶)**（2026-09-03 修掉的一个真 bug）。
-     * sscratch 的不变式是"S 态恒为 0"，`trap_entry` 全靠 `sscratch != 0` 判断这次 trap
-     * 来自 U 态。在这里提前写非零值，就把从此刻到 `sret` 之间的整段 S 态代码置于
-     * 违反不变式的状态——而这段代码包含 `fork_out_asm → trap_return →
-     * sched_preempt_if_needed()`，一旦那里发生调度，窗口从几条指令变成任意长。
-     * 期间来一次时钟中断，`trap_entry` 会误判成来自 U 态、把 sp 换成内核栈顶，
-     * 于是新 trapframe 正好落在 `f` 头上（f = 栈顶 - sizeof(intstkf_t)），把刚构造好的
-     * 帧整个覆盖掉；等 `sret` 时 sepc 已是垃圾，表现为**用户态执行内核地址**
-     * （实测 `vmm: segfault - no vma va=0xffffffc0802... spp=0`）随后整机崩掉。
-     * 正确做法是什么都不做：`trap_return` 在 SPP==0 分支已经算好
-     * `sscratch = sp + 35*REGBYTES`，而 f 就在 栈顶 - 35*REGBYTES 处，结果完全相同，
-     * 且赋值发生在关中断的尾段（见 cpua.S 那里的 csrci），没有窗口。
-     * fork 出来的进程走的 `fork_out()` 一直就是这么做的，本函数是唯一的例外。 */
+    /* 不能在这里写 sscratch：它在 S 态必须为 0，trap_entry 靠它判断 trap 来自 U 态。
+     * trap_return 在 SPP==0 分支、关中断的尾段会算出同样的值。 */
     fork_out_asm(f);
 }
 
@@ -1706,8 +1636,6 @@ void enter_user_mode(virAddr_t entry, virAddr_t ustack)
  * @return 成功返回 [0, NOFILE) 内的下标；fd 表已满返回 ENO18_TOO_MANY_FILES
  * @note 只负责挑号，不写入 fd 表——真正把 file_t 装进去是 proc_fd_install() 的职责，
  *   两步拆分参照 Linux get_unused_fd()/fd_install()。
- * @todo 添加信号机制以后，若信号处理函数在 pmm_alloc_pages 与 install 之间重入本进程的
- *   fd 分配路径，会拿到重复的 fd 号；当前无信号机制，不构成问题。
  */
 int proc_fd_alloc(void)
 {
@@ -1942,9 +1870,8 @@ void proc_fd_close_on_exec(pcb_t *p)
  * @brief 给当前进程装上 stdin/stdout/stderr（fd 0/1/2）
  * @retval ENO0_NO_ERROR   成功
  * @retval ENO1_NOMORE_MEM console file 分配失败
- * @details 三个标准 fd 共享同一个内核虚构的 console 设备 file（见 console_open_file）——
- *   终端场景下输入/输出/错误输出物理上就是同一个终端，故三个 fd 指向同一 file_t，
- *   引用计数随之为 3。将来有 /dev/console 设备节点后，改成 open 它即可。
+ * @details 三个标准 fd 指向同一个 TTY file（输入、输出、错误输出物理上是同一个终端），
+ *   引用计数随之为 3。
  */
 int proc_install_stdio(void)
 {

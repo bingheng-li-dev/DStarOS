@@ -20,6 +20,10 @@ const bffa_t BFallocator = {
     .bffa_insert_and_merge = insert_and_merge,
 };
 
+/**
+ * @brief 建立页帧元数据数组与两条空闲链表
+ * @note 在 MMU 开启前调用；此时存下的全是物理地址，开启后由 pmm_init_after_mmu_enable() 修正。
+ */
 void pmm_init(void)
 {
     spinlock_init(&pmm_lock);
@@ -31,17 +35,15 @@ void pmm_init(void)
     printf("kernel: skernel:0x%08lx, ekernel:0x%08lx, kernel_entry:0x%08lx\n", kernel_start_addr, kernel_end_addr, kernel_entry_addr);
 
     phyAddr_t kernel_roundup_end_addr = pa_roundup(kernel_end_addr);
-    /* Page list begin addr. */
     pmm_page_list = (pframe_t *)kernel_roundup_end_addr;
 
     ppn_t ppn_begin = convert_pa2ppn_cil(kernel_start_addr);
     ppn_t ppn_end = convert_pa2ppn_cil(MEMORY_END);
     pgcount_t ppn_total_amount = ppn_end - ppn_begin; /* Total amount of the ppn.*/
 
-    /* This section of memory between end of roundup kernel and the begin of free memory is used for store page list.*/
+    /* 内核镜像之后、空闲内存之前的这段用来存页帧元数据数组 */
     uint64_t page_list_bytes = sizeof(pframe_t) * ppn_total_amount;
 
-    /* True end of kernel used memory. */
     phyAddr_t free_memory_begin_addr = (phyAddr_t)pmm_page_list + (phyAddr_t)page_list_bytes;
 
     uint64_t free_memory_size = (uint64_t)(MEMORY_END - free_memory_begin_addr);
@@ -52,7 +54,6 @@ void pmm_init(void)
     printf("memory: 0x%08lx, [0x%08lx, 0x%08x].\n", free_memory_size, free_memory_begin_addr, MEMORY_END);
     printf("ppn: ppn_total_amount:%08u, [ppn_free_begin:%08ld, ppn_free_end:%08ld].\n", ppn_total_amount, ppn_free_begin, ppn_free_end);
 
-    /* Set status of kernel memory and free memory for pages. */
     pgcount_t cursor;
     for (cursor = 0; cursor < ppn_free_begin - ppn_begin; cursor++)
     {
@@ -60,7 +61,6 @@ void pmm_init(void)
         pmm_page_list[cursor].slab_cache = NULL;
     }
 
-    /* Initial the memory map and free lists. */
     pframe_t *free_frame_begin = &(pmm_page_list[cursor]);
     for (; cursor < ppn_total_amount; cursor++)
     {
@@ -70,12 +70,9 @@ void pmm_init(void)
         pmm_page_list[cursor].slab_cache = NULL;
     }
 
-    /* ppn_free_end（=ppn_end）和 ppn_total_amount 一样是开区间上界（不含），这里不能 +1——
-     * 加了会让空闲块的登记大小比 pmm_page_list 数组和 init_kernel_offset_mapping()
-     * 实际映射的范围都多出一页，那一页的 PA 恰好等于 MEMORY_END，对应的 KVA
-     * 从未被建立映射；pmm_alloc_pages() 迟早会把这个幻影页当正常页分配出去，谁写它谁触发
-     * "va=KVA(MEMORY_END) 找不到 VMA" 的 segfault——纯物理内存分配量小、命中概率低时
-     * 不容易撞见，分配压力上来后（比如两个 hart 真并发分配）就容易复现。 */
+    /* ppn_free_end 是开区间上界，这里不能 +1：多出的那一页 PA 恰好等于 MEMORY_END，
+     * 既不在 pmm_page_list 数组里，也没有 KVA 映射。它一旦被当正常页分配出去，
+     * 写它的人就会撞上"找不到 VMA"的 segfault。 */
     pgcount_t ppn_free_amount = ppn_free_end - ppn_free_begin;
     free_frame_begin->nsize = ppn_free_amount;
 
@@ -96,18 +93,16 @@ void pmm_init(void)
 }
 
 /**
- * @name pmm_init_after_mmu_enable
- * @brief 将MMU开启前pmm初始化时相关变量存储的物理地址修复为虚拟地址
- * @details 之前FreeList、pmm_free_addr_list、PageListBegin这些指针变量
- * 都存储了物理地址，在开启MMU后会导致MMU将这些物理地址作为虚拟地址使用触发不应该的
- * 缺页异常，需要在MMU开启后进行修复
+ * @brief 把 pmm_init() 里存下的物理地址修正为内核虚拟地址
+ * @details pmm_page_list、pmm_free_list、pmm_free_addr_list 存的都是物理地址，
+ *   MMU 开启后这些值会被当成虚拟地址解释，一访问就是不该有的缺页。
  */
 void pmm_init_after_mmu_enable(void)
 {
-    /* 先前pmm_init中PageListBegin指针存储了绝对物理地址，换成虚拟地址 */
+    /* pmm_page_list 先前存的是绝对物理地址，换成虚拟地址 */
     pmm_page_list = (pframe_t *)pa_to_kva((phyAddr_t)pmm_page_list);
 
-    /* FreeList和FreeAList中的指针包括dummy head本身也需要更新 */
+    /* 两条空闲链表里的指针，连同 dummy head 本身，也要一起更新 */
     pmm_free_list.list_linker.next = (struct list_head *)pa_to_kva(
         (phyAddr_t)pmm_free_list.list_linker.next);
     pmm_free_list.list_linker.prev = (struct list_head *)pa_to_kva(
@@ -130,7 +125,6 @@ void pmm_init_after_mmu_enable(void)
 }
 
 /**
- * @name pmm_alloc_pages
  * @brief 分配 nsize 个连续物理页
  * @param[in] nsize 需要的页数
  * @retval NULL 空闲总量不足，或总量够但没有足够长的连续块（外部碎片）
@@ -164,7 +158,6 @@ pframe_t *pmm_alloc_pages(pgcount_t nsize)
                          : (void *)frame_pa;
         memset(zero_dst, 0, (size_t)nsize * PGSIZE);
 
-        /* "ret->nsize" restores the size of this alloced block which is convenient to free block. */
         ret->nsize = nsize;
 
 #if DEBUG_MMU_mm_alloc
@@ -177,11 +170,17 @@ f1:
     return ret;
 }
 
+/**
+ * @brief 分配一个物理页
+ */
 pframe_t *pmm_alloc_page(void)
 {
     return pmm_alloc_pages((pgcount_t)1);
 }
 
+/**
+ * @brief 归还一个由 pmm_alloc_pages() 分配的块，块大小取自 base_frame->nsize
+ */
 void pmm_free_pages(pframe_t *base_frame)
 {
     irq_key_t PmmLock_key = spinlock_acquire(&pmm_lock);
@@ -215,7 +214,7 @@ void pmm_free_pages(pframe_t *base_frame)
 static pframe_t *delete_and_reinsert(pgcount_t nsize)
 {
     pframe_t *ret = NULL, *current_frame;
-    struct list_head *current_entry; /* "Current*" is used for temp. */
+    struct list_head *current_entry;
     list_for_each(current_entry, &(pmm_free_list.list_linker))
     {
         current_frame = list_entry(current_entry, pframe_t, free_list_linker);
@@ -228,13 +227,10 @@ static pframe_t *delete_and_reinsert(pgcount_t nsize)
             break;
         }
     }
-    /* If found the free block we need. */
     if (ret != NULL)
     {
-        /* Delete this entry in pmm_free_list&pmm_free_addr_list. */
         list_del(&(ret->free_list_linker));
         list_del(&(ret->free_addr_list_linker));
-        /* There are remaining memories in this block. */
         if (ret->nsize > nsize)
         {
             pframe_t *reinsert_frame = ret + nsize;
@@ -245,23 +241,17 @@ static pframe_t *delete_and_reinsert(pgcount_t nsize)
                 list_add(&(reinsert_frame->free_addr_list_linker), &(pmm_free_addr_list.list_linker));
                 goto f1;
             }
-            /* Reinsert the remaining block into the free lists. */
             list_for_each(current_entry, &(pmm_free_list.list_linker))
             {
                 if ((list_entry(current_entry, pframe_t, free_list_linker))->nsize >= reinsert_frame->nsize)
                 {
-                    /* Modify the remaining frame's entry in pmm_free_list. */
                     list_add_tail(&(reinsert_frame->free_list_linker), current_entry);
-                    /* Modify this frame's entry in pmm_free_addr_list. */
                     list_add(&(reinsert_frame->free_addr_list_linker), (ret->free_addr_list_linker).prev);
                     break;
                 }
-                /* "reinsert_frame" is the largest block in pmm_free_list,add it into the pmm_free_list at last. */
                 else if ((list_entry(current_entry, pframe_t, free_list_linker))->nsize < reinsert_frame->nsize && current_entry->next == &(pmm_free_list.list_linker))
                 {
-                    /* Modify the remaining frame's entry in pmm_free_list. */
                     list_add(&(reinsert_frame->free_list_linker), current_entry);
-                    /* Modify this frame's entry in pmm_free_addr_list. */
                     list_add(&(reinsert_frame->free_addr_list_linker), (ret->free_addr_list_linker).prev);
                     break;
                 }
@@ -277,15 +267,17 @@ static pframe_t *delete_and_reinsert(pgcount_t nsize)
     return ret;
 }
 
-/* @param base_frame 被回收的物理块的首个物理页pframe_t地址
- * @param nsize 被回收的物理块的大小（含有几个物理页）
+/**
+ * @brief 把回收的块插回空闲链表，并与地址相邻的空闲块合并
+ * @param[in] base_frame 被回收块的首个页帧
+ * @param[in] nsize      被回收块的页数
  */
 static void insert_and_merge(pframe_t *base_frame, pgcount_t nsize)
 {
     pframe_t *current_frame;
     struct list_head *current_entry;
 
-    /* Insert into the pmm_free_addr_list frist,then merge if needed,finally insert into pmm_free_list. */
+    /* 顺序固定：先插进按地址排的链表，按需合并，最后才插进按大小排的链表 */
     pmm_free_addr_list.fnsize = pmm_free_addr_list.fnsize + nsize;
     if (list_empty(&(pmm_free_addr_list.list_linker)))
     {
@@ -301,7 +293,6 @@ static void insert_and_merge(pframe_t *base_frame, pgcount_t nsize)
                 list_add_tail(&(base_frame->free_addr_list_linker), current_entry);
                 break;
             }
-            /* "base_frame" is the highest addr in memory,add it into the pmm_free_addr_list at last. */
             else if (current_entry->next == &(pmm_free_addr_list.list_linker))
             {
                 list_add(&(base_frame->free_addr_list_linker), current_entry);
@@ -310,7 +301,6 @@ static void insert_and_merge(pframe_t *base_frame, pgcount_t nsize)
         }
     }
 
-    /* After inserted into pmm_free_addr_list,check if needs merge. */
     pframe_t *prev_frame_in_addr_list, *next_frame_in_addr_list;
     if (pmm_free_addr_list.list_linker.next == &(base_frame->free_addr_list_linker))
     {
@@ -339,11 +329,11 @@ static void insert_and_merge(pframe_t *base_frame, pgcount_t nsize)
     pframe_t *frame_closest_after = base_frame + base_frame->nsize;
     if (next_frame_in_addr_list != NULL)
     {
-        if (frame_closest_after == next_frame_in_addr_list) /* It means need merge with the after block. */
+        if (frame_closest_after == next_frame_in_addr_list)
         {
             list_del(&(next_frame_in_addr_list->free_addr_list_linker));
             list_del(&(next_frame_in_addr_list->free_list_linker));
-            /* 注意baseppn->nsize在此时发生了变化，变成了与后面合并后的总的nsize大小，要使用回收的大小使用参数nsize。 */
+            /* base_frame->nsize 在这里变成合并后的总大小，后面要用回收大小时取参数 nsize */
             base_frame->nsize = base_frame->nsize + next_frame_in_addr_list->nsize;
             merged_frame = base_frame;
         }
@@ -351,7 +341,7 @@ static void insert_and_merge(pframe_t *base_frame, pgcount_t nsize)
     if (prev_frame_in_addr_list != NULL)
     {
         pframe_t *frame_closest_forward = prev_frame_in_addr_list + prev_frame_in_addr_list->nsize;
-        if (frame_closest_forward == base_frame) /* It means need merge with the forwrd block. */
+        if (frame_closest_forward == base_frame)
         {
             list_del(&(base_frame->free_addr_list_linker));
             list_del(&(prev_frame_in_addr_list->free_list_linker));
@@ -364,7 +354,6 @@ static void insert_and_merge(pframe_t *base_frame, pgcount_t nsize)
     printf("insert_and_merge::merged_frame ppn:%ld,merged_frame->nsize %u\n", convert_pframe2ppn(merged_frame), merged_frame->nsize);
 #endif
 
-    /* After merge,insert into pmm_free_list. */
     pmm_free_list.fnsize = pmm_free_list.fnsize + nsize;
     if (list_empty(&(pmm_free_list.list_linker)))
     {
@@ -379,7 +368,6 @@ static void insert_and_merge(pframe_t *base_frame, pgcount_t nsize)
                 list_add_tail(&(merged_frame->free_list_linker), current_entry);
                 break;
             }
-            /* "reinsert_frame" is the largest block in pmm_free_list,add it into the pmm_free_list at last. */
             else if ((list_entry(current_entry, pframe_t, free_list_linker))->nsize < merged_frame->nsize && current_entry->next == &(pmm_free_list.list_linker))
             {
                 list_add(&(merged_frame->free_list_linker), current_entry);

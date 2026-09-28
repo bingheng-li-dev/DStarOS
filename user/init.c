@@ -10,8 +10,7 @@
  *   - 决定"没有子进程之后干什么"：内核态那版是关机，这里是重起一个 shell。
  *
  * 用 musl 而不是手写 ecall：要用的 fork/execl/waitpid/signal 全在 libc 里，
- * 手写这四个 ecall 除了把代码写长没有任何好处。FP 上下文阶段 10 已经补过，
- * musl 程序不再有 SIGILL 风险。
+ * 手写这四个 ecall 除了把代码写长没有任何好处。
  */
 
 #include <signal.h>

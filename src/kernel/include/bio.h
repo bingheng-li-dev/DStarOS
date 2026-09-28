@@ -23,4 +23,4 @@ int  bio_read(bdev_t *dev, uint64_t lba, uint8_t *buf, uint32_t count);
 int  bio_write(bdev_t *dev, uint64_t lba, const uint8_t *buf, uint32_t count);
 void bio_get_stats(bio_stats_t *out);
 
-#endif
+#endif /* _BIO_H_ */

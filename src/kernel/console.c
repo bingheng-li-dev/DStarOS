@@ -13,8 +13,7 @@
 osslock_t ConsoleLock;
 volatile bool panicked = false;
 
-/* 内核日志的换行在这里补成回车+换行（同 Linux uart_console_write 的约定）。
- * 以前是 OpenSBI 的 putc 顺手补的、RustSBI 不补，行尾因固件而异；
+/* 内核日志的换行在这里补成回车+换行（同 Linux uart_console_write 的约定）；
  * 用户输出的换行转换归 tty 的 ONLCR，不能挪进 uart_putc，否则会补两次。 */
 static void stdout_putc(void *unused, char ch)
 {
@@ -31,6 +30,9 @@ static void panic_putc(void *unused, char ch)
     sbi_console_putchar((int)ch);
 }
 
+/**
+ * @brief 初始化控制台：UART 与 printf 的输出函数
+ */
 void console_init(void)
 {
     spinlock_init(&ConsoleLock);
@@ -38,6 +40,9 @@ void console_init(void)
     init_printf(0, stdout_putc);
 }
 
+/**
+ * @brief 内核格式化输出，持 ConsoleLock 保证整条不被打断
+ */
 void printf(char *fmt, ...)
 {
     va_list args;
@@ -48,10 +53,13 @@ void printf(char *fmt, ...)
     va_end(args);
 }
 
+/**
+ * @brief 打印 panic 位置与消息后停机；绕开 ConsoleLock，直接走 SBI 输出
+ */
 void panic_impl(const char *func, int line, char *s, ...)
 {
     va_list args;
-    /* bypass ConsoleLock: panic may be called from within a locked context */
+    /* 绕开 ConsoleLock：panic 可能在持锁上下文里被调用 */
     const char *pre = "\npanic at ";
     for (const char *p = pre; *p; p++) 
     {
@@ -62,7 +70,6 @@ void panic_impl(const char *func, int line, char *s, ...)
         sbi_console_putchar((int)*p);
     }
     sbi_console_putchar(':');
-    /* 输出行号（十进制） */
     char linebuf[12];
     int i = 0;
     int n = line;
@@ -76,7 +83,6 @@ void panic_impl(const char *func, int line, char *s, ...)
             linebuf[i++] = '0' + (n % 10);
             n /= 10;
         }
-        /* 反转 */
         for (int l = 0, r = i - 1; l < r; l++, r--) {
             char tmp = linebuf[l]; linebuf[l] = linebuf[r]; linebuf[r] = tmp;
         }
@@ -103,10 +109,7 @@ void panic_impl(const char *func, int line, char *s, ...)
  * console 设备 file（stdin/stdout/stderr 的后端）
  * ============================================================ */
 
-/* @deprecated 直接转调 tty_open_file()——真正的读写实现已经搬到 tty.c
- * （tty_read 能真正阻塞读到输入，不再是恒返回 EOF 的占位）。保留这个名字只是为了
- * proc_install_stdio() 不用改调用点，下一次大改动时直接把调用点也换成 tty_open_file()，
- * 这个函数连同 console.h 里的声明一起删掉。 */
+/* @deprecated 转调 tty_open_file()；调用点换掉后连同 console.h 的声明一起删 */
 file_t *console_open_file(void)
 {
     return tty_open_file();

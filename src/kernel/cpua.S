@@ -16,12 +16,9 @@ trap_init_asm:
     .local trap_entry
     .align 2
 trap_entry:
-    /** 
-     * U 态触发 trap 时 sp 是用户栈，但不应在用户栈上建立中断内核栈帧，需要去内核栈
-     * 业界标准约定，触发中断时：
-     * 运行在 U 态时， sscratch 正持有该进程的内核栈顶；
-     * 运行在 S 态时， sscratch 正持有0。
-     */
+    # U 态触发 trap 时 sp 是用户栈，不能在上面建帧，要换到内核栈。约定：
+    #   运行在 U 态时，sscratch 持有该进程的内核栈顶；
+    #   运行在 S 态时，sscratch 为 0。
     csrrw sp, sscratch, sp  # 交换：来自 U 则 sp←内核栈顶, sscratch←用户sp；来自 S 则 sp←0, sscratch←内核sp
     bnez sp, 1f             # sp != 0 → 来自 U 态（sscratch 原本存内核栈顶）
     csrr  sp, sscratch      # 来自 S 态：sscratch 现含触发时的内核 sp，装回 sp（不再交换回去）
@@ -30,14 +27,9 @@ trap_entry:
     j 2f
 
 1:
-    # 来自 U 态：**tp 现在是用户的值，必须换回本 hart 的编号**。
-    # 内核拿 tp 当 hart 号（cpu_get_core_id_asm 直接读 tp、cpu_get_current() = &cpus[tp]），
-    # 而 tp 在 RISC-V 上是用户可写的普通寄存器——musl 的 __set_thread_area 就是一条
-    # mv tp,a0，纯寄存器写、不走 syscall。带着用户的 tp 往下跑，第一次
-    # proc_get_current() 就会去解引用 cpus[用户TLS指针]。
-    # **次序要紧**：必须先把用户的 tp 存进帧、再覆盖它。反过来写的话帧里存的就成了
-    # hart 号，返回 U 态时把 hart 号当成 TLS 指针还给用户，musl 的 __init_ssp 会拿它
-    # 去写 tp-16（实测 va=0xfffffffffffffff0）。
+    # 来自 U 态：tp 现在是用户的 TLS 指针（用户可直接写 tp，不经 syscall），必须换回
+    # 本 hart 的编号——内核拿 tp 当 hart 号（cpu_get_current() = &cpus[tp]）。
+    # 次序要紧：先把用户的 tp 存进帧、再覆盖它，否则返回 U 态时还给用户的是 hart 号。
     addi  sp,  sp, -35 * REGBYTES
     sd    tp, 4*REGBYTES(sp)    # 先存用户的 tp，返回 U 态时要原样还给它
     # 再从内核栈顶的保留槽取回本 hart 号（见 proc.h 的 KSTACK_RESERVED）。
@@ -102,21 +94,18 @@ trap_entry:
 trap_return:
     # 检查是否需要发生调度
     call sched_preempt_if_needed
-    # 从这里到 sret 必须关中断。理由：下一句就要把 sscratch 置成非零的内核栈顶，
-    # 而 trap_entry 全靠 "sscratch != 0" 判断 trap 来自 U 态——这段尾巴里一旦被中断
-    # 打进来，就会被误判成来自 U 态，把新 trapframe 压在正要 sret 的这个帧头上。
-    # 真正的 trap 返回本来就是关着中断进来的（硬件进 trap 时清 SIE），这条对它是空操作；
-    # 有意义的是 fork_out_asm 直接跳进来的那两条路（fork 出的新进程、enter_user_mode），
-    # 它们是开着中断跑到这里的。sret 会用 SPIE 恢复中断，所以这里关掉不影响返回后的状态。
+    # 从这里到 sret 必须关中断：下面要把 sscratch 置成非零，而 trap_entry 靠它判断来自 U 态，
+    # 这段里被中断打进来会被误判，新帧压在正要 sret 的帧上。fork_out_asm 跳进来的路径
+    # （新进程、enter_user_mode）是开着中断到这里的；sret 会用 SPIE 恢复中断。
     csrci sstatus, SSTATUS_SIE
     # 在恢复寄存器之前，依据将要恢复的 sstatus.SPP 设置 sscratch
     ld t0, 33*REGBYTES(sp)      # 取将恢复的 sstatus，SPP 记录进入中断之前处理器为U还是S
-    andi t1, t0, SSTATUS_SPP    # t1 = t0 & SSTATUS_SPP（0x0100），按位与后t1=0x100或0x000
+    andi t1, t0, SSTATUS_SPP
     bnez t1, 1f                 # 0为U态，1为S态
     addi t2, sp, 35*REGBYTES    # 返回 U 态：sscratch ← 内核栈顶
     sd tp, 0(t2)                # 把本 hart 号存进栈顶保留槽，供下次 trap_entry 取回
     csrw sscratch, t2
-    # 恢复**用户自己的** tp（TLS 指针）。必须排在上面那条 sd 之后：那条用的是内核的 tp。
+    # 恢复用户自己的 tp（TLS 指针）。必须排在上面那条 sd 之后：那条用的是内核的 tp。
     # 从这里到 sret 之间没有任何代码读 tp，而且中断已经关了（上面的 csrci），
     # 所以带着用户的 tp 走完这段尾巴是安全的。
     ld tp, 4*REGBYTES(sp)
@@ -136,18 +125,11 @@ trap_return:
     ld ra, 1*REGBYTES(sp)
 
     ld gp, 3*REGBYTES(sp)
-    # 这里不恢复 tp——**返回 U 态那条路已经在上面单独恢复过了**，走到这里的只剩
-    # "返回 S 态"，而 S 态必须继续用内核的 hart 号。
-    #
-    # tp 在本内核里有两重身份，按特权级切换：
-    #   S 态：当前 hart 的编号（cpu_get_core_id_asm 直接读 tp，cpu_get_current() = &cpus[tp]）；
-    #   U 态：用户自己的 TLS 指针，内核不解释它。
-    # 所以帧里那份 tp 只对"返回 U 态"有意义。对 S 态它是陈旧的：① do_fork 把父进程的帧
-    # 整体复制给子进程，帧里带的是父进程当时所在的 hart 号，子进程很可能被另一个 hart
-    # 取走执行；② 任务在系统调用中途被换出、由另一个 hart 换回来时，帧里仍是换出前那个
-    # hart 号。在这里恢复它会让代码在 hart A 上运行却去读写 hart B 的 per-CPU 状态
-    # （irq_disable_nesting 计数错乱、proc_get_current() 拿到另一个 hart 的当前任务）。
-    # switch_to 同理不保存/恢复 tp。
+    # 这里不恢复 tp：返回 U 态的路已在上面单独恢复，到这里的只剩返回 S 态。
+    # tp 在 S 态是 hart 号，在 U 态是用户 TLS 指针，帧里那份只对返回 U 态有意义；对 S 态它
+    # 是陈旧的——① do_fork 复制的父进程帧带着父进程所在的 hart 号；② 系统调用中途被换出、
+    # 由另一个 hart 换回时帧里仍是旧 hart 号。恢复它会让 proc_get_current() 取到别的 hart
+    # 的当前任务。switch_to 同理不保存/恢复 tp。
     ld t0, 5*REGBYTES(sp)
     ld t1, 6*REGBYTES(sp)
     ld t2, 7*REGBYTES(sp)
@@ -230,13 +212,11 @@ switch_to:
 fork_out_asm:
     mv sp, a0
     j  trap_return
-    
+
     .globl kernel_thread_entry
     .align 2
 kernel_thread_entry:
-    # "s1" restores the args,so move it to a0 as param.
+    # s0 = 线程函数，s1 = 参数。函数返回后跳 do_exit，这里不能用 call。
     mv a0, s1
-    # "s0" restores the address of the function,so jump to it.
     jalr s0
-    # When the process ran over,jump to "do_exit",DO NOT USE "call" HERE!
     jal  do_exit

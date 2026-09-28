@@ -36,8 +36,8 @@
 #define EIO           5
 #define ETIMEDOUT     110
 
-/** 内核内部错误码——名字保留历史命名（含数字后缀 ENOx，由于历史原因，现已不代表实际数值）
- * 值统一改写为对应的 * Linux errno 负值，
+/* 内核内部错误码——名字保留历史命名（ENOx 的数字后缀现已不代表实际数值），
+ * 值统一是对应的 Linux errno 负值，
  * 使 syscall_dispatch 的返回值无需二次翻译即可直接作为 ABI 返回值。
  * 多个 ENO* 映射到同一个 Linux errno 是允许的（Linux 内部同样如此）。 */
 #define ENO0_NO_ERROR 0
@@ -81,10 +81,10 @@
 #define ENO30_TIMEDOUT     (-ETIMEDOUT) /* 设备在限定时间内没有响应 */
 
 /* 内核内部专用：阻塞循环被信号打断时返回它，由 signal_handle_pending() 统一翻译成
- * "重启该 syscall"或 ENO26_INTERRUPTED。**它永远不会出现在 syscall 的返回值里**，
+ * "重启该 syscall"或 ENO26_INTERRUPTED。它永远不会出现在 syscall 的返回值里，
  * 数值取 Linux 的 ERESTARTSYS(512)，落在合法 errno 区间 [-4095,-1] 之外正是为了
  * 让"不小心漏翻译"变成一眼可见的错误。 */
 #define ERESTARTSYS        512
 #define ENO24_RESTARTSYS   (-ERESTARTSYS)
 
-#endif
+#endif /* _ERRORCODE_H_ */

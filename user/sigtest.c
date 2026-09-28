@@ -412,7 +412,7 @@ static void test_resethand(void)
 }
 
 /* ============================================================
- * 用例 8：默认动作终止 —— 路线图阶段 7 的正式验收项
+ * 用例 8：默认动作终止
  * ============================================================ */
 static void test_default_terminate(void)
 {
@@ -743,11 +743,10 @@ static void test_sigsegv(void)
 }
 
 /* ============================================================
- * 用例 18：浮点指令**正常执行**，不再被 SIGILL 杀
+ * 用例 18：浮点指令正常执行
  *
- * 这条用例原本断言的是反面（FS 关死 + SIGILL 探针）。BusyBox 进来之后内核补上了
- * 真正的 FP 上下文（pcb 里的 proc_fp_regs/proc_fcsr + 切换时存取），进 U 态的
- * trapframe 把 sstatus.FS 置成 Initial，浮点于是可以正常用了。
+ * 内核保存 FP 上下文（pcb 里的 proc_fp_regs/proc_fcsr，切换时存取），进 U 态的
+ * trapframe 把 sstatus.FS 置成 Initial。
  *
  * **判据翻面了，但防线没撤**：如果哪天有人把 FS 又关回 Off、或者把 fpu_save/
  * fpu_restore 摘掉一半，这条会立刻变红。浮点算得对不对由 mfptest 那套负责

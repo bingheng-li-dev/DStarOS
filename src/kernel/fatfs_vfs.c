@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright (C) 2021-2026 BingHeng Li <bingheng-li@outlook.com> */
 
-/**
+/*
  * fatfs_vfs.c - FatFS ↔ VFS 适配层
  *
  * 将 ChaN FatFS R0.11 的路径式 API 桥接到 DStarOS VFS 的四层抽象接口。
@@ -14,7 +14,7 @@
  *   dentry_t       ←→  路径分量            由 VFS dentry_create 管理
  *   file_t         ←→  FIL 对象            FIL* 存入 file->f_private
  *
- * QEMU 平台使用 ramdisk（见 diskio.c），首次挂载时若无有效 FAT 则自动格式化。
+ * 0 号卷（RAM 盘）挂载时若无有效 FAT 则自动格式化；SD 卡不会。
  */
 
 #include "fatfs_vfs.h"
@@ -32,16 +32,8 @@
  * 私有数据结构
  * ============================================================ */
 
-/* inode 不再持有私有数据（i_private 恒为 NULL）。
- *
- * 曾经这里放的是 fatfs_inode_priv_t，用一个 char path[VFS_PATH_MAX] 缓存该文件在
- * 卷内的绝对路径。那是一份**冗余状态**——同样的信息 dentry 树里已经有了，而且
- * 一旦路径变化就必须逐个同步：`f_rename` 之后只有被重命名的那个 inode 的路径被
- * 更新，它整棵子树里的后代全部指向旧路径，`rename("/a/b","/a/d")` 之后
- * `open("/a/d/c.txt")` 会拿 "/a/b/c.txt" 去问 FatFS。
- *
- * 现在改为需要时用 fatfs_build_path() 沿 d_parent 现推。少一份要同步的状态，
- * 顺带每个 inode 省下 256 字节——这是目录项缓存单条目成本的大头。 */
+/* inode 不持有私有数据（i_private 恒为 NULL）：卷内路径由 fatfs_build_path() 沿
+ * d_parent 现推、不缓存——缓存的路径在 rename 后会让整棵子树失效。 */
 
 /* 合成阶段机的取值：FatFS 的 f_readdir 会跳过 FAT 目录里真实存在的 "." / ".." 项
  * （ff.c 的 dir_read 在 _FS_RPATH=0 时过滤掉所有以 '.' 开头的条目），而
@@ -50,13 +42,8 @@
 #define FATFS_DIR_SYNTH_DOTDOT 1  /* 待吐 ".." */
 #define FATFS_DIR_SYNTH_DONE   2  /* 两条都吐完了，进入 f_readdir 循环 */
 
-/**
- * fatfs_dir_priv_t - 打开的**目录** file 的私有数据（挂在 file->f_private）
- *
- * 注意与普通文件的区别：普通文件的 f_private 是 `FIL*`，目录是这个结构体。
- * 两者靠 `S_ISDIR(file->f_inode->i_mode)` 区分——vfs_open 在调用 f_op->open 之前
- * 就已经填好了 file->f_inode，所以各回调里都能安全地据此判断，不会类型混淆。
- */
+/* 打开的目录 file 的私有数据。普通文件的 f_private 是 FIL*，目录是本结构，靠
+ * S_ISDIR(f_inode->i_mode) 区分；vfs_open 调 f_op->open 前已填好 f_inode，不会混淆。 */
 typedef struct
 {
     DIR      dir;                        /* FatFS 目录对象 */
@@ -89,11 +76,17 @@ static file_operations_t        fatfs_file_ops;
  * FatFS 内存分配钩子（_USE_LFN=3 需要，见 ffconf.h）
  * ============================================================ */
 
+/**
+ * @brief FatFS 内存分配钩子（_USE_LFN=3 需要）
+ */
 void *ff_memalloc(UINT msize)
 {
     return kmalloc(msize);
 }
 
+/**
+ * @brief FatFS 内存释放钩子
+ */
 void ff_memfree(void *mblock)
 {
     kfree(mblock);
@@ -118,11 +111,9 @@ WCHAR ff_wtoupper(WCHAR chr)
  * @param[in] chr 待转换字符
  * @param[in] dir 0 = Unicode→OEM，1 = OEM→Unicode
  * @return 转换结果；0 表示无法转换（FatFS 约定，调用方会拒绝该名字或退化显示为 '?'）
- * @note 项目未附带 `_CODE_PAGE 437` 的官方转换表（ChaN 发行版的 option/cc437.c 不在本仓库），
- *   且本内核的目标文件名全部是 ASCII——单字节码页里 ASCII 范围（<0x80）在 OEM 与 Unicode
- *   下逐字节相同，直接原样返回即可正确处理所有实际会用到的文件名；0x80 以上的扩展字符
- *   （如 437 的制表符、重音字母）没有表可查，一律按"无法转换"处理。**已知限制**：
- *   非 ASCII 文件名会被拒绝创建/显示为 '?'，本项目场景下可接受。
+ * @note 仓库未附带 437 码页转换表（ChaN 的 option/cc437.c）。ASCII（<0x80）在 OEM 与
+ *   Unicode 下逐字节相同，原样返回；0x80 以上按无法转换处理。已知限制：非 ASCII
+ *   文件名会被拒绝创建或显示为 '?'。
  */
 WCHAR ff_convert(WCHAR chr, UINT dir)
 {
@@ -138,14 +129,7 @@ WCHAR ff_convert(WCHAR chr, UINT dir)
  * 路径转换辅助函数
  * ============================================================ */
 
-/**
- * @brief 将 VFS 卷内路径转换为 FatFS 路径（带卷前缀）
- * @param[in]  sb       路径所在卷的超级块，前缀取自它的 fatfs_volume_t
- * @param[in]  vfs_path 卷内绝对路径（"" 表示卷根，"/dir/f" 表示普通路径）
- * @param[out] buf      输出缓冲区
- * @param[in]  bufsz    缓冲区大小
- * @note "" → "N:/"；"/dir/f" → "N:/dir/f"。缓冲区不够时输出空串。
- */
+/* 卷内路径 → FatFS 路径："" → "N:/"，"/dir/f" → "N:/dir/f"；缓冲区不够时输出空串 */
 static void vfs_to_fatfs_path(const super_block_t *sb, const char *vfs_path, char *buf, int bufsz)
 {
     const fatfs_volume_t *vol = (const fatfs_volume_t *)sb->s_private;
@@ -169,14 +153,7 @@ static void vfs_to_fatfs_path(const super_block_t *sb, const char *vfs_path, cha
     }
 }
 
-/**
- * @brief 构造子路径：parent_path + "/" + name
- * @param[in]  parent_path 父路径（"" 表示根）
- * @param[in]  name        子条目名称
- * @param[out] buf         输出缓冲区
- * @param[in]  bufsz       缓冲区大小
- * @note 若 parent_path 为 ""（根），则子路径为 "/name"。
- */
+/* parent_path + "/" + name；父为根（""）时得 "/name"，缓冲区不够时输出空串 */
 static void fatfs_make_child_path(const char *parent_path,
                                    const char *name,
                                    char *buf, int bufsz)
@@ -186,7 +163,6 @@ static void fatfs_make_child_path(const char *parent_path,
 
     if (plen == 0)
     {
-        /* 父路径为根：子路径 = "/name" */
         if (1 + nlen + 1 > bufsz)
         {
             buf[0] = '\0';
@@ -197,7 +173,6 @@ static void fatfs_make_child_path(const char *parent_path,
     }
     else
     {
-        /* 一般情况：parent_path + "/" + name */
         if (plen + 1 + nlen + 1 > bufsz)
         {
             buf[0] = '\0';
@@ -211,9 +186,6 @@ static void fatfs_make_child_path(const char *parent_path,
 
 /**
  * @brief 沿 d_parent 上溯，拼出目录项在本卷内的绝对路径
- * @param[in]  d     目标目录项
- * @param[out] buf   输出缓冲区
- * @param[in]  bufsz 缓冲区大小
  * @param[out] sb_out 非 NULL 时写入该目录项所在卷的超级块（取自卷根 inode）
  * @retval ENO0_NO_ERROR     成功；卷根本身得到空字符串 ""（与 vfs_to_fatfs_path 的约定一致）
  * @retval ENO5_NOSUCH_ENTRY 这条链上有目录项已被 unlink/rmdir 脱链，路径无意义
@@ -260,13 +232,7 @@ static int fatfs_build_path(const dentry_t *d, char *buf, int bufsz, super_block
     return ENO0_NO_ERROR;
 }
 
-/**
- * @brief 拼出 inode 对应的 FatFS 卷路径（"N:/dir/f"）
- * @param[in]  inode 目标 inode
- * @param[out] buf   输出缓冲区，容量需 >= VFS_PATH_MAX + 4
- * @param[in]  bufsz 缓冲区大小
- * @return ENO0_NO_ERROR 或 fatfs_build_path 的错误码
- */
+/* inode 对应的 FatFS 卷路径（"N:/dir/f"），buf 容量需 >= VFS_PATH_MAX + 4 */
 static int fatfs_inode_fatfs_path(const inode_t *inode, char *buf, int bufsz)
 {
     char vfs_path[VFS_PATH_MAX];
@@ -311,12 +277,7 @@ static int fresult_to_vfs(FRESULT fr)
  * inode 分配与释放（内部辅助函数）
  * ============================================================ */
 
-/**
- * @brief 分配并基本初始化一个 fatfs inode
- * @param[in] sb 所属超级块
- * @return 新 inode 指针；内存不足返回 NULL
- * @note i_mode 和 i_size 未设置，由调用者负责填写。
- */
+/* 分配并基本初始化一个 fatfs inode；i_mode / i_size 由调用者填 */
 static inode_t *fatfs_alloc_inode_internal(super_block_t *sb)
 {
     inode_t *inode = (inode_t *)slab_cache_alloc(inode_cache);
@@ -352,7 +313,7 @@ static void fatfs_destroy_inode_cb(inode_t *inode)
     {
         return;
     }
-    kfree(inode);   /* fatfs 的 inode 不带私有数据，i_private 恒为 NULL */
+    kfree(inode);
 }
 
 static int fatfs_sync_fs_cb(super_block_t *sb)
@@ -365,8 +326,8 @@ static int fatfs_sync_fs_cb(super_block_t *sb)
 static int fatfs_unmount_cb(super_block_t *sb)
 {
     fatfs_volume_t *vol = (fatfs_volume_t *)sb->s_private;
-    f_mount(NULL, vol->prefix, 0);  /* 卸载 FatFS 卷，释放内部状态 */
-    kfree(vol);                     /* destroy_super_block 只释放超级块本身 */
+    f_mount(NULL, vol->prefix, 0);
+    kfree(vol); /* destroy_super_block 只释放超级块本身 */
     sb->s_private = NULL;
     return ENO0_NO_ERROR;
 }
@@ -384,14 +345,9 @@ static super_block_operations_t fatfs_sb_ops = {
 
 /**
  * @brief FatFS 挂载回调入口
- * @param[in] fst    文件系统类型描述符（未使用）
- * @param[in] source 挂载路径（vfs_mount 原样传入，未使用）
- * @param[in] data   卷号字符串，"1" 表示 1 号物理驱动器（VF2 的 SD 卡）；NULL 表示 0 号（RAM 盘）
+ * @param[in] data 卷号字符串，"1" 表示 1 号物理驱动器（VF2 的 SD 卡）；NULL 表示 0 号（RAM 盘）
  * @return 根目录的 dentry 指针；失败返回 NULL
- * @details 步骤：解析卷号 → disk_initialize → f_mount（仅 0 号卷无 FAT 时先 f_mkfs）
- *          → alloc_super_block → 分配根 inode → dentry_create。
- *
- *   **只有 0 号卷允许自动格式化**：RAM 盘没装镜像时本来就是一片零，格式化是预期行为；
+ * @details 只有 0 号卷允许自动格式化：RAM 盘没装镜像时本来就是一片零，格式化是预期行为；
  *   对 SD 卡，"读不到 FAT"更可能是驱动或寻址出了错，此时 f_mkfs 等于亲手抹掉整张卡。
  * @note f_mount(opt=1) 失败时 FatFS 已把 FATFS 指针登记进卷表，释放前必须先注销。
  */
@@ -424,7 +380,6 @@ static dentry_t *fatfs_mount_cb(file_system_type_t *fst,
     vol->prefix[1] = ':';
     vol->prefix[2] = '\0';
 
-    /* 1. 初始化磁盘驱动 */
     DSTATUS dstat = disk_initialize(pdrv);
     if (dstat & STA_NOINIT)
     {
@@ -433,11 +388,10 @@ static dentry_t *fatfs_mount_cb(file_system_type_t *fst,
         return NULL;
     }
 
-    /* 2. 挂载 FatFS 卷（opt=1：立即强制挂载，读取 BPB）*/
+    /* opt=1：立即挂载并读取 BPB */
     FRESULT fr = f_mount(&vol->fs, vol->prefix, 1);
     if (fr == FR_NO_FILESYSTEM && pdrv == 0)
     {
-        /* 无有效 FAT 文件系统，格式化 ramdisk */
         printf("fatfs_mount: no filesystem, formatting ramdisk...\n");
         BYTE work[512];
         fr = f_mkfs(vol->prefix, 0, sizeof(work));
@@ -448,7 +402,6 @@ static dentry_t *fatfs_mount_cb(file_system_type_t *fst,
             kfree(vol);
             return NULL;
         }
-        /* 重新挂载格式化后的卷 */
         fr = f_mount(&vol->fs, vol->prefix, 1);
     }
     if (fr != FR_OK)
@@ -459,7 +412,7 @@ static dentry_t *fatfs_mount_cb(file_system_type_t *fst,
         return NULL;
     }
 
-    /* 3. 创建超级块。拿不到扇区数（SD 卡只读挂载不提供）时记 0，只影响 statfs 类信息 */
+    /* 拿不到扇区数（SD 卡只读挂载不提供）时记 0，只影响 statfs 类信息 */
     DWORD sector_count = 0;
     if (disk_ioctl(pdrv, GET_SECTOR_COUNT, &sector_count) != RES_OK)
     {
@@ -478,7 +431,6 @@ static dentry_t *fatfs_mount_cb(file_system_type_t *fst,
         return NULL;
     }
 
-    /* 4. 创建根 inode（路径为空字符串，代表 FAT 卷根）*/
     inode_t *root_inode = fatfs_alloc_inode_internal(sb);
     if (!root_inode)
     {
@@ -491,7 +443,7 @@ static dentry_t *fatfs_mount_cb(file_system_type_t *fst,
     root_inode->i_size = 0;
     /* 卷根的路径是空字符串，由 fatfs_build_path 在循环一次不跑时自然得到 */
 
-    /* 5. 创建根 dentry（parent=NULL 表示文件系统局部根，d_parent 指向自身）*/
+    /* parent=NULL：文件系统局部根，d_parent 指向自身 */
     dentry_t *root_dentry = dentry_create("", root_inode, NULL, NULL);
     if (!root_dentry)
     {
@@ -520,16 +472,9 @@ static dentry_t *fatfs_mount_cb(file_system_type_t *fst,
  * inode 操作回调实现
  * ============================================================ */
 
-/**
- * @brief 在目录 dir 下查找名称为 name 的子条目
- * @param[in] dir  父目录 inode
- * @param[in] name 要查找的文件/目录名称
- * @return 持有引用计数的子目录项；未找到返回 NULL
- * @note 调用 f_stat 检查存在性，存在则创建 inode + dentry 加入缓存。
- */
+/* 查 dir 下的 name：f_stat 存在则建 inode + dentry 进缓存，返回持引用的 dentry，未找到返回 NULL */
 static dentry_t *fatfs_lookup_cb(inode_t *dir, const char *name)
 {
-    /* 构造子条目的 VFS 路径和 FatFS 路径 */
     char dir_vfs[VFS_PATH_MAX];
     char child_vfs[VFS_PATH_MAX];
     char child_fatfs[VFS_PATH_MAX + 4];
@@ -541,10 +486,8 @@ static dentry_t *fatfs_lookup_cb(inode_t *dir, const char *name)
     fatfs_make_child_path(dir_vfs, name, child_vfs, VFS_PATH_MAX);
     vfs_to_fatfs_path(sb, child_vfs, child_fatfs, sizeof(child_fatfs));
 
-    /* 查询文件/目录是否存在。_USE_LFN 开启后 FILINFO 多出 lfname/lfsize 两个字段，
-     * f_stat 内部按 "if (fno->lfname)" 判断是否要取长文件名——这里用不到长名
-     * （name 已经是调用方给定的分量），显式清零使 lfname=NULL 关闭该分支，
-     * 避免栈上未初始化的 lfname 被当成有效指针写入越界。 */
+    /* _USE_LFN 下 f_stat 看 lfname 非空就往里写长文件名；这里用不到长名，清零使
+     * lfname=NULL，避免栈上未初始化的指针被写入。 */
     FILINFO finfo;
     memset(&finfo, 0, sizeof(finfo));
     FRESULT fr = f_stat(child_fatfs, &finfo);
@@ -553,7 +496,6 @@ static dentry_t *fatfs_lookup_cb(inode_t *dir, const char *name)
         return NULL;
     }
 
-    /* 创建并填写 inode */
     inode_t *inode = fatfs_alloc_inode_internal(dir->i_sb);
     if (!inode)
     {
@@ -568,7 +510,6 @@ static dentry_t *fatfs_lookup_cb(inode_t *dir, const char *name)
     inode->i_mode = (finfo.fattrib & AM_DIR)
                     ? (S_IFDIR | perm) : (S_IFREG | perm);
 
-    /* 创建 dentry，挂入父目录（dir->i_dentry 是父 dentry）*/
     dentry_t *d = dentry_create(name, inode, dir->i_dentry, NULL);
     if (!d)
     {
@@ -580,14 +521,7 @@ static dentry_t *fatfs_lookup_cb(inode_t *dir, const char *name)
     return d;
 }
 
-/**
- * @brief 创建普通文件
- * @param[in] dir    父目录 inode
- * @param[in] dentry 预分配的负目录项（d_inode 为 NULL）
- * @param[in] mode   文件权限位（未使用，固定为 S_IFREG|0755，见函数体注释）
- * @retval ENO0_NO_ERROR 成功，dentry->d_inode 已填写
- * @note 调用 f_open(FA_CREATE_NEW) 在磁盘上建立文件。
- */
+/* 在磁盘上创建普通文件并填好负目录项；mode 忽略，固定 S_IFREG|0755 */
 static int fatfs_create_cb(inode_t *dir, dentry_t *dentry, mode_t mode)
 {
     (void)mode;
@@ -603,7 +537,6 @@ static int fatfs_create_cb(inode_t *dir, dentry_t *dentry, mode_t mode)
     }
     vfs_to_fatfs_path(sb, child_vfs, child_fatfs, sizeof(child_fatfs));
 
-    /* 在磁盘上创建文件 */
     FIL fil;
     FRESULT fr = f_open(&fil, child_fatfs, FA_CREATE_NEW | FA_WRITE);
     if (fr != FR_OK)
@@ -612,32 +545,22 @@ static int fatfs_create_cb(inode_t *dir, dentry_t *dentry, mode_t mode)
     }
     f_close(&fil);
 
-    /* 为 dentry 创建并填写 inode */
     inode_t *inode = fatfs_alloc_inode_internal(dir->i_sb);
     if (!inode)
     {
         return ENO1_NOMORE_MEM;
     }
 
-    /* 统一给可执行位——见 fatfs_lookup_cb 里同样改动的注释（ash 靠 st_mode & 0111
-     * 判断能否执行，普通文件不给可执行位会导致 /bin/busybox 这类程序被拒绝运行）。
-     * 刚创建的文件不可能带 FAT 只读属性，不用像 lookup_cb 那样查 AM_RDO。 */
+    /* 可执行位的理由见 fatfs_lookup_cb；新建文件不会带 FAT 只读属性 */
     inode->i_mode   = S_IFREG | 0755;
     inode->i_size   = 0;
     inode->i_dentry = dentry;
-    dentry->d_inode = inode;  /* 填写之前为 NULL 的负目录项 */
+    dentry->d_inode = inode;
 
     return ENO0_NO_ERROR;
 }
 
-/**
- * @brief 创建目录
- * @param[in] dir    父目录 inode
- * @param[in] dentry 预分配的负目录项
- * @param[in] mode   目录权限位（未使用，固定为 S_IFDIR|0755）
- * @retval ENO0_NO_ERROR 成功，dentry->d_inode 已填写
- * @note 调用 f_mkdir 在磁盘上建立目录。
- */
+/* 在磁盘上创建目录并填好负目录项；mode 忽略，固定 S_IFDIR|0755 */
 static int fatfs_mkdir_cb(inode_t *dir, dentry_t *dentry, mode_t mode)
 {
     (void)mode;
@@ -672,13 +595,7 @@ static int fatfs_mkdir_cb(inode_t *dir, dentry_t *dentry, mode_t mode)
     return ENO0_NO_ERROR;
 }
 
-/**
- * @brief 删除普通文件
- * @param[in] dir    父目录 inode（未使用）
- * @param[in] dentry 要删除的目录项
- * @return VFS 错误码（ENO0_NO_ERROR 成功）
- * @note FatFS 的 f_unlink 对文件和空目录均适用。
- */
+/* 删除文件；f_unlink 对文件和空目录均适用 */
 static int fatfs_unlink_cb(inode_t *dir, dentry_t *dentry)
 {
     (void)dir;
@@ -696,25 +613,13 @@ static int fatfs_unlink_cb(inode_t *dir, dentry_t *dentry)
     return fresult_to_vfs(f_unlink(fatfs_path));
 }
 
-/**
- * @brief 删除空目录（委托给 fatfs_unlink_cb 实现）
- * @param[in] dir    父目录 inode
- * @param[in] dentry 要删除的目录项
- * @return VFS 错误码（ENO0_NO_ERROR 成功）
- */
+/* 删除空目录，委托给 fatfs_unlink_cb */
 static int fatfs_rmdir_cb(inode_t *dir, dentry_t *dentry)
 {
     return fatfs_unlink_cb(dir, dentry);
 }
 
-/**
- * @brief 重命名/移动文件或目录
- * @param[in] old_dir    源父目录 inode（未使用）
- * @param[in] old_dentry 源目录项
- * @param[in] new_dir    目标父目录 inode
- * @param[in] new_dentry 目标目录项（提供新名称）
- * @retval ENO0_NO_ERROR 成功，old_dentry 对应 inode 路径已更新
- */
+/* 重命名 / 移动文件或目录 */
 static int fatfs_rename_cb(inode_t *old_dir, dentry_t *old_dentry,
                             inode_t *new_dir, dentry_t *new_dentry)
 {
@@ -749,19 +654,12 @@ static int fatfs_rename_cb(inode_t *old_dir, dentry_t *old_dentry,
         return fresult_to_vfs(fr);
     }
 
-    /* 不需要再回头改任何 inode 里存的路径：路径不再被缓存，vfs_rename 把 dentry
-     * 挂到新父目录之后，整棵子树的路径自然全部跟着变。 */
+    /* 路径不缓存：vfs_rename 把 dentry 挂到新父目录后，整棵子树的路径自然跟着变 */
     return ENO0_NO_ERROR;
 }
 
-/**
- * @brief 截断或扩展文件到指定大小
- * @param[in] inode 目标文件 inode
- * @param[in] size  目标大小（字节）；0 清空；大于当前大小时扩展
- * @retval ENO0_NO_ERROR 成功，inode->i_size 已更新
- * @note 使用 FA_WRITE 打开 → f_lseek(size) → f_truncate()。
- *       FAT32 文件大小上限为 4 GB（DWORD 限制）。
- */
+/* 截断或扩展文件到 size，成功后更新 i_size。
+ * FAT32 文件大小上限为 4 GB（DWORD 限制）。 */
 static int fatfs_truncate_cb(inode_t *inode, uint64_t size)
 {
     char fatfs_path[VFS_PATH_MAX + 4];
@@ -812,10 +710,6 @@ static inode_operations_t fatfs_inode_ops = {
 
 /**
  * @brief 打开文件或目录
- * @param[in]     inode 文件/目录 inode
- * @param[in,out] file  文件对象（f_private 将存入 FIL* 或 fatfs_dir_priv_t*）
- * @param[in]     mode  打开模式（O_RDONLY/O_WRONLY/O_RDWR/O_CREAT 等）
- * @retval ENO0_NO_ERROR 成功
  * @note 普通文件走 f_open，把 VFS O_* 映射成 FatFS FA_*，f_private 存 FIL*；
  *   目录走 f_opendir，f_private 存 fatfs_dir_priv_t*（供 getdents64 遍历）。
  *   两条分支的 f_private 类型不同，后续所有回调都靠 S_ISDIR(f_inode->i_mode) 分流。
@@ -853,7 +747,6 @@ static int fatfs_open_cb(inode_t *inode, file_t *file, int mode)
         return ENO0_NO_ERROR;
     }
 
-    /* 将 VFS O_* 访问模式映射为 FatFS FA_* 标志 */
     BYTE fa = 0;
     int acc = mode & O_ACCMODE;
     if (acc == O_RDONLY || acc == O_RDWR)
@@ -899,16 +792,12 @@ static int fatfs_open_cb(inode_t *inode, file_t *file, int mode)
         return fresult_to_vfs(fr);
     }
 
-    file->f_private = fil;           /* 将 FIL* 存入文件对象私有数据 */
+    file->f_private = fil;
     file->f_op      = &fatfs_file_ops;
     return ENO0_NO_ERROR;
 }
 
-/**
- * @brief 关闭文件或目录
- * @param[in] file 文件对象（f_private 中的 FIL* / fatfs_dir_priv_t* 将被关闭并释放）
- * @retval ENO0_NO_ERROR 成功
- */
+/* 关闭文件或目录，释放 f_private 里的 FIL* / fatfs_dir_priv_t* */
 static int fatfs_close_cb(file_t *file)
 {
     if (!file->f_private)
@@ -935,13 +824,10 @@ static int fatfs_close_cb(file_t *file)
 /**
  * @brief 把 FatFS 的 FIL 内部读写指针对齐到 VFS 的 file->f_pos
  * @retval ENO0_NO_ERROR 已对齐（本来就相等，或 f_lseek 成功）
- * @details FIL 自带一个读写指针，而 VFS 层会在**不经过 f_op->lseek** 的情况下改
+ * @details FIL 自带一个读写指针，而 VFS 层会在不经过 f_op->lseek 的情况下改
  *   file->f_pos——O_APPEND 就是这么干的：vfs_open 把 f_pos 置成 i_size，vfs_write
- *   每次写前再置一次。两边不同步的话，写会落在 FIL 指针所在的位置上，
- *   表现是"echo x >> f 变成了从头覆盖"。
- *
- *   顺序读写时两者天然同步（都由 f_read/f_write 一起前进），lseek 也走 f_op->lseek
- *   把两边一起挪——所以这个洞只有 O_APPEND 会踩，一直到 BusyBox 用 >> 才暴露。
+ *   每次写前再置一次。两边不同步的话，写会落在 FIL 指针所在的位置上。
+ *   顺序读写与 lseek 时两者天然同步。
  */
 static int fatfs_sync_pos(file_t *file, FIL *fil)
 {
@@ -956,13 +842,8 @@ static int fatfs_sync_pos(file_t *file, FIL *fil)
     }
     return ENO0_NO_ERROR;
 }
-/**
- * @brief 从文件中读取数据
- * @param[in]  file 文件对象
- * @param[out] buf  接收数据的缓冲区
- * @param[in]  len  请求读取的字节数
- * @return 实际读取字节数；负值表示错误码
- */
+
+/* 读文件；目录一律拒绝（须走 readdir） */
 static ssize_t fatfs_read_cb(file_t *file, void *buf, size_t len)
 {
     /* 目录的 f_private 是 fatfs_dir_priv_t* 而不是 FIL*，误当 FIL* 用会写坏内存。
@@ -985,26 +866,17 @@ static ssize_t fatfs_read_cb(file_t *file, void *buf, size_t len)
     }
 
     UINT br = 0;
-    /* 参数：文件句柄 | 目标缓冲区 | 要读的长度 | 实际读取长度 */
     FRESULT fr = f_read(fil, buf, (UINT)len, &br);
     if (fr != FR_OK)
     {
         return (ssize_t)fresult_to_vfs(fr);
     }
 
-    /* 同步 VFS 层的读写偏移量，方便下次读写从这里继续 */
     file->f_pos = (off_t)f_tell(fil);
     return (ssize_t)br;
 }
 
-/**
- * @brief 向文件中写入数据
- * @param[in] file 文件对象
- * @param[in] buf  待写入数据缓冲区
- * @param[in] len  写入字节数
- * @return 实际写入字节数；负值表示错误码
- * @note 写入后自动更新 file->f_pos 和 inode->i_size。
- */
+/* 写文件，并同步 f_pos 与 i_size */
 static ssize_t fatfs_write_cb(file_t *file, const void *buf, size_t len)
 {
     /* 同 fatfs_read_cb：目录的 f_private 类型不同，且写目录本就非法 */
@@ -1034,7 +906,6 @@ static ssize_t fatfs_write_cb(file_t *file, const void *buf, size_t len)
 
     file->f_pos = (off_t)f_tell(fil);
 
-    /* 同步更新 inode 中记录的文件大小 */
     if (file->f_pos > (off_t)file->f_inode->i_size)
     {
         /* write只负责文件长度不变（覆盖）或变大的情况，变小由truncate处理 */
@@ -1044,13 +915,7 @@ static ssize_t fatfs_write_cb(file_t *file, const void *buf, size_t len)
     return (ssize_t)bw;
 }
 
-/**
- * @brief 移动文件读写位置
- * @param[in] file   文件对象
- * @param[in] offset 偏移量
- * @param[in] whence 参照点（SEEK_SET / SEEK_CUR / SEEK_END）
- * @return 新的文件位置；负值表示错误码
- */
+/* 移动读写位置；目录只支持 rewind，见函数体 */
 static off_t fatfs_lseek_cb(file_t *file, off_t offset, int whence)
 {
     /* 目录：只支持 lseek(fd, 0, SEEK_SET) —— 等价于 rewinddir，把 FatFS 游标、
@@ -1087,15 +952,15 @@ static off_t fatfs_lseek_cb(file_t *file, off_t offset, int whence)
     }
 
     DWORD new_pos;
-    if (whence == SEEK_SET) /* 从文件开头跳 offset 字节 */
+    if (whence == SEEK_SET)
     {
         new_pos = (DWORD)offset;
     }
-    else if (whence == SEEK_CUR) /* 从当前位置跳 offset 字节 */
+    else if (whence == SEEK_CUR)
     {
         new_pos = (DWORD)((off_t)f_tell(fil) + offset);
     }
-    else if (whence == SEEK_END) /* 从文件末尾跳 offset 字节 */
+    else if (whence == SEEK_END)
     {
         new_pos = (DWORD)((off_t)f_size(fil) + offset);
     }
@@ -1114,16 +979,8 @@ static off_t fatfs_lseek_cb(file_t *file, off_t offset, int whence)
     return file->f_pos;
 }
 
-/**
- * @brief 把一条目录项按 struct linux_dirent64 布局写进缓冲区
- * @param[out] buf     目标位置（调用方已确保剩余空间 >= reclen）
- * @param[in]  name    条目名（'\0' 结尾）
- * @param[in]  is_dir  true = 目录（DT_DIR），false = 普通文件（DT_REG）
- * @param[in]  off     写入 d_off 的游标值（"下一条记录的位置"，我们用已返回条目序号充当）
- * @param[in]  reclen  本条记录总长度（已 8 字节对齐）
- * @note `d_ino` 必须非 0——FAT 没有 inode 号，而某些程序会把 d_ino==0 当作
- *   "已删除条目"跳过，所以用 off+1 充当一个目录内唯一且非零的值。
- */
+/* 按 linux_dirent64 布局写一条记录，off 为已返回条目序号。d_ino 必须非 0（有程序把
+ * d_ino==0 当已删除条目跳过），FAT 没有 inode 号，用 off+1 充当。 */
 static void fatfs_fill_dirent(void *buf, const char *name, bool is_dir,
                               uint64_t off, uint16_t reclen)
 {
@@ -1151,9 +1008,6 @@ static uint16_t fatfs_dirent_reclen(const char *name)
 
 /**
  * @brief 读取目录项，填充紧凑排列的 struct linux_dirent64 记录（getdents64 后端）
- * @param[in]  file 已打开的目录 file
- * @param[out] buf  目标缓冲区
- * @param[in]  len  缓冲区容量
  * @retval >0 已填字节数
  * @retval 0  目录读完
  * @retval ENO6_INVAL_PARAM 缓冲区连一条记录都放不下
@@ -1161,7 +1015,7 @@ static uint16_t fatfs_dirent_reclen(const char *name)
  *   1. `pending`——上次因缓冲区满而暂存的那条（它已被 FatFS 游标消费，不吐就永久丢失）；
  *   2. 合成的 `.` / `..`——FatFS 的 f_readdir 不会返回它们（见 FATFS_DIR_SYNTH_* 注释）；
  *   3. `f_readdir` 真实读出的条目。
- *   拿到条目后先算 reclen，放不下就停手——**一条记录绝不能被截断**。此时若该条来自
+ *   拿到条目后先算 reclen，放不下就停手——一条记录绝不能被截断。此时若该条来自
  *   f_readdir 则必须存进 pending；若来自合成阶段或本就是 pending，则保持状态不变，
  *   下次调用会重新生成同一条。
  */

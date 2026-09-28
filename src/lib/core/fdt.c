@@ -73,6 +73,9 @@ static bool node_name_eq(const char *node_name, const char *comp, uint32_t comp_
     return node_name[i] == '\0' || node_name[i] == '@';
 }
 
+/**
+ * @brief 校验并记下 DTB 各段位置
+ */
 bool fdt_init(phyAddr_t dtb_pa)
 {
     fdt_valid = false;
@@ -93,14 +96,7 @@ bool fdt_init(phyAddr_t dtb_pa)
 
     /* 头部字段偏移：0 magic / 4 totalsize / 8 off_struct / 12 off_strings /
      * 16 off_rsvmap / 20 version / 24 last_comp_version / 28 boot_cpuid /
-     * 32 size_strings / 36 size_struct。
-     *
-     * 版本判据踩过两次坑，记下来：
-     *  - 要看的是 **version >= 17**，因为 size_dt_struct（偏移 36）是 v17 才加的字段，
-     *    而下面的遍历要用它定边界。拿 version 跟 16 比会把每一棵现代 DTB 都拒掉。
-     *  - last_comp_version 的上限是 **17 不是 16**（libfdt 的 FDT_LAST_SUPPORTED_VERSION
-     *    就是 17）。实测 QEMU+RustSBI 传下来的树 version=17、last_comp_version=17，
-     *    按 16 卡会直接判成"没有可用的 dtb"。 */
+     * 32 size_strings / 36 size_struct。 */
     if (be32(base + 20) < FDT_MIN_VERSION || be32(base + 24) > FDT_LAST_COMP_VER)
     {
         return false;
@@ -117,6 +113,9 @@ bool fdt_init(phyAddr_t dtb_pa)
     return true;
 }
 
+/**
+ * @brief 按绝对路径查找节点
+ */
 const void *fdt_find_node(const char *path)
 {
     if (!fdt_valid || path == NULL || path[0] != '/')
@@ -207,11 +206,17 @@ const void *fdt_find_node(const char *path)
     return NULL;
 }
 
+/**
+ * @brief DTB 是否解析成功、后续查询是否可用
+ */
 bool fdt_is_available(void)
 {
     return fdt_valid;
 }
 
+/**
+ * @brief 取节点的第一个直接子节点
+ */
 const void *fdt_first_subnode(const void *node)
 {
     if (!fdt_valid || node == NULL)
@@ -250,6 +255,9 @@ const void *fdt_first_subnode(const void *node)
     return NULL;
 }
 
+/**
+ * @brief 取同一层的下一个兄弟节点
+ */
 const void *fdt_next_subnode(const void *subnode)
 {
     if (!fdt_valid || subnode == NULL)
@@ -303,6 +311,9 @@ const void *fdt_next_subnode(const void *subnode)
     return NULL;
 }
 
+/**
+ * @brief 读取节点下的属性原始数据
+ */
 const void *fdt_get_prop(const void *node, const char *name, uint32_t *len)
 {
     if (!fdt_valid || node == NULL)
@@ -346,6 +357,9 @@ const void *fdt_get_prop(const void *node, const char *name, uint32_t *len)
     return NULL;
 }
 
+/**
+ * @brief fdt_get_prop 的解码壳：读一个 u32，长度不符时返回 false
+ */
 bool fdt_prop_u32(const void *node, const char *name, uint32_t *out)
 {
     uint32_t len = 0;
@@ -359,6 +373,9 @@ bool fdt_prop_u32(const void *node, const char *name, uint32_t *out)
     return true;
 }
 
+/**
+ * @brief fdt_get_prop 的解码壳：读 1 或 2 个 cell 的整数，长度不符时返回 false
+ */
 bool fdt_prop_u64(const void *node, const char *name, uint64_t *out)
 {
     uint32_t len = 0;
@@ -382,6 +399,9 @@ bool fdt_prop_u64(const void *node, const char *name, uint64_t *out)
     return false;
 }
 
+/**
+ * @brief fdt_get_prop 的解码壳：读字符串属性，不存在或为空时返回 NULL
+ */
 const char *fdt_prop_str(const void *node, const char *name)
 {
     uint32_t len = 0;

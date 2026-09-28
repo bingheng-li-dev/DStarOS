@@ -19,19 +19,17 @@ typedef struct free_space_list fslist_t;
 typedef struct bestfit_frame_allocator bffa_t;
 typedef struct kmem_cache kmem_cache_t;
 
-/* PMM 记页数的类型。**它的宽度直接决定能管理多少物理内存**——页数一旦溢出就静默回绕，
- * pmm_page_list 数组按回绕后的小值分配，此后对高位页帧的每一次访问都是越界写，
- * 没有任何护栏接得住。这条约束原先散落在各处的 uint16_t 里（65535 页 = 256 MB）、
- * 谁都看不见，现在收拢到这一个 typedef 上：要改上限只需要动这一行，
- * 下面的 _Static_assert 会跟着自动更新。
- * 注意 pframe_t.reference 与 slab_inuse **不是**页数，不要一起改。 */
+/* PMM 记页数的类型，宽度直接决定能管理多少物理内存：页数溢出会静默回绕，
+ * pmm_page_list 按回绕后的小值分配，之后对高位页帧的每次访问都是越界写。
+ * 要改上限只需动这一行，下面的 _Static_assert 会跟着更新。
+ * 注意 pframe_t.reference 与 slab_inuse 不是页数，不要一起改。 */
 typedef uint32_t pgcount_t;
 
 struct phy_frame
 {
-    pgcount_t nsize;    /* The size of this block which free or to be used. */
-    uint16_t reference; /* Amount of vir page used. */
-    bool can_be_alloc;    /* True:this frame is the head of a free block and can be allocated;false:this frame is in usage or it is not the head of a block. */
+    pgcount_t nsize;    /* 本块的页数（空闲块或已分配块） */
+    uint16_t reference; /* 有多少个虚拟页映射到这一帧 */
+    bool can_be_alloc;  /* 真：本帧是某个空闲块的首帧，可被分配；假：正在使用，或不是首帧 */
     struct list_head free_list_linker;
     struct list_head free_addr_list_linker;
     kmem_cache_t *slab_cache;      /* NULL 表示非 slab 页，kfree 靠它 O(1) 分派 */
@@ -40,17 +38,19 @@ struct phy_frame
     struct list_head slab_linker;  /* 挂进 cache->partial[] / cache->full */
 };
 
-struct free_space_list /* Record the addr of the free list from small to large. */
+/* 空闲链表头：按块大小或按地址排序，各一条 */
+struct free_space_list
 {
     struct list_head list_linker;
     pgcount_t fnsize; /* PGSIZE times */
 };
 
-struct bestfit_frame_allocator /* Best fit,it allows to allocate a continuous block of memory. */
+/* 最佳适配分配器：分配连续物理块 */
+struct bestfit_frame_allocator
 {
-    /* Used for allocation,insert alloced remaining mems into free list.Returns the addr of alloced mems. */
+    /* 取一块够大的，切剩的插回空闲链表 */
     pframe_t *(*bffa_delete_and_reinsert)(pgcount_t nsize);
-    /* Insert and merge dealloced mems base addr into free list. */
+    /* 回收的块插回链表，并与相邻空闲块合并 */
     void (*bffa_insert_and_merge)(pframe_t *base_frame, pgcount_t nsize);
 };
 
@@ -62,7 +62,6 @@ struct bestfit_frame_allocator /* Best fit,it allows to allocate a continuous bl
 _Static_assert((MEMORY_END - KERNEL_START) / PGSIZE <= PMM_MAX_PAGES,
                "MEMORY_END too large: page count overflows pgcount_t (see pmm.h)");
 
-/* Each pframe maps a ppn/pa,use convert_pframe2ppn/pa to covert. */
 extern pframe_t *pmm_page_list;
 extern fslist_t pmm_free_list;
 extern fslist_t pmm_free_addr_list;
@@ -73,19 +72,16 @@ pframe_t *pmm_alloc_page(void);
 void pmm_free_pages(pframe_t *base_frame);
 void pmm_init_after_mmu_enable(void);
 
-/* RoundDown(Left)*/
 static inline ppn_t convert_pa2ppn_flr(phyAddr_t pa)
 {
     return (ppn_t)((uintptr_t)pa / PGSIZE);
 }
 
-/* RoundUp(Right) */
 static inline ppn_t convert_pa2ppn_cil(phyAddr_t pa)
 {
     return (ppn_t)(((uintptr_t)pa + PGSIZE - 1) / PGSIZE);
 }
 
-/* RoundUp */
 static inline phyAddr_t pa_roundup(phyAddr_t pa)
 {
     return (pa + PGSIZE - (pa % PGSIZE));

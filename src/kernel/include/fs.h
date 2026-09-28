@@ -8,4 +8,4 @@
 
 void fs_init(void);
 
-#endif
+#endif /* _FS_H_ */

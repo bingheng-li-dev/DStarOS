@@ -21,6 +21,9 @@
  * 外部一律经 file_t 间接访问。 */
 static tty_t g_tty;
 
+/**
+ * @brief 初始化全局 TTY 单例：自旋锁 + 等待队列 + termios 默认值
+ */
 void tty_init(void)
 {
     spinlock_init(&g_tty.lock);
@@ -82,6 +85,9 @@ static void tty_echo_str(const char *s)
     }
 }
 
+/**
+ * @brief 行规范层：把一个从串口读到的字符喂给 TTY
+ */
 void tty_input_push(char c)
 {
     irq_key_t g_tty_lock_key = spinlock_acquire(&g_tty.lock);
@@ -116,7 +122,7 @@ void tty_input_push(char c)
     }
 
     /* 3. VINTR（^C）与 VQUIT（^\），仅当 ISIG 打开：丢弃整个未提交半行，
-     * 并给前台进程组发信号。**这里是中断上下文、手里还攥着 tty->lock**，所以只能走
+     * 并给前台进程组发信号。这里是中断上下文、手里还攥着 tty->lock，所以只能走
      * signal_send_group 这条"置位 + 唤醒"的路径；真正的投递发生在目标自己返回 U 态
      * 那一刻（最迟一个 tick 之后）。锁序 tty->lock → proc_list_lock → sighand->lock
      * → run_queue.lock 单向成立：信号侧全程不碰 tty。 */
@@ -161,14 +167,8 @@ void tty_input_push(char c)
     }
 
     /* 6. VEOF（^D）：字节本身不入缓冲、不回显。
-     * 行首（edit_pos == line_pos，当前行还没敲任何字符）按下：把这个位置存进
-     * eof_queue，交给 tty_read 在 read_pos 追到队首那个位置时返回 0。队列满则丢弃
-     * （响铃）——一批喂入里挂起这么多个从未被读走的 ^D 已经是极端情况，不值得为此
-     * 无限扩容。
-     * 行中（已敲了字符）按下：立即提交这半行（line_pos = edit_pos），读者醒来正常
-     * 拿到这些字节——不碰 eof_queue：里面排队的都是更早发生、位置更靠前的 ^D，
-     * 依然有效，必须留着等 read_pos 依次追上去才交付，不能因为这里提交了新的一行
-     * 就把它们冲掉。 */
+     * 行首按下：把位置存进 eof_queue，tty_read 在 read_pos 追到它时返回 0；队列满则响铃丢弃。
+     * 行中按下：立即提交这半行，不动 eof_queue——里面是更早的 ^D，仍要依次交付。 */
     if (c == (char)g_tty.tio.c_cc[VEOF])
     {
         if (g_tty.edit_pos == g_tty.line_pos)
@@ -212,6 +212,9 @@ void tty_input_push(char c)
     spinlock_release(&g_tty.lock, g_tty_lock_key);
 }
 
+/**
+ * @brief TTY 读端：阻塞直到有一整行可读（raw 模式下至少一个字节）
+ */
 ssize_t tty_read(file_t *file, void *buf, size_t len)
 {
     tty_t *tty = (tty_t *)file->f_private;
@@ -236,8 +239,7 @@ ssize_t tty_read(file_t *file, void *buf, size_t len)
             return ENO24_RESTARTSYS;
         }
         spinlock_release(&tty->lock, tty_lock_key);
-        /* 被 tty_input_push 唤醒后从这里继续，回到循环开头重新检查条件——
-         * 可能被虚假唤醒，或数据已被抢先取走，不能想当然直接成功 */
+        /* 被唤醒不代表条件成立（数据可能已被抢先取走），回循环重检 */
         sched_schedule();
         /* 重新取锁：赋值给循环外的 key，不能再声明一个同名局部把它遮蔽掉 */
         tty_lock_key = spinlock_acquire(&tty->lock);
@@ -252,11 +254,8 @@ ssize_t tty_read(file_t *file, void *buf, size_t len)
         }
     }
 
-    /* 用 read_pos == eof_queue[0]（而不是 read_pos == line_pos）判断 EOF 是否该在此刻
-     * 交付：队首记录的是最早那个 ^D 生效时的确切位置，即便此后又提交了更多行
-     * （line_pos 前移，甚至排进了更多 EOF），这个位置本身没变——必须先把 read_pos
-     * 推到这里交付一次 EOF，再继续读后面的数据，不能因为"眼下 line_pos 已经比
-     * read_pos 大很多"就跳过它。 */
+    /* 队首记的是最早那个 ^D 生效时的确切位置：read_pos 追到它就先交付一次 EOF，
+     * 不能因为此后又提交了更多行（line_pos 已前移）就跳过它。 */
     if (tty->eof_count > 0 && tty->read_pos == tty->eof_queue[0])
     {
         tty->eof_count--;
@@ -275,11 +274,8 @@ ssize_t tty_read(file_t *file, void *buf, size_t len)
         n = avail;
     }
 
-    /* 队首若还有一个未交付的 EOF 落在本次可读范围内（read_pos < eof_queue[0] <
-     * read_pos+n，不是上面已经处理过的 read_pos == eof_queue[0] 那种情况），必须
-     * 把这次读取截断在它之前——EOF 只能单独作为下一次 read() 的返回值（0 字节）
-     * 交付，不能被这次的数据"跨过去"，否则读者会在该看到 EOF 的地方直接读到
-     * EOF 之后才提交的数据。 */
+    /* 队首 EOF 落在本次可读范围内时截断在它之前：EOF 只能作为下一次 read() 单独交付，
+     * 不能被这次的数据跨过去。 */
     if (tty->eof_count > 0)
     {
         uint32_t eof_off = tty->eof_queue[0] - tty->read_pos;
@@ -289,10 +285,8 @@ ssize_t tty_read(file_t *file, void *buf, size_t len)
         }
     }
 
-    /* canonical 模式下 [read_pos, line_pos) 可能已经攒了不止一行（读者迟迟不来读，
-     * 期间敲了好几个回车）——一次 read 只能吐一行，找到第一个 \n 就截断在那里，
-     * 哪怕 len/avail 还有富余；没有 \n 的情况（行中 ^D 提交的半行）保持不截断。
-     * raw 模式没有这个限制，line_pos 本来就逐字节推进，不需要额外扫描。 */
+    /* canonical 模式下 [read_pos, line_pos) 可能攒了不止一行，一次 read 只吐一行：
+     * 截断在第一个 \n 处；没有 \n（行中 ^D 提交的半行）则不截断。raw 模式不扫描。 */
     if (tty->tio.c_lflag & ICANON)
     {
         for (size_t i = 0; i < n; i++)
@@ -315,6 +309,9 @@ ssize_t tty_read(file_t *file, void *buf, size_t len)
     return (ssize_t)n; /* 短读合法（POSIX read 语义）*/
 }
 
+/**
+ * @brief TTY 写端：逐字节输出，按 OPOST|ONLCR 做 \n -> \r\n
+ */
 ssize_t tty_write(file_t *file, const void *buf, size_t len)
 {
     tty_t *tty = (tty_t *)file->f_private;
@@ -337,10 +334,8 @@ ssize_t tty_write(file_t *file, const void *buf, size_t len)
     return (ssize_t)len;
 }
 
-/* devfs 挂载 /dev/console、/dev/tty 时，vfs_open() 走通用路径构造 file_t，
- * 会无条件把 f_kind 设成 FILE_KIND_VFS（见 vfs.c）——必须在 f_op->open 回调里
- * 改回来，否则 sys_read/sys_write 会误把 vfs_big_lock 套在会阻塞的 tty_read()
- * 外面，等于把 Phase 4 刚拆掉的"持锁睡眠"问题在设备文件上重新引入一遍。 */
+/* vfs_open() 把 f_kind 一律设成 FILE_KIND_VFS，这里改回 DEVICE：否则 sys_read /
+ * sys_write 会把 vfs_big_lock 套在会阻塞的 tty_read() 外面，持锁睡眠。 */
 static int tty_vfs_open(inode_t *inode, file_t *file, int mode)
 {
     UNUSED(inode);
@@ -350,17 +345,16 @@ static int tty_vfs_open(inode_t *inode, file_t *file, int mode)
     return ENO0_NO_ERROR;
 }
 
-/* 非 static：devfs.c 的 /dev/console、/dev/tty 两个 inode 直接复用这张表
- * （而不是自己另建一张内容相同的表）——tty_from_file() 靠 f_op == &tty_fops
- * 的指针比对判断"这是不是真正的 TTY"，两条构造路径（tty_open_file() 直接
- * kmalloc，或 devfs 挂载后走 vfs_open()）必须共享同一张表，指针比对才能
- * 覆盖两条路径。 */
+/* 非 static：devfs 的 /dev/console、/dev/tty 直接复用，理由见 tty.h */
 file_operations_t tty_fops = {
     .read = tty_read,
     .write = tty_write,
     .open = tty_vfs_open,
 };
 
+/**
+ * @brief 造一个 TTY 设备 file（stdin/stdout/stderr 的后端）
+ */
 file_t *tty_open_file(void)
 {
     file_t *f = slab_cache_alloc(file_cache);
@@ -378,6 +372,9 @@ file_t *tty_open_file(void)
     return f;
 }
 
+/**
+ * @brief 若 f 确实是 tty_fops 打开的 file，返回其 tty_t*，否则返回 NULL
+ */
 tty_t *tty_from_file(file_t *f)
 {
     if (f == NULL || f->f_kind != FILE_KIND_DEVICE || f->f_op != &tty_fops)
@@ -387,6 +384,9 @@ tty_t *tty_from_file(file_t *f)
     return (tty_t *)f->f_private;
 }
 
+/**
+ * @brief 设置前台进程组（^C / ^\ 打给它）
+ */
 void tty_set_foreground_pgid(int16_t pgid)
 {
     irq_key_t key = spinlock_acquire(&g_tty.lock);
@@ -394,6 +394,9 @@ void tty_set_foreground_pgid(int16_t pgid)
     spinlock_release(&g_tty.lock, key);
 }
 
+/**
+ * @brief 轮询 UART 接收寄存器，把读到的字符逐个喂给 tty_input_push()
+ */
 void tty_poll_input(void)
 {
     /* 两个 hart 都轮询在正确性上没问题（tty_lock 挡住了），但会让字符顺序依赖

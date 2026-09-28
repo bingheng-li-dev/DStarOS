@@ -30,36 +30,25 @@ struct sched_class;
 #define KERNEL_STACKPSIZE 1
 #define KERNRL_STKSIZE KERNEL_STACKPSIZE *PGSIZE
 
-/* 内核栈**最高的这些字节不作栈用**，留作 per-hart 记账区：[栈顶, 栈顶+8) 存
- * "本任务当前跑在哪个 hart 上"。`trap_return` 返回 U 态前写进去，`trap_entry`
- * 从 U 态进来时读回 `tp`。
- *
- * 为什么需要它：内核拿 `tp` 当 hart 号用（`cpu_get_core_id_asm()` 直接读 tp，
- * `cpu_get_current()` = `&cpus[tp]`），而 **`tp` 在 RISC-V 上是用户可写的普通寄存器**
- * ——musl 的 `__set_thread_area` 就是一条 `mv tp, a0`，纯寄存器写、不走 syscall，
- * 内核根本无从察觉。用户一旦把 tp 改成自己的 TLS 指针，之后每次陷入内核，
- * `cpus[tp]` 就是野指针。这个不变式此前只是靠"手写的用户程序碰巧不碰 tp"维持着。
- *
- * 取 16 而不是 8：RISC-V psABI 要求栈指针 16 字节对齐，保留区大小必须是 16 的倍数，
- * 否则下移后的栈顶会破坏对齐。 */
+/* 内核栈最高的这些字节不作栈用，留作 per-hart 记账区：[栈顶, 栈顶+8) 存本任务当前跑在
+ * 哪个 hart 上，trap_return 返回 U 态前写入，trap_entry 从 U 态进来时读回 tp。
+ * 需要它是因为内核拿 tp 当 hart 号，而 tp 是用户可写的普通寄存器（musl 设 TLS 就改它）。
+ * 取 16：psABI 要求栈指针 16 字节对齐。 */
 #define KSTACK_RESERVED 16
 
-/* 供 trap 使用的内核栈顶（sscratch 存的就是它）。注意**不是**分配区的末端：
+/* 供 trap 使用的内核栈顶（sscratch 存的就是它）。注意不是分配区的末端：
  * 最高 KSTACK_RESERVED 字节被保留区占着。 */
 #define PROC_KSTACK_TOP(pcb) ((uintptr_t)((pcb)->kernel_stack + KERNRL_STKSIZE - KSTACK_RESERVED))
 #define PID_MAX_VALUE (((int16_t)1 << 15) - 2) /* 0 <= PID <= PID_MAX_VALUE*/
 #define PROC_MAX_AMOUNT (PID_MAX_VALUE / 2)    /* 1(idle) <= task_count <= PROC_MAX_AMOUNT */
-/* fd 表槽位数。16 是阶段 2 定的，够我们自己的测试程序用；**对 ash 不够**——
- * 它处理重定向的核心动作 savefd() 是 fcntl(fd, F_DUPFD, 10)，刻意把要保存的 fd
- * 挪到 10 以上避开用户可能用到的 0~9，16 个槽位减去 stdio 之后 10 以上只剩 6 个。
- * 64 是"多重重定向的管道够用"与"PCB 别无谓变胖"之间的保守中点；真要到 Linux 的
- * 1024 得把 fd 表改成动态分配，那是另一件事。 */
+/* fd 表槽位数。ash 的重定向靠 fcntl(fd, F_DUPFD, 10) 把要保存的 fd 挪到 10 以上，
+ * 槽位太少就不够用；真要到 Linux 的 1024 得把 fd 表改成动态分配。 */
 #define NOFILE 64
 
-#define CLONE_VM 0x00000100      /* Child process will share the same virtual memory space with it's parent. */
-#define CLONE_FS 0x00000200      /* Child process will share the same file system info with it's parent. */
-#define CLONE_FILES 0x00000400   /* Child process will share the same opened files with it's parent. */
-#define CLONE_SIGHAND 0x00000800 /* Child process will share the same signal handle program with it's parent. */
+#define CLONE_VM 0x00000100      /* 与父进程共享地址空间 */
+#define CLONE_FS 0x00000200      /* 与父进程共享文件系统信息 */
+#define CLONE_FILES 0x00000400   /* 与父进程共享打开文件表 */
+#define CLONE_SIGHAND 0x00000800 /* 与父进程共享信号处理表 */
 
 typedef enum proc_status sta_t;
 typedef struct proc_context ctx_t;
@@ -135,15 +124,15 @@ struct proc_control_block
     /* ==================== CFS调度相关 ==================== */
     int proc_nice;               /* nice 值 [-20, 19]，默认 0 */
     uint32_t proc_weight;        /* 由 nice 派生的权重，nice=0 时为 SCHED_NICE_0_WEIGHT */
-    /* sched_schedule() 里 acquire run_queue.lock 拿到的中断 key。这把锁是**接力**释放的
+    /* sched_schedule() 里 acquire run_queue.lock 拿到的中断 key。这把锁是接力释放的
      * （见 sched_finish_switch），acquire 与 release 由不同执行流完成、任务还可能换到
      * 另一个 hart 上才被换回，所以 key 绝不能存在 per-CPU 的槽里——存进 pcb 让它随任务
      * 走才配得上对。新建任务要初始化成 true（"之前中断是开的"），它第一次被换上时
      * fork_out 里的 sched_finish_switch 靠这个值把中断打开。 */
     bool     proc_rq_key;
     uint64_t proc_vruntime;      /* 加权虚拟运行时间，单位同 sched_now() */
-    uint32_t proc_vruntime_rem;  /* 上次换算 vruntime 时除不尽的余数，见 fair_update_curr()
-                                  * 里的说明；恒 < proc_weight，改 nice 时清零 */
+    /* 上次换算 vruntime 时除不尽的余数（见 fair_update_curr）；恒 < proc_weight，改 nice 时清零 */
+    uint32_t proc_vruntime_rem;
     uint64_t proc_exec_start;    /* 上次结算（换入/每个 tick）的时刻，用于算本次 delta；每次结算都刷新 */
     uint64_t proc_sum_exec_runtime_prev; /* 换入 CPU 那一刻对 proc_sum_exec_runtime 拍的快照，只在换入时写 */
     uint64_t proc_sum_exec_runtime;      /* 累计执行时间 */
@@ -162,8 +151,8 @@ struct proc_control_block
      * 用纳秒而不是 tick 计数，不是为了到期精度（检查点仍是每 tick 一次），而是
      * nanosleep 被信号打断时必须回填准确的剩余时间，tick 粒度下只能给出 ±5 ms。 */
     uint64_t proc_wake_time_ns;
-    /* 挂入 sleeping_tasks 排序链表的节点。**空链表状态（list_empty）是
-     * sched_timer_remove() 幂等的唯一判据**，所以入链前、摘链后都必须维护它。 */
+    /* 挂入 sleeping_tasks 排序链表的节点。空链表状态（list_empty）是
+     * sched_timer_remove() 幂等的唯一判据，所以入链前、摘链后都必须维护它。 */
     struct list_head proc_timer_linker;
 
     /* ==================== ITIMER_REAL 定时器 ==================== */
@@ -179,10 +168,8 @@ struct proc_control_block
     uint64_t proc_sum_exec_runtime_children; /* 已收割子进程的累计执行时间之和，times() 的 tms_cutime */
 
     /* ==================== 浮点上下文 ==================== */
-    /* 32 个 f 寄存器 + fcsr，切换任务时无条件存取（见 fpu.c 里为什么不做惰性保存）。
-     * 为它们腾出这 264 字节是 BusyBox 逼出来的：musl 在 lp64d 下的 setjmp/longjmp
-     * 会无条件存取 fs0~fs11，而 ash 的异常机制就建立在 setjmp 上——没有 FP 上下文，
-     * ash 起来的第一条 setjmp 就会被 SIGILL 杀掉。 */
+    /* 32 个 f 寄存器 + fcsr，切换任务时无条件存取（见 fpu.c）。musl 在 lp64d 下的
+     * setjmp/longjmp 会存取 fs0~fs11，ash 的异常机制离不开它。 */
     uint64_t proc_fp_regs[32];
     uint64_t proc_fcsr;
 };
@@ -198,14 +185,14 @@ int16_t do_wait(int16_t pid, int *status, int options);
 int do_exec(intstkf_t *sp, const char *path, char *const *argv, char *const *envp);
 int16_t create_kernel_thread_by_fork(void *func(void *), void *args, uint32_t clone_flags);
 /* 按 pid 查找 pcb（find_proc_by_pid 的公开包装）；未找到返回 NULL。
- * @note 内部自取 proc_list_lock，**调用者不得已经持有它**（自旋锁不可重入）。 */
+ * @note 内部自取 proc_list_lock，调用者不得已经持有它（自旋锁不可重入）。 */
 pcb_t *proc_find_by_pid(int16_t pid);
 /* 当前进程的父进程 pid（getppid），没有父进程返回 0 */
 int16_t proc_get_ppid(void);
 /* 进程 pid 所在的进程组（getpgid）；没有这个进程返回 ENO25_NO_SUCH_PROC */
 int16_t proc_get_pgid(int16_t pid);
 
-/* 在 proc_list_lock 保护下按 pid / pgid 找到进程并**立刻**对它调用 fn。
+/* 在 proc_list_lock 保护下按 pid / pgid 找到进程并立刻对它调用 fn。
  * kill 这类"查到就要动手"的场景必须用它，而不是先 proc_find_by_pid 再动手——
  * 后者在两步之间有目标被 do_wait 收割（list_del + kfree）的窗口。
  * 锁序：tty->lock → proc_list_lock → sighand->lock → run_queue.lock，单向；
@@ -234,8 +221,8 @@ uint8_t proc_fd_get_flags(int fd);
 /* execve 成功、旧地址空间已销毁、不再可能回滚之后调用：关闭所有带 FD_CLOEXEC 的 fd */
 void proc_fd_close_on_exec(pcb_t *p);
 
-/* Kernel's idle process which pid is 0. */
+/* 每个 hart 的 idle 循环（pid 0） */
 void idle(void) __attribute__((noreturn));
 void enter_user_mode(virAddr_t entry, virAddr_t ustack) __attribute__((noreturn));
 
-#endif
+#endif /* _PROC_H_ */

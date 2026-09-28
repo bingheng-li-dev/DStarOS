@@ -8,7 +8,7 @@
 #   RUNS=3 bash scripts/regress_all.sh pipe    # 每套连跑 3 次（抓偶发）
 #
 # 开关切换与 tools/build_vf2_suites.sh 同一套路数，三条都是踩出来的：
-#   1. 切之前先把所有测试开关清零，再只开目标那一个——**只设目标开关不够**，上一套残留的
+#   1. 切之前先把所有测试开关清零，再只开目标那一个——只设目标开关不够，上一套残留的
 #      开关会在 proc.c 的 #elif 链里抢先生效，跑的是另一套测试，而且不会有任何报错；
 #   2. bb 必须同时把 DEBUG_BUSYBOX_INTERACTIVE 设成 0，否则交互式 ash 停在提示符等到超时，
 #      被报成 "suite did not finish"——看起来像回归失败，其实是驱动脚本漏了开关；
@@ -94,7 +94,7 @@ for s in $SUITES; do
         set_switch DEBUG_BUSYBOX_INTERACTIVE 0 || { fail=1; failed_suites="$failed_suites $s(开关)"; continue; }
     fi
 
-    # 只核对"目标开关为 1"不够，必须确认**恰好一个**为 1。
+    # 只核对"目标开关为 1"不够，必须确认恰好一个为 1。
     tests_on=$(for m in $ALL_SWITCHES; do grep -E "^#define $m 1\b" "$D"; done | wc -l)
     if [ "$tests_on" != 1 ]; then
         echo "[$s] FAIL 测试开关有 $tests_on 个为 1"

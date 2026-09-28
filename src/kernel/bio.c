@@ -10,8 +10,8 @@
  * 1. 接口是拷贝式的（bio_read / bio_write 直接对应 disk_read / disk_write），不是 xv6 的
  *    bget / brelse。FatFS 总是把扇区拷进自己的 win[] 或调用者缓冲，从不持有缓存块指针，
  *    所以不需要引用计数与钉住。
- * 2. 多块读也走缓存，**连续未命中的一段合并成一次设备读**——大文件第二遍能命中缓存，
- *    未命中部分也不会退化成逐块读（驱动日后支持 CMD18 时，这一段自然就是一次多块传输）。
+ * 2. 多块读也走缓存，连续未命中的一段合并成一次设备读——大文件第二遍能命中缓存，
+ *    未命中部分也不会退化成逐块读。
  * 3. 直写（write-through）：写先落到设备、成功后才更新缓存，缓存里永远没有脏块。
  *    这块板子没有可靠的关机钩子（sbi_shutdown 不工作），回写模式找不到安全的刷盘时机。
  *
@@ -60,36 +60,21 @@ static struct list_head bio_hash[BIO_HASH_SIZE];
 static osslock_t bio_lock;
 static bio_stats_t bio_stats;
 
-/**
- * @brief 从 PMM 取连续、已清零的内存
- * @param[in] bytes 字节数
- * @return 内核虚拟地址；失败返回 NULL
- */
+/* 从 PMM 取连续、已清零的内存 */
 static void *bio_alloc_zeroed(uint64_t bytes)
 {
     pframe_t *frame = pmm_alloc_pages((pgcount_t)((bytes + PGSIZE - 1) / PGSIZE));
     return (frame != NULL) ? (void *)convert_pframe2kva(frame) : NULL;
 }
 
-/**
- * @brief (设备号, 块号) → 哈希桶（乘法散列取高位）
- * @param[in] dev_id 设备注册序号
- * @param[in] lba    块号
- * @return 桶的链表头
- */
+/* (设备号, 块号) → 哈希桶：乘法散列取高位 */
 static inline struct list_head *bio_bucket(uint32_t dev_id, uint64_t lba)
 {
     uint64_t h = (lba ^ ((uint64_t)dev_id << 56)) * 0x9e3779b97f4a7c15ULL;
     return &bio_hash[h >> (64 - BIO_HASH_BITS)];
 }
 
-/**
- * @brief 查找有效的缓存块
- * @param[in] dev_id 设备注册序号
- * @param[in] lba    块号
- * @return 缓存块；未缓存返回 NULL
- * @note 调用者持有 bio_lock。
- */
+/* 查有效缓存块，未缓存返回 NULL；调用者持 bio_lock */
 static bio_buf_t *bio_lookup_locked(uint32_t dev_id, uint64_t lba)
 {
     struct list_head *head = bio_bucket(dev_id, lba);
@@ -105,24 +90,15 @@ static bio_buf_t *bio_lookup_locked(uint32_t dev_id, uint64_t lba)
     return NULL;
 }
 
-/**
- * @brief 把缓存块移到 LRU 表头（最近使用）
- * @param[in] b 缓存块
- * @note 调用者持有 bio_lock。
- */
+/* 移到 LRU 表头（最近使用）；调用者持 bio_lock */
 static void bio_touch_locked(bio_buf_t *b)
 {
     list_del(&b->lru_linker);
     list_add(&b->lru_linker, &bio_lru);
 }
 
-/**
- * @brief 把一块内容放进缓存：已缓存则覆盖，否则占用 LRU 表尾那一块
- * @param[in] dev_id 设备注册序号
- * @param[in] lba    块号
- * @param[in] src    512 字节
- * @note 调用者持有 bio_lock。缓存里没有脏块，淘汰只是直接复用。
- */
+/* 把一块内容放进缓存：已缓存则覆盖，否则占用 LRU 表尾那一块。
+ * 调用者持 bio_lock；缓存里没有脏块，淘汰只是直接复用。 */
 static void bio_store_locked(uint32_t dev_id, uint64_t lba, const uint8_t *src)
 {
     bio_buf_t *b = bio_lookup_locked(dev_id, lba);
@@ -143,13 +119,7 @@ static void bio_store_locked(uint32_t dev_id, uint64_t lba, const uint8_t *src)
     bio_touch_locked(b);
 }
 
-/**
- * @brief 把一段连续块放进缓存，每 BIO_LOCK_BATCH 块释放一次锁
- * @param[in] dev_id 设备注册序号
- * @param[in] lba    起始块号
- * @param[in] buf    count * 512 字节
- * @param[in] count  块数
- */
+/* 把一段连续块放进缓存，每 BIO_LOCK_BATCH 块放一次锁 */
 static void bio_store_range(uint32_t dev_id, uint64_t lba, const uint8_t *buf, uint32_t count)
 {
     uint32_t k = 0;

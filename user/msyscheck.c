@@ -1,10 +1,10 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright (C) 2021-2026 BingHeng Li <bingheng-li@outlook.com> */
 
-/* user/msyscheck.c —— 用 libc 接口复压阶段 3~8 的 syscall
+/* user/msyscheck.c —— 用 libc 接口复压内核的 syscall
  *
  * 与 user/ 下那批裸 ecall 测试程序的关系：**不是重复，是换一个客户**。
- * 前八个阶段的验证全部由我们自己手写的 ecall 发起，参数怎么摆、缓冲区多大、
+ * 裸 ecall 那批验证全部由我们自己手写的调用发起，参数怎么摆、缓冲区多大、
  * 调用顺序如何，都是按内核实现方便的样子写的。musl 不迁就任何人：
  *   - stdio 走 writev/readv，不是 write/read；
  *   - opendir/readdir 对 getdents64 的缓冲区大小与 d_reclen 有自己的假设；
@@ -15,9 +15,8 @@
  *
  * 约定与其它测试一致：逐条打 PASS/FAIL，末尾一行汇总，退出码 = 失败条数。
  *
- * 浮点格式化（%f/%e/%g）现在可以用：内核补上 FP 上下文之后 sstatus.FS 置成
- * Initial，musl 的 fmt_fp 走到 scalbn 里那几条 fmul.d 不再触发非法指令。
- * 这条限制本身由 test_fp_is_trapped() 显式验证，不要顺手在别处踩。
+ * 浮点格式化（%f/%e/%g）可以用：内核保存 FP 上下文，进 U 态时 sstatus.FS 置成 Initial。
+ * 这一点由 test_fp_printf() 显式验证。
  */
 
 #include <stdio.h>
@@ -314,10 +313,7 @@ static void test_misc(void)
 /* ---------------- 浮点：现在能正常格式化 ---------------- */
 static void test_fp_printf(void)
 {
-    /* 这条断言原本是反面的（"printf(%f) 必然被 SIGILL 杀"），用来钉住"内核跑不了
-     * 浮点"这条限制。BusyBox 进来之后内核补上了真正的 FP 上下文，限制解除，判据翻面。
-     *
-     * 仍然放在子进程里做：万一哪天 FS 又被关回 Off，这里会是 SIGILL 而不是把整个
+    /* 放在子进程里做：万一哪天 FS 又被关回 Off，这里会是 SIGILL 而不是把整个
      * 测试程序带走，父进程还能如实报出来。浮点算得对不对由 mfptest 那套负责。 */
     pid_t pid = fork();
     if (pid == 0)

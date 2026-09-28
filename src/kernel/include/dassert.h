@@ -14,4 +14,4 @@
         panic("%s\t%s\t%d",#expr,__FILE__,__LINE__);	\
     }))
 
-#endif
+#endif /* _ASSERT_H_ */

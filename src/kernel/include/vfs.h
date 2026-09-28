@@ -107,12 +107,11 @@ struct inode
     uint64_t            i_size;     /* 文件大小（字节）*/
     uint32_t            i_mode;     /* 文件类型和权限（S_IFREG/S_IFDIR | 权限位）*/
     inode_operations_t *i_op;       /* inode 操作函数集（目录树操作：create/lookup 等）*/
-    file_operations_t  *i_fop;      /* 文件操作函数集（I/O 操作：read/write/open 等）
-                                     * 由底层文件系统在 alloc_inode 时设置；
-                                     * vfs_open 将其复制到 file->f_op */
+    /* 文件操作函数集（read/write/open 等），底层文件系统在 alloc_inode 时设置，vfs_open 复制到 file->f_op */
+    file_operations_t  *i_fop;
     super_block_t      *i_sb;       /* 所属超级块 */
     dentry_t           *i_dentry;   /* 关联的目录项（FAT 无硬链接，单指针足够）*/
-    void               *i_private;  /* 底层文件系统私有数据（如路径字符串）*/
+    void               *i_private;  /* 底层文件系统私有数据（fatfs、devfs 目前都不用）*/
 };
 
 /* ============================================================
@@ -129,7 +128,7 @@ struct inode
  *   d_ref > 0  —— 正在被使用，一定不在 LRU 上
  *   d_ref == 0 —— 未被使用，挂在 LRU 上，但对象仍然活着、仍挂在父目录的
  *                 d_subdirs 里、仍能被 dentry_lookup 命中并"复活"
- * 由此可推出一条被反复用到的不变式：**LRU 上的目录项一定是叶子**——它没有子项
+ * 由此可推出一条被反复用到的不变式：LRU 上的目录项一定是叶子——它没有子项
  * （否则子项会给它贡献引用），也没有外部持有者。
  * ============================================================ */
 struct dentry
@@ -139,28 +138,21 @@ struct dentry
     dentry_t           *d_parent;   /* 父目录项（根目录的 d_parent 指向自身）*/
     struct list_head    d_subdirs;  /* 子目录项链表头——所有子项通过各自的 d_child 挂入 */
     struct list_head    d_child;    /* 此目录项在父目录 d_subdirs 链表中的节点 */
-    struct list_head    d_lru;      /* 此目录项在全局 dcache LRU 链表中的节点；
-                                     * 孤立（list_empty 为真）表示不在 LRU 上 */
+    /* 此目录项在全局 dcache LRU 链表中的节点；孤立（list_empty 为真）表示不在 LRU 上 */
+    struct list_head    d_lru;
     dentry_operations_t *d_op;      /* 目录项操作函数指针（可为 NULL）*/
     int                 d_ref;      /* 引用计数；归零时进入 LRU 或被直接回收 */
-    vfsmount_t         *d_mounted;  /* 若此目录是某文件系统的挂载点，指向对应 vfsmount；
-                                     * 否则为 NULL */
+    vfsmount_t         *d_mounted;  /* 若此目录是挂载点，指向对应 vfsmount，否则为 NULL */
 };
 
-/* file 的种类：决定 syscall 壳该不该为它抢 vfs_big_lock。
- * vfs_big_lock 是一把全局睡眠信号量，只用来保护 dentry/inode 缓存树与 FatFS 卷
- * 内部状态（FatFS 本身不可重入）；管道/设备类 file 的 read/write 会自己阻塞
- * （自带锁或 waitq），若也被套在 vfs_big_lock 里，"持锁睡眠"会让此后任何进程碰
- * 任何文件 syscall 都卡死在同一把锁上。
- * 这不是 Linux 的做法——Linux 没有这样一把全局锁，锁天然按对象分散（pipe 自带
- * mutex、文件是 per-inode），也就不需要这个判据；这里只是给 vfs_big_lock 这个
- * DStarOS 自造的粗粒度简化打的一块补丁。不能用 f_inode==NULL 判断，因为
- * 将来的 /dev/console 会是带 inode 的真 VFS 节点，但 read 同样阻塞。 */
+/* file 的种类：决定 syscall 壳该不该为它抢 vfs_big_lock。管道/设备类 file 的 read/write
+ * 会自己阻塞，套在这把全局睡眠锁里就是持锁睡眠，此后任何文件 syscall 都会卡在同一把锁上。
+ * 不能用 f_inode==NULL 判断：/dev/console 是带 inode 的 devfs 节点，read 同样阻塞。 */
 typedef enum file_kind
 {
     FILE_KIND_VFS = 0,   /* 走 VFS/FatFS 的普通文件与目录：必须持 vfs_big_lock */
     FILE_KIND_PIPE,      /* 管道：自带 pipe->lock，不碰 vfs_big_lock */
-    FILE_KIND_DEVICE,    /* 内核虚构的字符设备（console、TTY）*/
+    FILE_KIND_DEVICE,    /* 字符设备（TTY、/dev/null、/dev/zero）*/
 } file_kind_t;
 
 /* ============================================================
@@ -194,8 +186,7 @@ struct vfsmount
 {
     char             *mnt_path;          /* 挂载点路径字符串（如 "/"、"/mnt/fat"）*/
     super_block_t    *mnt_sb;            /* 对应的超级块 */
-    dentry_t         *mnt_host_dentry;   /* 宿主文件系统中的挂载点 dentry
-                                          * （用于 ".." 跨挂载点向上回溯）*/
+    dentry_t         *mnt_host_dentry;   /* 宿主文件系统中的挂载点 dentry（".." 跨挂载点回溯用）*/
     struct list_head  mnt_list_linker;   /* 全局挂载点链表节点 */
 };
 
@@ -206,8 +197,8 @@ struct vfsmount
 struct file_system_type
 {
     const char         *name;           /* 文件系统名称（如 "fatfs"，不能含 '.'）*/
-    dentry_t          *(*mount)(        /* 挂载回调：创建超级块、根 inode、根 dentry，
-                                         * 返回根 dentry；失败返回 NULL */
+    /* 挂载回调：创建超级块、根 inode、根 dentry，返回根 dentry；失败返回 NULL */
+    dentry_t          *(*mount)(
         file_system_type_t *type,
         const char *source,
         void *data);
@@ -262,7 +253,7 @@ struct file_operations
     off_t   (*lseek)(file_t *file, off_t offset, int whence);     /* 移动读写位置 */
     int     (*ioctl)(file_t *file, int cmd, void *arg);           /* 设备控制操作 */
     /* 读目录项：把尽可能多的 struct linux_dirent64 变长记录紧凑填进 buf。
-     * 放在 file 层而不是 inode 层，是因为"读到第几项"是**打开的目录实例**的属性——
+     * 放在 file 层而不是 inode 层，是因为"读到第几项"是打开的目录实例的属性——
      * 同一个目录被两个进程同时打开必须有两个独立游标（Linux 同理，放在
      * file_operations.iterate_shared）。
      * @return 已填字节数；0 表示目录已读完（EOF）；负值为错误码。
@@ -277,7 +268,7 @@ extern dentry_t   *vfs_root_dentry;
 extern vfsmount_t *vfs_root_mount;
 
 /* ============================================================
- * 引用计数导出接口（供 proc.c、fatfs_vfs.c 等使用）
+ * 引用计数导出接口（供 proc.c 与自检用例使用）
  * ============================================================ */
 void dentry_get_pub(dentry_t *d);   /* 引用计数 +1 */
 void dentry_put_pub(dentry_t *d);   /* 引用计数 -1，归零时进入 LRU 或回收 */
@@ -286,10 +277,8 @@ void dentry_put_pub(dentry_t *d);   /* 引用计数 -1，归零时进入 LRU 或
  * 目录项缓存（dcache）：可观测性与内存压力接口
  * ============================================================ */
 
-/* LRU 上允许驻留的未使用目录项数量。单条目成本约
- * dentry(80) + d_name(~16) + inode(64) + fatfs 私有数据(256) ≈ 420 字节，
- * 128 条约 54 KB——占 6 MB 物理内存的 0.9%。超过 MAX 时在 dentry_put 里
- * 顺手回收到 LOW（批量回收，避免"超一个收一个"的抖动）。 */
+/* LRU 上允许驻留的未使用目录项数量。单条目约 dentry + d_name + inode ≈ 180 字节，
+ * 128 条约 22 KB。超过 MAX 时在 dentry_put 里批量回收到 LOW，避免"超一个收一个"的抖动。 */
 #define DCACHE_MAX_UNUSED   128
 #define DCACHE_LOW_WATER     96
 

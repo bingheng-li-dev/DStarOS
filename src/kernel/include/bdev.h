@@ -34,4 +34,4 @@ int     bdev_register(bdev_t *dev, uint32_t id);
 bdev_t *bdev_get(uint32_t id);
 int     bdev_open(bdev_t *dev);
 
-#endif
+#endif /* _BDEV_H_ */

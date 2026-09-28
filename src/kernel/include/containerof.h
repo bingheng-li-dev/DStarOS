@@ -4,13 +4,10 @@
 #ifndef _CONTAINEROF_H_
 #define _CONTAINEROF_H_
 
-/*
- * ContainerOf宏。
- * @param ptr: 指向成员的指针。
- * @param type: 成员所嵌入的容器结构体类型。
- * @param member: 结构体中的成员名。
+/**
+ * @brief 由成员指针反推容器结构体指针（同 Linux 的 container_of）
  */
 #define getContainer(ptr, type, member) \
     ((type *)((char *)(ptr) - (unsigned long)(&((type *)0)->member)))
 
-#endif
+#endif /* _CONTAINEROF_H_ */

@@ -11,6 +11,9 @@
 #include "signal.h"
 #include "proc.h"
 
+/**
+ * @brief 从管道读最多 len 字节到 buf
+ */
 ssize_t pipe_read(file_t *file, void *buf, size_t len)
 {
     pipe_t *p = (pipe_t *)file->f_private;
@@ -31,11 +34,9 @@ ssize_t pipe_read(file_t *file, void *buf, size_t len)
         /* 可中断睡眠：不这样的话卡在空管道上的进程 kill 不动，
          * 要等到真有人写管道才会醒 */
         waitq_prepare_interruptible(&p->wq_read);
-        /* **这次检查夹在"置 INTERRUPTIBLE"和"睡下去"之间，不能省，也不能挪到
-         * sched_schedule() 后面**：signal_send 的顺序是"置 pending → 读 proc_state"，
-         * 本侧的顺序是"置 proc_state → 读 pending"，两者交叉才能保证至少有一方
-         * 看见对方。只在睡醒之后查的话，发信号方可能在本任务写 INTERRUPTIBLE
-         * 之前读到 RUNNING 而跳过 wakeup，本任务随即睡死，kill 不再生效。 */
+        /* 这次检查夹在"置 INTERRUPTIBLE"和"睡下去"之间，不能省也不能挪后：signal_send
+         * 是"置 pending → 读 proc_state"，本侧是"置 proc_state → 读 pending"，交叉才保证
+         * 至少一方看见对方；只在睡醒后查，发信号方可能读到 RUNNING 而跳过 wakeup。 */
         if (signal_pending(proc_get_current()))
         {
             waitq_remove(&p->wq_read, proc_get_current());
@@ -44,13 +45,12 @@ ssize_t pipe_read(file_t *file, void *buf, size_t len)
             return ENO24_RESTARTSYS;
         }
         spinlock_release(&p->lock, p_lock_key);
-        /* 被 pipe_write 或 pipe_release（写端）唤醒后从这里继续，回到循环开头
-         * 重新检查条件——可能被虚假唤醒或被别的读者抢先取走，不能想当然直接成功 */
+        /* 被唤醒不代表条件成立（可能被别的读者抢先），回循环重检 */
         sched_schedule();
         /* 重新取锁：赋值给循环外的 key，不能再声明一个同名局部把它遮蔽掉 */
         p_lock_key = spinlock_acquire(&p->lock);
 
-        /* 是信号把我们唤醒的：**必须先摘链**再走，否则这个节点会一直挂在
+        /* 是信号把我们唤醒的：必须先摘链再走，否则这个节点会一直挂在
          * wq_read 上（见 sync.h waitq_prepare_interruptible 的说明） */
         if (signal_pending(proc_get_current()))
         {
@@ -87,6 +87,9 @@ ssize_t pipe_read(file_t *file, void *buf, size_t len)
     return (ssize_t)n; /* 短读合法，不循环补满 */
 }
 
+/**
+ * @brief 向管道写入最多 len 字节
+ */
 ssize_t pipe_write(file_t *file, const void *buf, size_t len)
 {
     pipe_t *p = (pipe_t *)file->f_private;
@@ -132,8 +135,7 @@ ssize_t pipe_write(file_t *file, const void *buf, size_t len)
             return ENO24_RESTARTSYS;
         }
         spinlock_release(&p->lock, p_lock_key);
-        /* 被 pipe_read 或 pipe_release（读端）唤醒后从这里继续，回到循环开头
-         * 重新检查条件——可能被虚假唤醒或被别的写者抢先占用了腾出的空间 */
+        /* 被唤醒不代表条件成立（可能被别的写者抢先），回循环重检 */
         sched_schedule();
         /* 重新取锁：赋值给循环外的 key，不能再声明一个同名局部把它遮蔽掉 */
         p_lock_key = spinlock_acquire(&p->lock);
@@ -220,6 +222,9 @@ static file_operations_t pipe_write_fops = {
     .close = pipe_write_close,
 };
 
+/**
+ * @brief 创建一对匿名管道 file（读端 + 写端），共享同一个新建的 pipe_t
+ */
 int pipe_alloc(file_t **rfile, file_t **wfile)
 {
     pipe_t *p = slab_cache_alloc(pipe_cache);

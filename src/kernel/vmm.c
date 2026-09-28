@@ -14,22 +14,16 @@
 
 /**
  * @brief 内核页表根目录的物理页号。
- * @details 一个SV39页表项占64位，因此一页（4096字节）内存中内核页表项数组大小为512
- * [0, 255]，对应虚拟地址[0, 0x0000000000000000 ~ 0x0000003FFFFFFFFF]，被用户空间使用；
- * [256, 511]，对应虚拟地址[0xFFFFFFC000000000 ~ 0xFFFFFFFFFFFFFFFF]，被内核高位映射使用。
+ * @details Sv39 一页 512 个页表项：[0,255] 对应低半区虚拟地址，归用户空间；
+ *   [256,511] 对应 0xFFFFFFC000000000 以上，归内核高位映射。
  */
 ppn_t vmm_kernel_pgd_ppn;
 
 /**
  * @brief 保护跨进程共享物理帧（COW）状态的全局锁
- * @details 覆盖 pframe_t.reference 的读-判断-改这一整套操作，以及伴随的 PTE 改写——
- *   fork（vmm_mm_copy 建立共享）、page fault（vmm_page_fault_handler 拆分共享）、
- *   进程退出（vmm_unmap_vma 释放共享）三处都会摸同一批共享帧的 reference 计数，
- *   在只有一个 hart 真正跑用户任务时天然串行、从不需要锁；hart1 也能调度真实任务后，
- *   父子进程可能在两个 hart 上同时各自触发对同一批共享帧的 COW 操作，不加锁会导致
- *   reference 计数丢更新，页框被提前释放却还有 PTE 指向它。
- * @note 锁的顺序约定：本锁总是外层，内部调用 pmm_alloc_page()/pmm_free_pages() 时它们各自
- *   持有的 pmm_lock 是内层——只在这个方向嵌套，不会有加锁顺序反转的死锁风险。
+ * @details 覆盖 pframe_t.reference 的读-判断-改与伴随的 PTE 改写：fork、缺页拆分、
+ *   进程退出三处都会摸同一批共享帧，不加锁会丢更新，页框被提前释放却还有 PTE 指向它。
+ * @note 锁序：本锁总是外层，内部的 pmm_lock 是内层，只在这个方向嵌套。
  */
 osslock_t vmm_lock;
 
@@ -51,14 +45,13 @@ static pte_t *get_pte(ppn_t pgd_ppn, virAddr_t va, bool create, bool mmu_enabled
     ppn_t pmd_idx = PMD(va);
     ppn_t pte_idx = PTE(va);
 
-    /* 找一级页表项，pgd是一定存在的，其在进程创建时分配了内存空间 */
-    phyAddr_t pgd_pa = convert_ppn2pa(pgd_ppn); /* pgd_pa代表一级页表的物理地址 */
+    phyAddr_t pgd_pa = convert_ppn2pa(pgd_ppn);
     pte_t *pgd = mmu_enabled ? (pte_t *)pa_to_kva(pgd_pa) : (pte_t *)pgd_pa;
     if (!pte_is_valid(pgd[pgd_idx]))
     {
         if (!create)
         {
-            return NULL; /* 如果不创建新页表项，直接返回 NULL */
+            return NULL;
         }
 
         pframe_t *new_pmd_frame = pmm_alloc_page();
@@ -70,7 +63,6 @@ static pte_t *get_pte(ppn_t pgd_ppn, virAddr_t va, bool create, bool mmu_enabled
         pgd[pgd_idx] = pte_create(convert_pframe2ppn(new_pmd_frame), 0);
     }
 
-    /* 找二级页表项 */
     phyAddr_t pmd_pa = convert_ppn2pa(pgd[pgd_idx] >> PTE_PPN_OFFSET);
     pte_t *pmd = mmu_enabled ? (pte_t *)pa_to_kva(pmd_pa) : (pte_t *)pmd_pa;
     if (!pte_is_valid(pmd[pmd_idx]))
@@ -92,27 +84,19 @@ static pte_t *get_pte(ppn_t pgd_ppn, virAddr_t va, bool create, bool mmu_enabled
     phyAddr_t pte_pa = convert_ppn2pa(pmd[pmd_idx] >> PTE_PPN_OFFSET);
     pte_t *pte = mmu_enabled ? (pte_t *)pa_to_kva(pte_pa) : (pte_t *)pte_pa;
 
-    /* 返回最终的页表项指针，不存在也不需要alloc */
     if (!create && !pte_is_valid(pte[pte_idx]))
     {
         return NULL;
     }
-    return &pte[pte_idx];   /* 当create为true时，总是返回页表项地址，即使不存在 */
+    return &pte[pte_idx];
 }
 
 /**
  * @brief 建立内核高位偏移映射（Offset Mapping），将全部物理内存线性映射到高虚拟地址
- * @details 映射关系为 VA = PA + KERNEL_VA_OFFSET（0xffffffc000000000）。
- *   按内核链接脚本的分段结构分配不同 PTE 权限：
- *   - .text 段：PTE_G | PTE_R | PTE_X
- *   - .rodata 段：PTE_G | PTE_R
- *   - .data/.bss 段及剩余物理内存：PTE_G | PTE_R | PTE_W
- *
- *   此外还为 trampoline 段建立临时恒等映射（VA = PA），
- *   使 enable_mmu 之后 PC 仍在低地址时能被 MMU 正常翻译。
- *   恒等映射在 vmm_remove_identity_mapping() 中被撤销。
- * @note 此函数在 MMU 尚未启用时调用，所有页表帧访问均使用物理地址作为指针
- *       （get_pte 的 mmu_enabled 参数传 false）。
+ * @details 映射关系 VA = PA + KERNEL_VA_OFFSET，按链接脚本的分段给不同权限。
+ *   另为 trampoline 段建临时恒等映射（VA = PA），使 satp 写完、PC 还在低地址时仍能翻译；
+ *   该映射由 vmm_remove_identity_mapping() 撤销。
+ * @note 在 MMU 启用前调用，页表帧一律按物理地址访问（get_pte 的 mmu_enabled 传 false）。
  */
 static void init_kernel_offset_mapping(void)
 {
@@ -139,47 +123,27 @@ static void init_kernel_offset_mapping(void)
      */
     for (ppn_t ppn = ppn_skernel; ppn < ppn_etext; ppn++)
     {
-        /* 创建页表，根据内核虚拟地址创建对应的pgd，pmd以及pte */
         pte_t *pte = get_pte(vmm_kernel_pgd_ppn, pa_to_kva(convert_ppn2pa(ppn)), true, false);
-        /* 内核代码段可读可执行 */
-        *pte = pte_create(ppn, PTE_G | PTE_R | PTE_X); /* PTE_G表示这个映射是否对所有虚址空间有效 */
+        *pte = pte_create(ppn, PTE_G | PTE_R | PTE_X);
     }
     for (ppn_t ppn = ppn_etext; ppn < ppn_erodata; ppn++)
     {
         pte_t *pte = get_pte(vmm_kernel_pgd_ppn, pa_to_kva(convert_ppn2pa(ppn)), true, false);
-        /* 内核只读数据段只读 */
         *pte = pte_create(ppn, PTE_G | PTE_R);
     }
-    /** 从data段开始，包括bss段权限都是可读可写
-     * 值得注意的是，直到物理内存结尾而非内核结尾的部分全部加入了内核页表，并且除了RW权限外还设置了G标志位
-     * 赋予PTE_G标志位的原因如下：
-     * PTE_G（Global 位）的语义：该 PTE 对所有 ASID 有效，
-     * sfence.vma rs1, asid（按 ASID 刷 TLB）不会清除 G 位的条目，只有 sfence.vma zero, zero 才清。
-     * 通过将全部内存永久映射到高 VA 区，让内核随时可以用 pa_to_kva(pa) 访问任意物理地址
-     *
-     * 而内核以外的物理帧被分配给用户进程后会有两个映射：
-     * 内核页表有一个，内核随时可以通过 KVA 读写用户物理帧（例如 copy-on-write 时复制内容）
-     * 用户页表有一个，这个是用户进程自己的映射
-     *
-     * 如果DStarOS后续没有实现ASID（所有进程用 ASID 0 或不区分），sfence.vma 都是全刷，PTE_G 现在既无害也无益
-     * 若后续实现了 ASID 切换，G 位就能真正减少 TLB miss
-     */
+    /* 直到 KERNEL_MAP_END 的物理内存全部映进高 VA，内核随时可用 pa_to_kva(pa) 访问任意
+     * 物理帧（例如 COW 复制内容）；用户帧因此有两个映射，内核页表一个、用户页表一个。
+     * PTE_G 表示该项对所有 ASID 有效，只有 sfence.vma zero, zero 才清得掉。 */
     for (ppn_t ppn = ppn_erodata; ppn < ppn_end; ppn++)
     {
         pte_t *pte = get_pte(vmm_kernel_pgd_ppn, pa_to_kva(convert_ppn2pa(ppn)), true, false);
-        /* 内核数据段可读可写 */
         *pte = pte_create(ppn, PTE_G | PTE_R | PTE_W);
     }
 
-    /**
-     * 临时恒等映射：仅覆盖 trampoline （见ld）代码所在页（使得VA = PA）
-     * enable_mmu 后 PC 还在低地址，需要这几页能被 MMU 翻译
-     *
-     * 注意：此函数在 MMU 关闭时调用，auipc 相对寻址的结果是物理地址而非虚拟地址
-     * （offset = VMA目标 - VMA指令，runtime结果 = PA指令 + offset = PA目标）
-     * 因此不能再套 kva_to_pa()，那会再减一次 KERNEL_VA_OFFSET 得到错误值。
-     * 对比 vmm_remove_identity_mapping()：那里在 MMU 已启用后调用，拿到的才是 VA，kva_to_pa 才正确。
-     */
+    /* 临时恒等映射，只覆盖 trampoline 所在页：enable_mmu 后 PC 还在低地址，要能翻译。
+     * MMU 关闭时 auipc 相对寻址得到的就是物理地址，所以这里不能再套 kva_to_pa()——
+     * 那会再减一次 KERNEL_VA_OFFSET。vmm_remove_identity_mapping() 在 MMU 开启后调用，
+     * 拿到的才是 VA，那边用 kva_to_pa 才正确。 */
     extern char _trampoline_start[], _trampoline_end[];
     phyAddr_t tramp_pa_start = (phyAddr_t)_trampoline_start;
     phyAddr_t tramp_pa_end   = (phyAddr_t)_trampoline_end;
@@ -206,8 +170,7 @@ static void init_kernel_offset_mapping(void)
  *   置上，硬件就不再把它当指针，而是按 2 MB 粒度解释它的 PPN——所以 PA 的低 21 位
  *   必须为 0，由入口的对齐校验保证。
  *
- *   刻意不去改 get_pte() 支持大页：它在本文件里被二十来处调用，COW、缺页处理、
- *   vmm_map_vma 全走它，改它的返回语义等于把风险摊到所有路径上。
+ *   不改 get_pte() 支持大页：它在本文件有二十来处调用，改返回语义等于把风险摊到所有路径。
  * @note 必须复用 pte_create() 而不是自己拼 PTE。叶 PTE 少了 A 位，在没有 Svadu
  *   扩展的 U74 上一访问就是 page fault，见 memtype.h 里 pte_create() 的注释。
  */
@@ -255,17 +218,11 @@ int vmm_map_2m_page(ppn_t pgd_ppn, virAddr_t va, phyAddr_t pa, pteflg_t flags, b
  * @brief 把一段设备寄存器区（MMIO）用 2 MB 大页映射进内核高半区
  * @param[in] pa_start 起始物理地址（含），必须按 2 MB 对齐
  * @param[in] pa_end   结束物理地址（不含），必须按 2 MB 对齐
- * @details 设备区沿用与 RAM 相同的偏移 KVA = PA + KERNEL_VA_OFFSET，于是
- *   pa_to_kva() 对设备寄存器地址直接可用，不需要第二套换算；两段地址不重叠，
- *   理由见 memtype.h 里 MMIO_PHYS_BASE 的注释。
- *
- *   权限固定为 PTE_G | PTE_R | PTE_W：
- *   1. 不给 PTE_X——设备区不应该可执行；
- *   2. 不需要任何 cache 属性位——Sv39 的 PTE 里没有这种位，设备区的
- *      non-cacheable 由 PMA 决定，建普通读写映射即可（这点比 ARM 省事）。
- * @note 在 MMU 启用前调用，且必须排在 init_kernel_offset_mapping() 之后——
- *   内核根页表是那个函数分配的。映射失败一律 panic：设备区映射不上，
- *   后面的串口与 SD 驱动一个都跑不起来，没有可降级的形态。
+ * @details 设备区沿用与 RAM 相同的偏移，pa_to_kva() 直接可用；两段地址不重叠，理由见
+ *   memtype.h 的 MMIO_PHYS_BASE。权限固定 PTE_G | PTE_R | PTE_W：不给 PTE_X；
+ *   cache 属性由 PMA 决定，Sv39 的 PTE 里没有对应位。
+ * @note 在 MMU 启用前、且在 init_kernel_offset_mapping() 之后调用（内核根页表由它分配）。
+ *   失败一律 panic：设备区映射不上，串口与 SD 驱动都起不来。
  */
 void vmm_map_mmio_range(phyAddr_t pa_start, phyAddr_t pa_end)
 {
@@ -321,16 +278,12 @@ void vmm_init(void)
 /**
  * @brief 读若干已知的设备寄存器，验证 MMIO 映射确实建立起来了
  * @details 证据互相独立，坏在哪一层就停在哪一组：
- *   1. **页表项**：设备 VA 的第 1 级 PTE，确认是 2 MB 叶 PTE、PPN 正确、无 X；
- *   2. **通路判据**：QEMU 读 CLINT mtime（两次必不同）；VF2 读 SD 控制器 VERID
- *      （高 16 位固定 0x5342），顺带读出 U-Boot 留下的时钟/传输模式状态；
- *   3. **UART 身份**（仅 VF2）：CTR(+0xfc) 是 DesignWare 固定值 0x44570110；
- *   4. **LSR**：只打印不判定。
- *
- *   ⚠️ 板上不读 CLINT：OpenSBI 用 PMP 把它划成 M 态独占，S 态读是访问异常（实测）。
- *   ⚠️ 不拿 THRE=1 当判据：真串口发送期间 THRE/TEMT 都是 0（实测 LSR=0x00、
- *   USR=0x03），只有 QEMU 瞬间发完的虚拟串口才恒为 1。
- * @note **只读，且避开有副作用的寄存器**：不读 UART +0x00（RBR，会弹接收 FIFO）、
+ *   1. 页表项：设备 VA 的第 1 级 PTE，确认是 2 MB 叶 PTE、PPN 正确、无 X；
+ *   2. 通路判据：QEMU 读 CLINT mtime（两次必不同）；VF2 读 SD 控制器 VERID（高 16 位固定
+ *      0x5342），顺带读出 U-Boot 留下的时钟/传输模式状态；
+ *   3. UART 身份（仅 VF2）：CTR(+0xfc) 是 DesignWare 固定值 0x44570110；
+ *   4. LSR 只打印不判定——真串口发送期间 THRE/TEMT 都是 0，只有 QEMU 的虚拟串口才恒为 1。
+ * @note 只读，且避开有副作用的寄存器：不读 UART +0x00（RBR，会弹接收 FIFO）、
  *   +0x08（IIR，会清中断标识）。必须在 trap_init() 之后调用：映射不对时这里是一发
  *   内核缺页或访问异常，stvec 没装好就只剩静默。
  */
@@ -350,11 +303,10 @@ void vmm_probe_mmio(void)
            (long)PMD(base), pmd_pte ? (unsigned long)*pmd_pte : 0UL);
 
 #if defined(VF2)
-    /* 板上不读 CLINT：OpenSBI 用 PMP 把它划成 M 态独占，S 态一读就是访问异常（实测）。
-     * 判断能不能读的规则是：U-Boot proper 跑在 S 态，它用过的外设 S 态必然可访问——
-     * sdio1（fatload mmc）在名单里，CLINT 不在（S 态 U-Boot 走 SBI 定时器）。
-     * VERID 高 16 位是 DesignWare MMC 的固定格式 0x5342；CLKENA/CLKDIV 顺带看
-     * U-Boot 把卡时钟留在了什么状态，那是 SD 驱动"能不能直接接手"的头号未知。 */
+    /* 板上不读 CLINT：OpenSBI 用 PMP 把它划成 M 态独占，S 态一读就是访问异常。
+     * 判断能不能读的规则：U-Boot proper 跑在 S 态，它用过的外设 S 态必然可访问——
+     * sdio1（fatload mmc）在名单里，CLINT 不在。VERID 高 16 位是固定的 0x5342；
+     * CLKENA/CLKDIV 顺带看 U-Boot 把卡时钟留在什么状态。 */
     virAddr_t mmc = pa_to_kva((phyAddr_t)SDMMC_PHYS_BASE);
     printf("mmio: sdmmc verid(+6c)=0x%08x usrid(+68)=0x%08x hcon(+70)=0x%08x (verid should be 0x5342xxxx)\n",
            *(volatile uint32_t *)(mmc + 0x6c), *(volatile uint32_t *)(mmc + 0x68),
@@ -371,10 +323,8 @@ void vmm_probe_mmio(void)
            (t2 != t1) ? "ticking, MMIO path OK" : "STUCK");
 
 #endif
-    /* 这一批只在 VF2 上读。⚠️ QEMU virt 的 16550 MMIO 区**只有 8 字节**
-     * （virt.c 里 serial_mm_init 按 regshift 0 注册），读 +0x0c 及以后落在未分配
-     * 物理地址上，拿到的是**访问异常**（不是缺页）——实测踩过一次。
-     * JH7110 那颗的 reg 长 0x10000，没有这个问题。 */
+    /* 这一批只在 VF2 上读：QEMU virt 的 16550 MMIO 区只有 8 字节（serial_mm_init 按
+     * regshift 0 注册），读 +0x0c 及以后落在未分配物理地址上，拿到的是访问异常而非缺页。 */
 #if defined(VF2)
     printf("mmio: uart w32 +04=0x%08x +0c=0x%08x +14=0x%08x +18=0x%08x +7c=0x%08x\n",
            *(volatile uint32_t *)(base + 0x04), *(volatile uint32_t *)(base + 0x0c),
@@ -388,8 +338,8 @@ void vmm_probe_mmio(void)
            *(volatile uint8_t *)(base + 0x05), *(volatile uint8_t *)(base + 0x14));
 #endif
 
-    /* 访问宽度也要分平台，不只是偏移：QEMU 那颗是字节宽寄存器，按 32 位读
-     * base+5 就是一发跨界的非对齐访问（实测拿到访问异常）。 */
+    /* 访问宽度也要分平台，不只是偏移：QEMU 那颗是字节宽寄存器，按 32 位读 base+5
+     * 就是一发跨界的非对齐访问。 */
 #if defined(VF2)
     uint32_t lsr = *(volatile uint32_t *)(base + UART_REG_OFF(UART_LSR));
 #else
@@ -403,10 +353,8 @@ void vmm_probe_mmio(void)
 #if DEBUG_BRINGUP
 /**
  * @brief 打印 MMU 开启所依赖的两条关键映射
- * @details satp 一写，PC 先靠 trampoline 的恒等映射继续在低地址执行，再跳到高 VA 的
- *   _start_virtual。这两条 PTE 任何一条不对，表现都是"写完 satp 就没声了"——
- *   那时还没有 trap handler，异常打到 stvec=0 上，连 panic 都吐不出来，
- *   与"vmm_init 自己卡在循环里"从串口上完全无法区分。
+ * @details satp 一写，PC 先靠 trampoline 的恒等映射在低地址执行，再跳到高 VA 的 _start_virtual。
+ *   这两条 PTE 任何一条不对，表现都是"写完 satp 就没声了"：那时 stvec 还是 0，连 panic 都吐不出来。
  * @note 必须在 MMU 开启之前调用（get_pte 的 mmu_enabled 传 false）。
  */
 void vmm_dump_boot_mappings(void)
@@ -460,8 +408,8 @@ vma_t *vmm_vma_get(mm_t *mm, virAddr_t va)
 /**
  * @brief 分配并初始化一个进程地址空间描述符（mm_t）
  * @return 成功返回新的 mm_t 指针；内存不足返回 NULL
- * @note 新建的 mm_t 共享内核页表（pgd_ppn = vmm_kernel_pgd_ppn）。
- *   用户进程独立页表阶段需在此处分配新 PGD 并复制内核半段（PGD[256..511]）。
+ * @note 这里只把 pgd_ppn 置成内核页表。用户进程的独立 PGD 由 proc.c 的 create_user_mm()
+ *   与 copy_proc_mm() 在此之后分配，并复制内核半段 PGD[256..511]。
  */
 mm_t *vmm_mm_create(void)
 {
@@ -530,7 +478,6 @@ void vmm_vma_insert(mm_t *mm, vma_t *vma)
         vma_t *cur = list_entry(pos, vma_t, vma_list_linker);
         if (vma->vm_start < cur->vm_start)
         {
-            /* 插入到 cur 之前，保持 vm_start 升序 */
             list_add_tail(&vma->vma_list_linker, pos);
             mm->map_count++;
             return;
@@ -631,19 +578,18 @@ int vmm_map_vma(mm_t *mm, vma_t *vma)
 }
 
 /**
- * @brief 把一个**已存在**的物理帧映到用户地址空间的固定虚拟地址上
+ * @brief 把一个已存在的物理帧映到用户地址空间的固定虚拟地址上
  * @param[in] mm   目标地址空间
  * @param[in] va   目标虚拟地址（必须页对齐）
  * @param[in] ppn  要映射的物理页帧号
  * @param[in] prot VMP_R/W/X 组合，转成 PTE 标志时始终带 PTE_U
  * @retval ENO0_NO_ERROR   成功
  * @retval ENO1_NOMORE_MEM 建中间页表时物理内存不足
- * @note 与 vmm_map_vma() 的区别是**不分配新帧**，用于把内核准备好的共享页
+ * @note 与 vmm_map_vma() 的区别是不分配新帧，用于把内核准备好的共享页
  *   （目前只有 sigpage）塞进每个用户地址空间。
- * @note 与 vmm_map_vma() 一样**每建立一次映射就 reference++**：拆除侧
- *   （vmm_unmap_range）是按映射逐一递减、归零即 pmm_free_pages() 的，这里不加就会出现
- *   "映射了 N 份、只记了 1 份"，第一个进程退出就把这页还给 PMM，其余进程的
- *   PTE 当场变成指向一页随时会被别人拿走的内存。
+ * @note 与 vmm_map_vma() 一样，每建立一次映射就 reference++：拆除侧按映射逐一递减、
+ *   归零才还给 PMM。不加就会"映射了 N 份只记 1 份"，第一个进程退出就把这页还掉，
+ *   其余进程的 PTE 指向一页随时会被别人拿走的内存。
  */
 int vmm_map_fixed_page(mm_t *mm, virAddr_t va, ppn_t ppn, pgprot_t prot)
 {
@@ -782,31 +728,12 @@ void vmm_mm_destroy(mm_t *mm)
 }
 
 /**
- * @brief 处理用户空间页错误（懒分配 + 写时复制拆分）
- * @param[in] badva      触发页错误的虚拟地址（来自 stval/sbadaddr 寄存器）
- * @param[in] fault_type 错误类型：0 = 指令取指页错误，1 = 读页错误，2 = 写页错误
- * @details 处理流程：
- *   1. 从当前进程（proc_get_current()）获取 mm_t；内核线程的 mm 为 NULL，视为内核页错误直接 panic。
- *   2. 通过 vmm_vma_get() 查找包含 badva 的 VMA；未找到表示非法访问，panic（segfault）。
- *   3. 权限检查：写操作要求 VMP_W，取指要求 VMP_X；不满足则 panic（segfault）。
- *   4. 写故障且该 va 已有有效 PTE：说明是 fork 时被 vmm_mm_copy() 降权的共享页，
- *      走 COW 拆分——reference==1（对面已放手）原地补回可写位；否则分配新帧、
- *      拷贝内容、旧帧 reference--，新 PTE 指向新帧。
- *   5. 其余情况（该 va 从未被映射过）：分配新物理帧，清零，建立 PTE。
- *   最后统一 tlb_flush_va() 刷新。
- * @note 此函数由 trap.c 中的 trap_handler() 调用，运行在中断上下文中（中断已关闭）。
- *   panic 路径不会返回；正常路径返回后，异常指令将被重新执行。
- */
-/**
  * @brief 处理一次非法访问：U 态发起的只杀该进程，S 态发起的 panic
  * @param[in] badva 触发异常的虚拟地址
  * @param[in] why   诊断用的原因描述
- * @details sstatus.SPP 记录的是进入本次 trap 之前的特权级，进入缺页处理到这里
- *   之间没有发生嵌套 trap，所以它就是"谁踩的这一下"。用户程序踩野指针是它自己的
- *   事，不该拖垮内核；内核踩了才说明是内核 bug，只能 panic。
- * @note 本函数不返回。退出码取 128 + SIGSEGV(11) = 139，与 shell 表示"被信号杀死"
- *   的惯例一致——本内核还没有信号机制，用这个约定值让父进程 wait4 能区分开
- *   "子进程自己 exit" 与 "子进程被杀"。
+ * @details sstatus.SPP 是进入本次 trap 之前的特权级，中间没有嵌套 trap，所以它就是
+ *   "谁踩的这一下"。
+ * @note 本函数不返回：U 态走 do_exit_signal(SIGSEGV)，S 态 panic。
  */
 static void vmm_segfault(virAddr_t badva, const char *why)
 {
@@ -826,6 +753,15 @@ static void vmm_segfault(virAddr_t badva, const char *why)
     panic("segfault");
 }
 
+/**
+ * @brief 处理用户空间页错误（懒分配 + 写时复制拆分）
+ * @param[in] badva      触发页错误的虚拟地址（来自 stval/sbadaddr）
+ * @param[in] fault_type 0 = 取指，1 = 读，2 = 写
+ * @details 找不到 VMA 或权限不符 → vmm_segfault()（U 态杀进程，S 态 panic）；
+ *   写故障且 PTE 已有效 → COW 拆分：reference == 1 原地补回可写位，否则复制新帧；
+ *   其余情况按懒分配建新页。最后统一 tlb_flush_va()。
+ * @note 由 trap.c 的 trap_dispatch() 调用，运行在关中断的 trap 上下文里。
+ */
 void vmm_page_fault_handler(virAddr_t badva, int fault_type)
 {
     pcb_t *curr = proc_get_current();
@@ -861,7 +797,6 @@ void vmm_page_fault_handler(virAddr_t badva, int fault_type)
         vmm_segfault(badva, "exec on non-exec vma");
     }
 
-    /* 将触发页错误的虚拟地址对齐到页面边界（低12位即页内偏移清零） */
     virAddr_t page_va = badva & ~(PGSIZE - 1);
     pteflg_t  flags   = vma_prot_to_pte_flags(vma->vm_flag);
 
@@ -877,7 +812,6 @@ void vmm_page_fault_handler(virAddr_t badva, int fault_type)
             ppn_t old_ppn = (*ptep) >> PTE_PPN_OFFSET;
             pframe_t *old_frame = convert_ppn2pframe(old_ppn);
 
-            /* 另一个共享该地址的进程已经复制走了，或是退出了时 */
             if (old_frame->reference == 1)
             {
 #if DEBUG_VMM_page_fault_handler
@@ -908,20 +842,11 @@ void vmm_page_fault_handler(virAddr_t badva, int fault_type)
         }
     }
 
-    /* 该 va 从未被映射过（第一次触碰）：懒分配一个全新清零页。
-     *
-     * 分配与清零放在锁外，`get_pte` 建中间级页表 + 装 PTE 放在锁内：
-     * ① `slab_alloc_page_retry()` 失败时会走 `slab_reclaim_all()`，不该把这段拖进
-     *    全局 vmm_lock；② `get_pte(..., create=true)` 会分配中间级页表，两个执行流
-     *    同时对同一 mm 缺页时必须串行，否则会各建一份中间级、后者覆盖前者。
-     *
-     * 拿到锁后**必须重新看一眼 PTE**：另一个执行流可能在我们分配那页的空档里已经
-     * 把这一页装好了。这时放掉自己那页直接用它的，否则两边各装一次、先装的那页
-     * 被覆盖后永久泄漏。
-     * @note 当前触发不到——一个 pcb_t 同一时刻只在一个 hart 上跑，而共享 mm 的只有
-     *   CLONE_VM 内核线程（proc_mm 恒为 NULL）；fork 出的用户进程各有独立 PGD，
-     *   两边各自缺页各自分配本来就是正确行为。等真出现共享 mm 的多线程用户进程
-     *   （musl 起线程）就会变成活的，所以先把它按正确的形状写好。 */
+    /* 该 va 从未被映射过：懒分配一个清零页。
+     * 分配与清零放锁外（slab_alloc_page_retry 失败会走 slab_reclaim_all，不该拖进 vmm_lock），
+     * get_pte 建中间级 + 装 PTE 放锁内（两个执行流同时缺页会各建一份中间级、后者覆盖前者）。
+     * 拿到锁后要重看一眼 PTE：别的执行流可能已经在这空档里装好了，这时放掉自己那页用它的，
+     * 否则先装的那页被覆盖、永久泄漏。 */
     pframe_t *frame = slab_alloc_page_retry();
     if (!frame)
     {
@@ -963,7 +888,7 @@ void vmm_page_fault_handler(virAddr_t badva, int fault_type)
  *   page fault handler 里发现 reference==1，原地补回可写位，不会造成数据损坏。
  * @details 对 src 的每个 VMA：
  *   1. 创建相同范围和权限的新 vma_t 插入 dst；
- *   2. 遍历区间内每个已映射页（PTE 有效），**不分配新帧、不 memcpy**：
+ *   2. 遍历区间内每个已映射页（PTE 有效），不分配新帧、不 memcpy：
  *      递增该物理帧的 reference，src 与 dst 的 PTE 都清除 PTE_W 指向同一帧；
  *   3. src 的 PTE 是父进程正在使用的页表条目，降权后必须 tlb_flush_va()，
  *      否则父进程可能凭 TLB 里缓存的旧"可写"翻译绕过缺页异常，直接写坏
@@ -1025,12 +950,9 @@ int vmm_mm_copy(mm_t *dst, mm_t *src)
 #if DEBUG_PTE_AD_PROBE
 /**
  * @brief 实测本平台是否由硬件自动置位 PTE 的 A（访问）/ D（脏）标志
- * @details RISC-V 特权规范允许两种实现：硬件在页表遍历时自动写回 A/D，
- *   或者硬件不写、访问 A=0 的页时抛缺页异常交由软件置位。时钟（二次机会）
- *   置换算法完全依赖前者，因此动手前必须实测而不能照规范假设。
- *
- *   取一个刚分配的物理页（内核偏移映射保证它有叶子 PTE），依次观察四个时刻的
- *   A/D 位：分配清零之后、手工清零并刷 TLB 之后、一次读访问之后、一次写访问之后。
+ * @details 规范允许两种实现：硬件在页表遍历时自动写回 A/D，或硬件不写、访问 A=0 的页时
+ *   抛缺页交由软件置位。时钟置换算法完全依赖前者，所以要实测而不能照规范假设。
+ *   取一个刚分配的物理页，依次观察四个时刻的 A/D：分配后、手工清零并刷 TLB 后、读后、写后。
  * @note 若本平台是软件管理 A 位，第三步的读访问会直接触发缺页异常——
  *   打印顺序已保证在那之前能看到前两条输出，据此即可判断。
  */

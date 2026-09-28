@@ -3,14 +3,13 @@
 
 /* user/mrootfs.c —— 验证宿主机造的 rootfs 镜像真的被内核读到了
  *
- * 这是阶段 9 的关键里程碑：在此之前，根文件系统永远是内核启动时 f_mkfs 现格式化的
- * 一张空盘，所有文件都是测试程序自己造的；从这一步起，内容来自 tools/build_rootfs.sh
- * 在宿主机上写好、由 QEMU 的 -device loader 搬进 rootfs 预留区的 FAT 镜像。
+ * 根文件系统的内容来自 tools/build_rootfs.sh 在宿主机上写好、由 QEMU 的 -device loader
+ * 搬进 rootfs 预留区的 FAT 镜像。
  *
  * 三个层次各验一条，任何一条挂掉都说明通路断在不同的地方：
  *   1. 目录项读得出来  —— FAT 结构被 FatFS 正确解析（含长文件名）；
  *   2. 文件内容读得出来 —— 数据簇的定位与 disk_read 的偏移算对了；
- *   3. ELF 魔数对得上   —— 二进制没有被截断或错位，Step 7 的 exec 才有意义。
+ *   3. ELF 魔数对得上   —— 二进制没有被截断或错位，exec 才有意义。
  *
  * **必须在装载了镜像的情况下跑**（scripts/run.sh 会在 build/rootfs.img 存在时自动加
  * -device loader）。没装载时内核会 f_mkfs 出一张空盘，这里的断言会如实报 FAIL——

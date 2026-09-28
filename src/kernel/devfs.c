@@ -11,13 +11,9 @@
 #include "linux_abi.h"
 #include "console.h"
 
-/* devfs：给 FAT 根文件系统打的补丁——FAT 存不下设备节点，这不是 VFS 的限制，
- * 是这一个文件系统的限制，所以造一个不落地到任何真实存储的合成文件系统，挂在
- * /dev 下，让设备的存在与否不再依赖挂载在 / 上的是哪个文件系统。
- * 设备集合固定且很小（4 个），挂载时一次性把全部子 dentry 建好、挂进 /dev
- * 根 dentry 的 d_subdirs（dentry_create 传非空 parent 会自动 list_add 进去），
- * 不需要实现 i_op->lookup——vfs_lookup 走内存缓存命中路径就能找到它们。
- * 真正支持运行时注册/注销设备的动态 devfs，留到真有这个需求时再做。 */
+/* devfs：FAT 存不下设备节点，所以造一个不落盘的合成文件系统挂在 /dev。
+ * 设备集合固定（4 个），挂载时一次建好全部子 dentry，vfs_lookup 走缓存命中路径
+ * 就能找到，不实现 i_op->lookup；运行时注册/注销设备留待有需求时再做。 */
 
 /* ============================================================
  * /dev/null、/dev/zero
@@ -45,12 +41,8 @@ static ssize_t devzero_read(file_t *f, void *buf, size_t len)
     return (ssize_t)len;
 }
 
-/* vfs_open() 构造 file_t 时无条件把 f_kind 设成 FILE_KIND_VFS（见 vfs.c）——
- * /dev/null、/dev/zero 的读写都不阻塞，f_kind 留 FILE_KIND_VFS 本可以不出事，
- * 但仍然改成 FILE_KIND_DEVICE：这两个 file 没有真实 inode 背后的数据，语义上
- * 就是设备而不是普通文件，混在 FILE_KIND_VFS 里会让 sys_lseek 之类的壳误以为
- * 它们可以 seek（vfs_lseek 的 SEEK_END 会去解引用 i_size，devfs 的 inode 从
- * 未维护这个字段，结果不可预期）。 */
+/* vfs_open() 把 f_kind 一律设成 FILE_KIND_VFS，这里改标 FILE_KIND_DEVICE：devfs 的
+ * inode 不维护 i_size，按普通文件处理会让 lseek(SEEK_END) 读到无意义的值。 */
 static int devnull_open(inode_t *inode, file_t *file, int mode)
 {
     (void)inode;
@@ -89,18 +81,14 @@ static const devfs_entry_t devfs_entries[] = {
 };
 #define DEVFS_ENTRY_COUNT (sizeof(devfs_entries) / sizeof(devfs_entries[0]))
 
-/* 每次 open("/dev") 独立的读游标：next_index 0/1 对应合成的 "."/".."，
- * 2.. 对应 devfs_entries[] 里的真实设备，放在 file->f_private 而不是全局状态——
- * 两个进程各自 opendir("/dev") 必须有独立游标（同一目录被两个进程同时打开）。 */
+/* 每次 open("/dev") 独立的读游标，放在 f_private：next_index 0/1 是合成的 "."/".."，
+ * 2.. 对应 devfs_entries[]。两个进程同时 opendir("/dev") 必须各有游标。 */
 typedef struct devfs_dir_priv
 {
     size_t next_index;
 } devfs_dir_priv_t;
 
-/* 与 fatfs_vfs.c 的 fatfs_fill_dirent/fatfs_dirent_reclen 是同一套 struct
- * linux_dirent64 变长记录布局，但不复用那两个 static 函数——它们是围绕 FAT
- * 的 is_dir bool 写的，devfs 需要按 d_type 直接填，硬拉一个共享接口出来
- * 不值得，这里各写各的几行更简单。 */
+/* 与 fatfs_vfs.c 的 fatfs_fill_dirent 同一布局；那边按 is_dir 填，这里按 d_type 填，故不共用 */
 static void devfs_fill_dirent(void *buf, const char *name, uint8_t d_type,
                               uint64_t off, uint16_t reclen)
 {
@@ -216,8 +204,8 @@ static dentry_t *devfs_mount_cb(file_system_type_t *fst, const char *source, voi
     inode_t *root_inode = (inode_t *)slab_cache_alloc(inode_cache);
     if (!root_inode)
     {
-        return NULL; /* sb 故意不回收：devfs 只在启动时挂载一次，失败即 panic 级别的
-                      * 配置错误，省下的清理代码换不来实际收益 */
+        /* sb 不回收：devfs 只在启动时挂一次，失败即配置错误 */
+        return NULL;
     }
     memset(root_inode, 0, sizeof(inode_t));
     root_inode->i_sb   = sb;
@@ -276,6 +264,9 @@ static file_system_type_t devfs_fs_type = {
     .next    = NULL,
 };
 
+/**
+ * @brief 注册 devfs 文件系统类型，须早于 vfs_mount("/dev", "devfs", NULL)
+ */
 void devfs_register(void)
 {
     int16_t ret = register_filesystem(&devfs_fs_type);

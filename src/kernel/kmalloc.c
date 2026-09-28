@@ -30,8 +30,11 @@ static void *kmalloc_once(uint64_t size)
     return (void *)convert_pframe2kva(frame);
 }
 
-/* reclaim 必须留在这一层：pmm_alloc_pages() 内部持着 pmm_lock，就地调 slab_reclaim_all()
- * 既是对非重入锁的二次 acquire，锁序也与 cache->lock → pmm_lock 恰好相反。 */
+/**
+ * @brief 分配 size 字节内核内存；失败时回收一次缓存再试
+ * @note reclaim 必须留在这一层：pmm_alloc_pages() 内部持着 pmm_lock，就地调 slab_reclaim_all()
+ *   既是对非重入锁的二次 acquire，锁序也与 cache->lock → pmm_lock 恰好相反。
+ */
 void *kmalloc(uint64_t size)
 {
     void *ptr = kmalloc_once(size);
@@ -46,6 +49,9 @@ void *kmalloc(uint64_t size)
     return kmalloc_once(size);
 }
 
+/**
+ * @brief 释放 kmalloc 或 slab 分配的内存，按页帧的 slab_cache 分派
+ */
 void kfree(void *ptr)
 {
     if (ptr == NULL)

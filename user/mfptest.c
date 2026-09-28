@@ -3,11 +3,8 @@
 
 /* user/mfptest.c —— 验证浮点上下文在特权级边界与任务切换上不丢
  *
- * 为什么必须有这套：BusyBox 逼出来的。musl 在 lp64d 下的 setjmp/longjmp 会
- * **无条件**存取 fs0~fs11（编译期按 ABI 选进来的，不是运行时按需），而 ash 的
- * 异常机制就建立在 setjmp 上——内核不保存 FP 上下文的话，ash_main 的第一条 setjmp
- * 就会被 SIGILL 杀掉。补上 pcb 的 proc_fp_regs 之后，真正危险的不再是"能不能执行"，
- * 而是"切一次进程结果会不会变"——那是静默出错，比崩掉难查一个数量级。
+ * musl 在 lp64d 下的 setjmp/longjmp 会无条件存取 fs0~fs11，而 ash 的异常机制就建立在
+ * setjmp 上。这里要验的不只是"能不能执行"，更是"切一次进程结果会不会变"——那是静默出错。
  *
  * 用 musl 工具链编（rv64gc/lp64d）而不是裸机那套（rv64imac/lp64）：裸机工具链没有
  * D 扩展，浮点只能靠 .word 下原始编码，写不出有意义的算例。
@@ -62,7 +59,7 @@ static void check_d(const char *name, double got, double want)
 }
 
 /* 用例 1~2：基本算术与 libc 的浮点格式化路径。
- * 后者是 §3.2 一直担心的那条——scalbn 里那 8 条 FP 指令就在这里执行。 */
+ * 后者会走到 musl scalbn 里那几条 FP 指令。 */
 static void test_basic(void)
 {
     volatile double a = 3.5, b = 0.25;
@@ -74,9 +71,8 @@ static void test_basic(void)
     check("printf %f goes through scalbn", strcmp(buf, "2.500") == 0);
 }
 
-/* 用例 3：setjmp/longjmp 往返 —— **这就是 ash 的形状**。
- * musl 的 __setjmp 存 fs0~fs11、__longjmp 原样恢复；内核不保存 FP 的话，
- * 光是走到 setjmp 那一行就已经 SIGILL 了。 */
+/* 用例 3：setjmp/longjmp 往返 —— 这就是 ash 的形状。
+ * musl 的 __setjmp 存 fs0~fs11、__longjmp 原样恢复。 */
 static jmp_buf jb;
 
 static void test_setjmp(void)

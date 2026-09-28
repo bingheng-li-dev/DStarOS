@@ -33,9 +33,12 @@ typedef struct
     Elf64_Phdr *ph;    /* 回填内容时要用；合并项不使用 */
 } elf_seg_t;
 
+/**
+ * @brief 把内存里的 ELF 镜像装进 mm：按 PT_LOAD 建 VMA、映射、拷贝内容，再建堆 VMA
+ */
 int elf_load(mm_t *mm, const unsigned char *image, uint64_t size, elf_info_t *info)
 {
-    Elf64_Ehdr *ehdr = (Elf64_Ehdr *)image; /* 文件头在image最开头 */
+    Elf64_Ehdr *ehdr = (Elf64_Ehdr *)image;
 
     /* ELF 来自磁盘、由用户 execve 指定，不可信：校验失败返回错误码交给调用者。
      * size 边界必须校验，越界的 e_phoff/p_offset/p_filesz 会读到 image 之外的内核内存；
@@ -71,7 +74,6 @@ int elf_load(mm_t *mm, const unsigned char *image, uint64_t size, elf_info_t *in
         return ENO6_INVAL_PARAM;
     }
 
-    /* 程序头表在 e_phoff 处；PT_LOAD 段的内容在 image + phdr[i].p_offset 处 */
     Elf64_Phdr *phdr_base = (Elf64_Phdr *)(image + ehdr->e_phoff);
     /* AT_PHDR 的两条求法，优先 PT_PHDR（GNU ld 通常会生成），否则退回
      * "覆盖了 e_phoff 的那个 PT_LOAD 段" */
@@ -79,14 +81,8 @@ int elf_load(mm_t *mm, const unsigned char *image, uint64_t size, elf_info_t *in
     virAddr_t phdr_in_load_va = 0;
 
     /* 装载分三遍走：先把地址空间的形状算清楚，再落实映射，最后才填内容。
-     *
-     * 不能按"一个 PT_LOAD 建一个 VMA、马上映射再马上拷贝"来做——**段是文件的
-     * 单位，页是地址空间的单位**，ELF 规范从不保证段边界页对齐。相邻两段共用
-     * 中间那一页时，后一段的 vmm_map_vma 会为这一页新分配一张零页并覆盖 PTE：
-     * 前一段落在该页上的内容整片丢失，旧帧的 reference 再也归不了零（永久泄漏），
-     * 而两个区间重叠的 VMA 还会破坏 mmap_list "互不重叠"这条不变式，
-     * 让 vmm_vma_get 与 fork 的行为取决于插入顺序。
-     * 段间是否共享页取决于链接器的 -z separate-code 之类的默认行为，内核不能依赖它。 */
+     * 不能"一个 PT_LOAD 建一个 VMA、马上映射再拷贝"：段是文件的单位，页是地址空间的单位，
+     * 相邻两段可能共用一页，后一段的映射会换掉那页、丢掉前一段的内容，两个 VMA 还会重叠。 */
     elf_seg_t segs[ELF_MAX_LOAD_SEG];
     int nload = 0;
 
@@ -100,7 +96,7 @@ int elf_load(mm_t *mm, const unsigned char *image, uint64_t size, elf_info_t *in
         }
         if (ph->p_type != PT_LOAD)
         {
-            continue; /* 只处理加载段 */
+            continue;
         }
         if (nload >= ELF_MAX_LOAD_SEG)
         {
@@ -114,10 +110,7 @@ int elf_load(mm_t *mm, const unsigned char *image, uint64_t size, elf_info_t *in
         }
 
         /* 段内容必须落在 [0, size) 内，否则下面的 memcpy 会读到 image 缓冲区之外。
-         * 仅在 p_filesz > 0 时才检查：p_filesz == 0 的纯 .bss 段不从文件读任何字节，
-         * 链接器完全可以把它的 p_offset 放在文件末尾之后（filetest.elf 的 .bss 段就是
-         * p_offset=0x4000 而文件总长只有 15040），对这种段做文件范围检查会误杀。
-         * 凡是有全局/静态变量的程序都会有这样一个段——BusyBox 必然中招。 */
+         * 仅在 p_filesz > 0 时检查：纯 .bss 段不读文件，链接器可以把它的 p_offset 放在文件末尾之后。 */
         if (ph->p_filesz > 0 && (ph->p_offset > size || ph->p_filesz > size - ph->p_offset))
         {
             printf("%s: segment %d file range out of bounds\n", __FUNCTION__, i);
@@ -157,15 +150,8 @@ int elf_load(mm_t *mm, const unsigned char *image, uint64_t size, elf_info_t *in
             }
         }
 
-        /* 转换段权限 PF_R/PF_W/PF_X → mm管理器pgprot_t标记
-         * 注意：这里始终额外加上 VMP_W，而不是严格按 p_flags 来。
-         * 原因：第三遍的 memcpy/memset 要把文件内容写进这些刚映射好的页——
-         * SUM 只豁免 U/S 特权位检查，不豁免 PTE 本身的 R/W/X 位，如果段本身是
-         * 只读/只读可执行（没有 PF_W，例如常见的 .text 段），硬件会在这次写入时
-         * 直接触发 store page fault。项目目前没有"先可写、拷完再改回只读"的
-         * 重新映射原语（vmm.c 的 get_pte 未导出），所以暂时统一放宽为可写，
-         * 不严格区分 R+X 与 R+W+X 段。代价是用户代码段本身也能被自己改写
-         * （无 W^X 隔离）；这是已知简化，非安全加固场景不需要现在补。 */
+        /* 段权限统一额外加 VMP_W：第三遍要往刚映射好的页里拷内容，而 SUM 不豁免 PTE 的
+         * R/W/X 位；没有"拷完再改回只读"的原语，所以用户代码段也可写（无 W^X，已知简化）。 */
         pgprot_t flag = VMP_W;
         if (ph->p_flags & PF_R)
         {

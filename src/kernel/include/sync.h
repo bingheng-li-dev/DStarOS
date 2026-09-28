@@ -38,7 +38,7 @@ typedef struct wait_queue
 
 /* 自旋锁保存的中断状态：acquire 之前中断是否开着（true = 开着，release 时要重新打开）。
  *
- * **必须由调用者自己持有**——局部变量，或者像调度器那样存进 pcb 让它随任务走。
+ * 必须由调用者自己持有——局部变量，或者像调度器那样存进 pcb 让它随任务走。
  * 绝不能放回 per-CPU 的槽里，理由见 sync.c 顶部的说明。用法：
  *
  *     irq_key_t key = spinlock_acquire(&lock);
@@ -67,10 +67,10 @@ void sem_up(ossem_t *sem);
 void waitq_init(waitq_t *wq);
 /* 把当前任务挂入 wq 并置 UNINTERRUPTIBLE（prepare-to-wait）。调用者须在自己的
  * 条件锁保护下调用；返回后应立即释放条件锁并 sched_schedule()，被唤醒后重新
- * 抢锁、**循环重检条件**（被唤醒不代表条件仍然成立）。 */
+ * 抢锁、循环重检条件（被唤醒不代表条件仍然成立）。 */
 void waitq_prepare(waitq_t *wq);
 /* 同 waitq_prepare，但置 INTERRUPTIBLE：等待期间可以被信号唤醒。
- * **被唤醒后如果决定放弃等待（返回 -ERESTARTSYS），必须先 waitq_remove()**——
+ * 被唤醒后如果决定放弃等待（返回 -ERESTARTSYS），必须先 waitq_remove()——
  * 否则任务带着一个仍挂在 wq 上的 proc_wait_linker 返回用户态，下一次挂入别的
  * 等待结构就会让同一个节点出现在两条链上（proc.h 明令禁止），而它退出后
  * PCB 被回收，wq 上还留着指向已释放内存的节点。 */
@@ -80,4 +80,4 @@ void waitq_remove(waitq_t *wq, struct proc_control_block *p);
 /* 唤醒 wq 上挂着的全部任务并清空队列。调用者须持有条件锁。 */
 void waitq_wake_all(waitq_t *wq);
 
-#endif
+#endif /* _SYNC_H_ */

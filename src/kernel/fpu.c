@@ -5,19 +5,16 @@
 #include "proc.h"
 #include "encoding.h"
 
-/* 浮点上下文的存取。
- *
- * 为什么是**无条件**存取而不是按 sstatus.FS 的 Dirty 位惰性保存：本内核的任务数是
- * 个位数、tick 是 200 Hz，33 条 load/store 的代价可以忽略；而惰性方案要在
- * trap 出入口维护 FS 状态机，多一处状态就多一类只在切换时机边界上出现的错。
- * 等 FP 真的成为热路径再谈优化。
- *
- * 内核自身不用浮点（kernel.elf 反汇编核对过零条 FP 指令），这两个函数是唯一的例外。
- */
+/* 浮点上下文无条件存取，不按 sstatus.FS 的 Dirty 位惰性保存：任务数个位数、tick 200 Hz，
+ * 33 条 load/store 可以忽略，而惰性方案要在 trap 出入口维护 FS 状态机。
+ * 内核自身不用浮点，fpu_save/fpu_restore 是唯一的例外。 */
 
 #define FPU_SAVE_REG(n)  asm volatile("fsd f" #n ", %0" : "=m"(p->proc_fp_regs[n]))
 #define FPU_LOAD_REG(n)  asm volatile("fld f" #n ", %0" : : "m"(p->proc_fp_regs[n]))
 
+/**
+ * @brief 每个 hart 启动时把 sstatus.FS 从 Off 打开到 Initial
+ */
 void fpu_init(void)
 {
     /* Off -> Initial。清掉再置，不能直接 set_csr——FS 是两位域，
@@ -27,6 +24,9 @@ void fpu_init(void)
     write_csr(sstatus, s);
 }
 
+/**
+ * @brief 把当前 hart 的 32 个浮点寄存器与 fcsr 存进 pcb
+ */
 void fpu_save(struct proc_control_block *p)
 {
     FPU_SAVE_REG(0);  FPU_SAVE_REG(1);  FPU_SAVE_REG(2);  FPU_SAVE_REG(3);
@@ -40,6 +40,9 @@ void fpu_save(struct proc_control_block *p)
     asm volatile("frcsr %0" : "=r"(p->proc_fcsr));
 }
 
+/**
+ * @brief 从 pcb 恢复 32 个浮点寄存器与 fcsr
+ */
 void fpu_restore(struct proc_control_block *p)
 {
     FPU_LOAD_REG(0);  FPU_LOAD_REG(1);  FPU_LOAD_REG(2);  FPU_LOAD_REG(3);

@@ -257,8 +257,7 @@ static void test_wait_errors(void)
 
 /* 用例 8~11：fd 表放大后 F_DUPFD 能真的落到高位。
  *
- * 这条补的是"实现写对了但从没被走过"——proc_fd_alloc_from(from) 的语义从阶段 3
- * 起就是对的，但此前没有任何用例传过大于 3 的 from。 */
+ * 专门传大于 3 的 from，走 proc_fd_alloc_from(from) 的高位路径。 */
 static void test_dupfd_high(void)
 {
     long fd = sys_openat("/etc/issue", O_RDONLY);

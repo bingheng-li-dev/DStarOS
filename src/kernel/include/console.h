@@ -25,4 +25,4 @@ file_t *console_open_file(void);
 /* 调用点展开 __FUNCTION__ 和 __LINE__，再转发给 panic_impl */
 #define panic(s, ...) panic_impl(__FUNCTION__, __LINE__, s, ##__VA_ARGS__)
 
-#endif
+#endif /* _CONSOLE_H_ */

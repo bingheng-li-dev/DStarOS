@@ -6,7 +6,7 @@
 #
 # 做的事其实很少——Image 头由 startup.S 的 .image_header 段提供，链接脚本
 # lds/linker_vf2.ld 把它放在镜像第 0 字节，makefile 的 objcopy 已经产出
-# build/kernel.bin。本脚本的真正价值是**逐字段校验那 64 字节头**：
+# build/kernel.bin。本脚本的真正价值是逐字段校验那 64 字节头：
 # 头错了 U-Boot 只会报一句 "Bad Linux RISCV Image magic!"，
 # 而更坏的情况是 magic 恰好对、text_offset 错，那会把内核搬到错误的地址、
 # 一执行就跑飞，且没有任何提示。烧录之前多花一秒钟校验，比在板子上二分便宜得多。
@@ -18,7 +18,7 @@ cd "$ROOT_DIR"
 OUT="build/vf2-kernel.img"
 BIN="build/kernel.bin"
 
-# 期望值。**改任何一个都要同步改三处**：本文件、startup.S 的 .image_header、
+# 期望值。改任何一个都要同步改三处：本文件、startup.S 的 .image_header、
 # lds/linker_vf2.ld 的 PHYS_BASE_ADDRESS / memtype.h 的 KERNEL_START。
 EXP_TEXT_OFFSET="0000000000200000"   # 2 MB，与 KERNEL_START 的低位一致
 EXP_VERSION="00000002"               # major 0 / minor 2
@@ -53,7 +53,7 @@ check() {   # check <字段名> <实际> <期望>
 }
 
 CODE0="$(field 0 4)"
-# code0 必须是一条**4 字节**的跳转（opcode 0x6f = JAL）。开着 C 扩展时 `j` 会被
+# code0 必须是一条4 字节的跳转（opcode 0x6f = JAL）。开着 C 扩展时 `j` 会被
 # 压缩成 2 字节的 c.j，把后面每个字段都错位——startup.S 里用 .option norvc 挡住了，
 # 这里再验一次，因为它错了之后所有别的字段看起来也会是错的，容易误判成别的问题。
 if [ "${CODE0: -2}" = "6f" ]; then
@@ -68,7 +68,7 @@ check "version"     "$(field 32 4)" "$EXP_VERSION"
 check "magic"       "$(field 48 8)" "$EXP_MAGIC"
 check "magic2"      "$(field 56 4)" "$EXP_MAGIC2"
 
-# image_size 没有固定期望值，但必须**不小于文件本身**——它含 .bss，
+# image_size 没有固定期望值，但必须不小于文件本身——它含 .bss，
 # 而 .bss 不占文件空间。反过来若它比文件还小，说明链接脚本里 ekernel/skernel 算错了。
 IMG_SIZE_HEX="$(field 16 8)"
 IMG_SIZE=$((16#$IMG_SIZE_HEX))

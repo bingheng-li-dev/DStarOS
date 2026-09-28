@@ -166,27 +166,24 @@ static void fs_write_pattern_file(const char *path)
 #endif
 
 /**
- * @note 不加 vfs_lock()——此函数运行在 proc_init() 之前的单核启动阶段，此时还没有任何
- *   pcb（含 idle/init）存在，而 vfs_lock() 内部的 sem_down() 无条件调用
- *   proc_get_current()，此刻拿到的是无效指针，会直接触发缺页异常。这个阶段本来就是
- *   单线程执行，没有并发可言，不需要加锁。
+ * @brief 挂载启动时的全部文件系统：/ = RAM 盘 FAT，/dev = devfs，VF2 另挂 /sd
+ * @note 不加 vfs_lock()：此时在 proc_init() 之前，还没有任何 pcb，而 vfs_lock() 里的
+ *   sem_down() 要取当前进程。启动阶段单线程，本来也无需加锁。
  */
 void fs_init(void)
 {
-    /* 0. 块设备与块缓存。注册序号就是 FatFS 的物理驱动器号，必须早于任何挂载 */
+    /* 块设备与块缓存。注册序号就是 FatFS 的物理驱动器号，必须早于任何挂载 */
     ramdisk_register(0);
 #if defined(VF2)
     sdcard_register(1);
 #endif
     bio_init();
 
-    /* 1. 初始化 VFS 全局数据结构（含 vfs_big_lock 本身的初始化）*/
     vfs_init();
 
-    /* 2. 注册 fatfs 文件系统类型 */
     fatfs_register();
 
-    /* 3. 挂载根文件系统（驱动号 0 对应内存 ramdisk）*/
+    /* data 为 NULL 即 0 号驱动器（RAM 盘） */
     int ret = vfs_mount("/", "fatfs", NULL);
     if (ret != ENO0_NO_ERROR)
     {
@@ -196,7 +193,7 @@ void fs_init(void)
 
     printf("fs_init: root filesystem mounted (fatfs/ramdisk)\n");
 
-    /* 4. devfs：/dev 挂载点本身必须先在根文件系统（FAT）上建好目录，
+    /* devfs：/dev 挂载点本身必须先在根文件系统（FAT）上建好目录，
      * vfs_mount() 对非 "/" 目标要求挂载点已存在且是目录（见 vfs.c）。 */
     devfs_register();
     ret = vfs_mkdir("/dev", 0755);
@@ -213,7 +210,7 @@ void fs_init(void)
     }
 
 #if defined(VF2)
-    /* 5. SD 卡挂到 /sd，根仍是 RAM 盘：SD 驱动或卡出问题时系统照样进得了 shell。
+    /* SD 卡挂到 /sd，根仍是 RAM 盘：SD 驱动或卡出问题时系统照样进得了 shell。
      * 失败只打印、不中断启动。 */
     ret = vfs_mkdir("/sd", 0755);
     if (ret != ENO0_NO_ERROR && ret != ENO7_EXISTS)

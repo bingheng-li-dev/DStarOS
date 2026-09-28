@@ -47,7 +47,7 @@ struct mm_struct;
 #define SIGPWR    30
 #define SIGSYS    31
 
-/* 信号号上限：sigset_t 就是 64 位，1..31 是标准信号，32.. 是实时信号（本阶段不投递） */
+/* 信号号上限：sigset_t 就是 64 位，1..31 是标准信号，32.. 是实时信号（不投递） */
 #define NSIG 64
 
 /* ============================================================
@@ -73,7 +73,7 @@ typedef uint64_t sigset_t;
 /**
  * @brief 内核 ABI 的 struct sigaction（riscv64 未定义 SA_RESTORER，所以没有那个字段）
  * @details sa_mask 放在最后是 Linux 内核有意为之（"mask last for extensibility"），
- *   **不要按 libc 用户态那个 struct sigaction 的顺序写**——那个 sa_mask 在中间，
+ *   不要按 libc 用户态那个 struct sigaction 的顺序写——那个 sa_mask 在中间，
  *   布局对不上会把 handler 装成垃圾指针。
  */
 struct linux_sigaction
@@ -90,7 +90,7 @@ _Static_assert(sizeof(struct linux_sigaction) == 24,
 #define SIGSET_SIZE 8
 
 /**
- * @brief 每进程的信号处理表。**对外不透明**，定义在 signal.c 里。
+ * @brief 每进程的信号处理表。对外不透明，定义在 signal.c 里。
  * @details 独立成对象、不内嵌进 pcb_t——actions[] 有 1536 字节，内嵌会让每个内核
  *   线程的 PCB 也一起变胖好几倍。不透明是为了让本头文件不必 include sync.h：
  *   sync.h → cpu.h → proc.h → signal.h 是一个环，signal.h 一旦 include sync.h，
@@ -108,7 +108,7 @@ static inline sigset_t sigmask(int sig)
     return 1UL << (sig - 1);
 }
 
-/* 不可捕获、不可屏蔽的信号（本阶段不做 stop，SIGSTOP 只是拒绝装 handler） */
+/* 不可捕获、不可屏蔽的信号（不做 stop，SIGSTOP 只是拒绝装 handler） */
 #define SIG_UNCATCHABLE (sigmask(SIGKILL) | sigmask(SIGSTOP))
 
 static inline bool signal_valid(int sig)
@@ -142,7 +142,7 @@ int signal_send_group(int16_t pgid, int sig);
 
 /**
  * @brief 是否有未被屏蔽的挂起信号（SIGKILL 不受屏蔽字影响）
- * @note **有意不取 sighand 锁**：这是一次纯读，rv64 上 64 位对齐读本身是原子的，
+ * @note 有意不取 sighand 锁：这是一次纯读，rv64 上 64 位对齐读本身是原子的，
  *   最坏情况读到略旧的值、多睡一轮而已。更重要的是它的调用点都在管道/TTY 的
  *   条件锁里面，取锁会引入 pipe->lock → sighand->lock 这条依赖，没必要。
  */

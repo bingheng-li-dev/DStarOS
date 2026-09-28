@@ -23,7 +23,7 @@
 #define __NR_ioctl       29
 #define __NR_mkdirat     34
 #define __NR_unlinkat    35
-/* riscv64 的 asm-generic ABI **没有 renameat(38)**（那是 __ARCH_WANT_RENAMEAT 的
+/* riscv64 的 asm-generic ABI 没有 renameat(38)（那是 __ARCH_WANT_RENAMEAT 的
  * 老架构才有的），只有 renameat2。musl 的 rename()/renameat() 都发这个号。 */
 #define __NR_renameat2   276
 #define __NR_ftruncate   46
@@ -73,4 +73,4 @@
 /* Linux riscv64 的 syscall 接口约定返回类型就是 long */
 long syscall_dispatch(intstkf_t *sp);   /* a7=号, a0..a5=参, 返回值即写回 a0 */
 
-#endif
+#endif /* _SYSCALL_H_ */

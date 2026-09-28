@@ -1,17 +1,16 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright (C) 2021-2026 BingHeng Li <bingheng-li@outlook.com> */
 
-/* user/ttytest.c —— 验证 TTY 行规范层 + termios/ioctl（Phase 5 Step 9）
+/* user/ttytest.c —— 验证 TTY 行规范层 + termios/ioctl
  *
  * 与 filetest.c/pipetest.c 同样的理由：TTY 的 read(0,...) 依赖真实用户地址空间指针
- * 与真实异步输入源（QEMU 串口经 sbi_console_getchar() 逐 tick 轮询），只有真正的
+ * 与真实异步输入源（QEMU 串口经 uart_getc() 逐 tick 轮询），只有真正的
  * U 态程序端到端触发才能验证；内核态孤立自测（tty_input_push 的单元测试）测不出
- * "生产者异步、消费者可能跟不上"这类时序问题（Step 5 的 tty_read 多行 bug 就是这样
- * 被发现的，见 .claude/bugfixes.md）。
+ * "生产者异步、消费者可能跟不上"这类时序问题。
  *
  * 输入喂法：QEMU -nographic 的 stdin 可以直接管道喂（`printf ... | qemu ...`），
- * 字符不丢、顺序正确（Step 0 调研结论）。全部测试用例的输入按调用顺序拼成一条
- * 输入流，一次性喂给 QEMU；canonical 模式下每次 read 只吐一行（Step 5 已修），
+ * 字符不丢、顺序正确。全部测试用例的输入按调用顺序拼成一条
+ * 输入流，一次性喂给 QEMU；canonical 模式下每次 read 只吐一行，
  * raw 模式下用"精确指定 len"的技巧防止一次 read 吞掉后续用例的数据
  * （见 test_raw_mode）。不引入 libc，写法与 filetest.c/pipetest.c 一致。
  */

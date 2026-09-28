@@ -21,13 +21,9 @@ extern void trap_init_asm(void);
  * @param[in] sp   本次 trap 的寄存器帧
  * @param[in] what 异常名，原样进诊断行
  * @param[in] sig  U 态时用来杀掉该进程的信号
- * @details 判据与 vmm.c 的 vmm_segfault 同源——sstatus.SPP 记录的是进入本次 trap
- *   之前的特权级，从异常发生到这里之间没有嵌套 trap，所以它就是"谁执行了这条指令"。
- *   用户程序自己作死不该拖垮内核；内核执行到了才说明是内核 bug。
- *
- *   stval（本项目里叫 sbadaddr）的含义随异常而变：非法指令时是**出错指令自身的编码**
- *   （规范允许硬件填 0），取指/访存类异常时是**出错的地址**。两种都和 sepc 一并打出来：
- *   拿 sepc 去反汇编、拿 stval 看编码或地址，两边一对就能定位。
+ * @details sstatus.SPP 是进入本次 trap 之前的特权级，中间没有嵌套 trap，所以它就是
+ *   "谁执行了这条指令"。stval（本项目里叫 sbadaddr）的含义随异常而变：非法指令时是
+ *   出错指令的编码（规范允许硬件填 0），取指/访存类异常时是出错地址。
  * @note U 态路径不返回（走 do_exit_signal，父进程 wait 到的 status 低 7 位就是 sig）。
  */
 static void trap_user_exception(intstkf_t *sp, const char *what, int sig)
@@ -83,40 +79,43 @@ static void trap_external_irq(void)
     plic_complete(irq);
 }
 
+/**
+ * @brief 设置本 hart 的 trap 入口并打开中断
+ */
 void trap_init(void)
 {
     trap_init_asm();
-    /* sstatus寄存器的sie位是中断全局使能。 */
     set_csr(sstatus, SSTATUS_SIE);
-    /* 全局使能以后，在sie寄存器中分别使能软件中断，时钟中断，外部中断；S态外部中断需要rustSBI的支持。 */
     set_csr(sie, MIP_SSIP | MIP_STIP | MIP_SEIP);
 
-    // @todo 暂时的，内核可全程访问U态页。正常应仅在copy_to/from_user函数前后使用
+    /* @todo SUM 全程开着，正确做法是只在 copy_to/from_user 前后开。 */
     set_csr(sstatus, SSTATUS_SUM);
 
     printf("core %ld trap inited!\n", cpu_get_core_id());
 }
 
+/**
+ * @brief 关本 hart 的 S 态全局中断
+ */
 void local_intr_disable(void)
 {
-    /* sstatus寄存器的sie位是中断全局使能。 */
     clear_csr(sstatus, SSTATUS_SIE);
 }
 
+/**
+ * @brief 开本 hart 的 S 态全局中断
+ */
 void local_intr_enable(void)
 {
-    /* sstatus寄存器的sie位是中断全局使能。 */
     set_csr(sstatus, SSTATUS_SIE);
 #if DEBUG_LOCK_irq_enable
-    /* 不能用 printf：printf 经过 ConsoleLock→spinlockRelease→localIntrEnable，
-     * 会无限递归直到栈溢出。改用绕过锁的原始 SBI 输出。 */
+    /* 不能用 printf：它会经 ConsoleLock 绕回本函数无限递归，只能走 SBI 直出。 */
     const char *msg = "local_intr_enable::irq enabled!!\n";
     for (const char *p = msg; *p; p++)
         sbi_console_putchar((int)*p);
 #endif
 }
 
-/* 返回当前core(local core)的全局中断是否处于使能状态。 */
 static bool get_local_intr(void)
 {
     return (read_csr(sstatus) & SSTATUS_SIE) != 0;
@@ -124,9 +123,6 @@ static bool get_local_intr(void)
 
 /**
  * @brief trap 的实际分发逻辑
- * @details 从 trap_handler() 里拆出来，只是为了给"返回 U 态之前投递信号"找一个
- *   兜得住的位置：本函数里散布着多条 return（缺页、ecall 各一条），在每条 return
- *   前面各加一次检查迟早会漏，包一层最省事。
  */
 static void trap_dispatch(intstkf_t *sp)
 {
@@ -134,7 +130,7 @@ static void trap_dispatch(intstkf_t *sp)
 
     if (get_local_intr())
     {
-        /* 发生中断后，硬件会自动将SSTATUS_SIE位置0。如果不是0说明出错了。 */
+        /* 硬件进 trap 时自动清 SIE；这里还是 1 说明有人在关中断区间外进了 trap。 */
         panic("%s::interrupts enabled.\n", __FUNCTION__);
     }
 #if DEBUG_BOOT_TRACE
@@ -156,14 +152,11 @@ static void trap_dispatch(intstkf_t *sp)
         switch (cause)
         {
         case IRQ_S_SOFT:
-            /* 核间中断：由 sched_activate() 在新任务入队后经 cpu_send_ipi() 发出，
-             * 只用来把 wfi 中的 hart 踢醒，让它回到 idle() 循环重新检查就绪队列，
-             * 不需要在这里做任何调度决策；
+            /* 只用来把 wfi 中的 hart 踢醒，不做调度决策。
              * 必须清本地 sip.SSIP，否则中断条件一直成立会立刻重新触发。 */
             clear_csr(sip, MIP_SSIP);
             break;
         case IRQ_S_TIMER:
-            // printf("Supervisor timer interrupt\n");s
             tick_int_handler();
             break;
         case IRQ_S_EXT:
@@ -179,10 +172,7 @@ static void trap_dispatch(intstkf_t *sp)
     }
     else
     {
-        /* 只在追踪 trap 时才打这条 banner：正常处理掉的异常（用户 ecall、懒分配/COW
-         * 缺页）会走到下面的 return，每个 syscall 都打一条会把日志淹掉，还在 syscall
-         * 热路径上白白吃一次 ConsoleLock + SBI 调用；而真正意外的异常在各自的 case 里
-         * 都会先打印具体原因再 panic（panic 自带位置信息），并不依赖这条 banner。 */
+        /* 只在追踪时打：syscall 走的是这条路径，每次都打会淹掉日志。 */
 #if DEBUG_INTSTACK
         printf("\nException:\n");
 #endif
@@ -190,10 +180,8 @@ static void trap_dispatch(intstkf_t *sp)
         {
         case CAUSE_FAULT_LOAD:
         case CAUSE_FAULT_STORE:
-            /* 访问异常（scause 5/7）**不是缺页**：目标地址后面根本没有设备或内存响应，
-             * 缺页处理器补不出这种错。单独打一行点明，否则它会一路走到
-             * "kernel page fault" 那条 panic，把"地址后面没东西"误读成"映射没建上"
-             * ——两者的修法完全相反。MMIO / 设备驱动调试期这是常见故障形态。 */
+            /* 访问异常（scause 5/7）不是缺页：目标地址后面没有设备或内存响应，缺页
+             * 处理器补不出这种错。单独打一行，否则会被误读成"映射没建上"，修法相反。 */
             printf("%s access fault (no device or memory responds at this addr): "
                    "addr=0x%lx sepc=0x%lx\n",
                    (cause == CAUSE_FAULT_LOAD) ? "Load" : "Store",
@@ -222,11 +210,7 @@ static void trap_dispatch(intstkf_t *sp)
             vmm_page_fault_handler((virAddr_t)sp->sbadaddr, 2);
             return;
         case CAUSE_USER_ECALL:
-            /**
-             * ecall 指令本身是 4 字节，
-             * 硬件触发 trap 时 sepc 保存的是 触发 ecall 那条指令的 PC，即指向 ecall 自身；
-             * sret 返回时 PC ← sepc，如果不加 4，返回后会再次执行 ecall，无限重入
-             */
+            /* ecall 是 4 字节，sepc 指向它自己；不加 4 会 sret 回来重复执行。 */
             sp->sepc += 4;
             /* a0 马上会被返回值覆盖，而 SA_RESTART 重启该 syscall 时要原样还给它；
              * a7（调用号）在帧里原封不动，不用另存 */
@@ -236,9 +220,6 @@ static void trap_dispatch(intstkf_t *sp)
         case CAUSE_SUPERVISOR_ECALL:
             printf("Environment call from S-mode");
             return;
-        /* 下面这六条形状相同：都是"某条指令自己作死"，U 态触发只杀该进程。
-         * 信号映射按 POSIX。此前只有非法指令一条这么做，其余五条一律 panic 整个内核
-         * ——那意味着一个用户程序里的野指针取指就能带走整个操作系统。 */
         case CAUSE_MISALIGNED_FETCH:
             trap_user_exception(sp, "instruction address misaligned", SIGBUS);
             return;
@@ -246,10 +227,6 @@ static void trap_dispatch(intstkf_t *sp)
             trap_user_exception(sp, "instruction access fault", SIGSEGV);
             return;
         case CAUSE_ILLEGAL_INSTRUCTION:
-            /* 用户态最常见的来源是浮点指令：本内核不保存 FP 上下文，构造进 U 态的
-             * trapframe 时一律把 sstatus.FS 关死，于是任何 F/D 指令都会落到这里。
-             * 这是**探针**——与其让浮点在没有上下文保存的情况下静默算错（切一次进程
-             * 结果就变），不如让它当场响，把"用户程序到底用不用浮点"变成实测。 */
             trap_user_exception(sp, "illegal instruction", SIGILL);
             return;
         case CAUSE_BREAKPOINT:
@@ -277,11 +254,9 @@ static void trap_dispatch(intstkf_t *sp)
 
 /**
  * @brief trap 总入口（由 cpua.S 的 trap_entry 调用）
- * @details 分发完之后，若这次 trap 来自 U 态（sstatus.SPP == 0，即马上就要 sret
- *   回用户程序），就在这里投递挂起的信号——这是整个内核里唯一一个"手里有 trap 帧
- *   且下一步就是 sret"的位置，信号投递要改 sepc/sp/a0，只能在这里做。
- *   来自 S 态的 trap（内核自己缺页、时钟中断打断内核代码）一律跳过：那时 sret
- *   回的是内核代码，往用户栈上压帧没有意义。
+ * @details 分发完之后，若本次 trap 来自 U 态就在这里投递挂起的信号：这是内核里唯一
+ *   一个"手里有 trap 帧、下一步就是 sret"的位置，而信号投递要改 sepc/sp/a0。
+ *   来自 S 态的 trap 跳过——那时 sret 回的是内核代码。
  */
 void trap_handler(intstkf_t *sp)
 {
@@ -294,6 +269,9 @@ void trap_handler(intstkf_t *sp)
 }
 
 #if DEBUG_INTSTACK
+/**
+ * @brief 打印 trap 帧（调试用）
+ */
 void print_intstk(intstkf_t *sp)
 {
     printf("\n=================================================================\n");

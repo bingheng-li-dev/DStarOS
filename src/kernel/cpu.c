@@ -28,16 +28,15 @@ static int cpu_present_count = 1;
 /**
  * @brief 判断 riscv,isa 字符串是否表明这颗核支持 S 态
  * @param[in] isa 设备树 cpu 节点的 "riscv,isa" 属性值
- * @details 只看**单字母扩展序列**（第一个 '_' 之前）里有没有 's'。
+ * @details 只看单字母扩展序列（第一个 '_' 之前）里有没有 's'。
  *   整串扫是错的：多字母扩展名里带 s 的比比皆是（zicsr / sstc / svadu），
  *   那样判据会永远返回"支持"，等于没写。
  *
- *   判据只对**老规范**的 isa 字符串成立，用序列里有没有 'u' 来识别：
+ *   判据只对老规范的 isa 字符串成立，用序列里有没有 'u' 来识别：
  *     老规范把特权级当扩展写，VF2 实测 U74 是 "rv64imafdcbsux"、S7 是 "rv64imacu"；
  *     新规范不再写 s/u，QEMU 8.2 实测是 "rv64imafdch_zicbom_..._sstc_svadu"，
  *     这时 isa 提供不了任何特权级信息。
- *   所以不含 'u' 就直接认为可用——否则 QEMU 上四个核会全被排除、静默退化成单核，
- *   而回归依然是绿的，只是慢一截，极难察觉。
+ *   所以不含 'u' 就直接认为可用，否则 QEMU 上全部核会被排除、静默退化成单核。
  * @note 这是启发式，不是规范保证。它成立的前提是"写了 u 就会写 s"，
  *   目前两类字符串都符合，但没有哪份规范强制这一点。
  */
@@ -66,14 +65,14 @@ static bool isa_has_supervisor(const char *isa)
  *   判断能否跑 S 态，再用 HSM `hart_status` 确认固件愿意启动它。
  *   引导核固定占逻辑号 0，其余按设备树里的顺序填。
  *
- *   **不能只靠 HSM 枚举**：VF2 的 OpenSBI 把那颗不支持 S 态的 S7 监控核
- *   （hart 0）也列进了 domain0（实测 `Domain0 HARTs: 0*,1*,2*,3*,4*`），
- *   照着 HSM 的结果启动它就是让一颗没有 MMU 的核去执行 csrw satp。
+ *   不能只靠 HSM 枚举：VF2 的 OpenSBI 把那颗不支持 S 态的 S7 监控核（hart 0）
+ *   也列进了 domain0（`Domain0 HARTs: 0*,1*,2*,3*,4*`），照着 HSM 的结果启动它
+ *   就是让一颗没有 MMU 的核去执行 csrw satp。
  *
- *   **也不能靠 mmu-type / status / compatible**：那块板子的 U-Boot 控制 DTB 里
+ *   也不能靠 mmu-type / status / compatible：那块板子的 U-Boot 控制 DTB 里
  *   S7 这三项分别写着 "riscv,sv39" / "okay" / "sifive,u74-mc"，全是从 U74 抄来的，
  *   一条都不能信。riscv,isa 是唯一如实反映硬件的字段。
- * @note 必须在 fdt_init() 之后、**MMU 开启之前**调用——DTB 不在内核偏移映射内。
+ * @note 必须在 fdt_init() 之后、MMU 开启之前调用——DTB 不在内核偏移映射内。
  *   读不到设备树时退回单核：引导核既然执行到了这里，它必然支持 S 态，
  *   这个方向的失败是安全的，而猜错了去启动 S7 则是随机死机。
  */
@@ -109,7 +108,7 @@ void cpu_probe_harts(void)
             continue;
         }
 
-        /* status 与 isa 是**互补**的两条判据，各自覆盖一类设备树，都要查：
+        /* status 与 isa 是互补的两条判据，各自覆盖一类设备树，都要查：
          *   这块板子的 U-Boot 控制 DTB 用老规范写 isa，S7 是 "rv64imacu"，
          *   但它的 status 撒谎写成 "okay"——只查 status 会漏；
          *   上游 Linux 的 jh7110 dtsi 用新规范写 isa（"rv64imac_zba_zbb"，无 u），
@@ -152,6 +151,9 @@ void cpu_probe_harts(void)
     printf("\n");
 }
 
+/**
+ * @brief 探测到的可用 cpu 数
+ */
 int cpu_get_present_count(void)
 {
     return cpu_present_count;
@@ -171,10 +173,10 @@ uint64_t cpu_get_hartid(int cpu_id)
 
 /**
  * @brief 启动一个从核
- * @param[in] cpu_id 目标**逻辑 cpu 号**（必须 >0，0 是引导核自己）
+ * @param[in] cpu_id 目标逻辑 cpu 号（必须 >0，0 是引导核自己）
  * @return SBI 返回码（SBI_SUCCESS 表示已请求启动）
  * @details HSM 约定被启动的 hart 进入时 satp=0、a0=hartid、a1=opaque。
- *   这里把**逻辑 cpu 号当 opaque 传进去**，从核在 startup.S 里直接取 a1 当自己的
+ *   这里把逻辑 cpu 号当 opaque 传进去，从核在 startup.S 里直接取 a1 当自己的
  *   逻辑号——否则它只知道自己的 hartid，而 hartid 在目标平台上既不连续也不从 0 起。
  *   `_start` 链接在高 VA，用 kva_to_pa 换算成物理入口传给固件。
  * @note 须在内核页表（含 vmm_kernel_pgd_ppn 与 trampoline 恒等映射）就绪后调用；
@@ -194,23 +196,33 @@ int cpu_start_secondary_hart(uint16_t cpu_id)
                               cpu_id);
 }
 
+/**
+ * @brief 本 hart 的逻辑 cpu 号（读 tp）
+ */
 uint64_t cpu_get_core_id(void)
 {
     return cpu_get_core_id_asm();
 }
 
+/**
+ * @brief 把本 hart 的逻辑 cpu 号写进 tp
+ */
 void cpu_set_core_id(uint64_t core_id)
 {
-    /* 存的是逻辑 cpu 号。原来这里有个 `& 0x1` 的掩码，把系统硬锁死在 2 核——
-     * 逻辑号一旦到 2 就被截断成 0，两个核会共用同一个 cpu_t。 */
     cpu_set_core_id_asm(core_id);
 }
 
+/**
+ * @brief 本 hart 的 cpu_t
+ */
 cpu_t *cpu_get_current(void)
 {
     return &cpus[cpu_get_core_id()];
 }
 
+/**
+ * @brief 按逻辑 cpu 号取 cpu_t
+ */
 cpu_t *cpu_get_by_index(uint16_t index)
 {
     return &cpus[index];

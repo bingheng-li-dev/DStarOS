@@ -190,8 +190,7 @@ static long sys_unlinkat(int dirfd, const char *path, int flags)
 }
 static long sys_renameat(int odfd, const char *op, int ndfd, const char *np)
 {
-    /* riscv64 上没有 renameat(38)，只有 renameat2(276)——这个夹具此前发的是一个
-     * 在本 ABI 上根本不存在的号，只因为内核也照着错的号接线才对得上。flags 恒 0。 */
+    /* riscv64 上没有 renameat(38)，只有 renameat2(276)。flags 恒 0。 */
     return syscall5(__NR_renameat2, odfd, (long)op, ndfd, (long)np, 0);
 }
 static long sys_chdir(const char *path)  { return syscall4(__NR_chdir, (long)path, 0, 0, 0); }
@@ -445,10 +444,8 @@ void _start(void)
     check_eq("close", sys_close((int)fd), 0);
 
     /* ---------- O_APPEND ----------
-     * 这一组补于 2026-09-08：此前 72 条断言一条都没走过 O_APPEND，于是
-     * "fatfs 读写回调从不按 file->f_pos 定位"这个洞一直没被发现——O_APPEND 是
-     * **唯一**一条由 VFS 层绕过 f_op->lseek 直接改 f_pos 的路径，其余场景两份
-     * 位置天然同步。详见 .claude/bugfixes.md。
+     * O_APPEND 是唯一一条由 VFS 层绕过 f_op->lseek 直接改 f_pos 的路径，其余场景
+     * 底层与 VFS 两份位置天然同步，所以要单独验。
      *
      * 判据刻意用**长度不同**的两段：等长覆盖写出来的结果和追加只差顺序，
      * 看 st_size 也看不出来。 */
@@ -518,10 +515,8 @@ void _start(void)
         check_eq("getdents64: 'fdir' is DT_DIR", find_dirent(dbuf, n, "fdir"), DT_DIR);
         check_eq("getdents64: 'filetest.txt' is DT_REG",
                  find_dirent(dbuf, n, "filetest.txt"), DT_REG);
-        /* 'bin' 来自 rootfs 镜像（宿主机的 tools/build_rootfs.sh 建的），不是本用例造的。
-         * 原先这里查的是 'hello'——内核启动时自己写进 ramdisk 的那个文件；阶段 9 之后
-         * 程序改由镜像提供、那次 seed 已删除，换成查镜像里的目录，判据反而更强：
-         * 它同时验了"外部造的条目能被列出来"和"目录的 d_type 是 DT_DIR"。 */
+        /* 'bin' 来自 rootfs 镜像（宿主机的 tools/build_rootfs.sh 建的），不是本用例造的：
+         * 同时验了"外部造的条目能被列出来"和"目录的 d_type 是 DT_DIR"。 */
         check_eq("getdents64: 'bin' is DT_DIR", find_dirent(dbuf, n, "bin"), DT_DIR);
         sys_close((int)dirfd);
     }

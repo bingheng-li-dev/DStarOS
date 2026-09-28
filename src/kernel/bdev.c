@@ -47,7 +47,7 @@ bdev_t *bdev_get(uint32_t id)
  * @retval ENO0_NO_ERROR 设备就绪（本次初始化成功，或此前已就绪）
  * @return 其余为驱动 init 回调的错误码
  * @details FatFS 首次挂载时 find_volume 自己会调 disk_initialize，而挂载回调已经先调过一次；
- *   幂等放在这一层，驱动不必各自防重入（此前 SD 卡因此重复初始化、分区信息打印两次）。
+ *   幂等放在这一层，驱动不必各自防重入。
  */
 int bdev_open(bdev_t *dev)
 {

@@ -60,7 +60,7 @@ void ktime_alarm_init(void);
  * @param[in]  p           目标进程
  * @param[in]  expire_ns   首次到期的绝对时刻（ktime_get_ns() 时基）；0 表示取消
  * @param[in]  interval_ns 周期；0 表示单次
- * @param[out] old_value   非 NULL 时回填旧定时器的**剩余时间**与周期，均为纳秒
+ * @param[out] old_value   非 NULL 时回填旧定时器的剩余时间与周期，均为纳秒
  * @param[out] old_interval 同上
  */
 void ktime_alarm_set(struct proc_control_block *p, uint64_t expire_ns,

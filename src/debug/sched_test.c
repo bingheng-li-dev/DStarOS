@@ -149,61 +149,29 @@ static void sched_lifecycle_test(void)
 }
 
 /* ============================================================
- * CFS 公平性测试：一组 worker 抢一个共享预算，低 nice（高权重）应拿到更多
+ * CFS 公平性测试：一组 worker 抢一个共享预算，低 nice（高权重）应拿到更多 CPU 时间
  *
- * SMP 说明：worker 数必须**多于 hart 数**，否则每个 worker 各占一个 hart、
- * 根本不存在 CPU 竞争，nice 权重也就无从体现（2 个 worker + 2 个 hart 时
- * 双方都能跑满，测不出任何公平性）。另外所有 worker 必须**全部创建完毕后
- * 才允许开跑**：hart1 会在 sched_activate 的 IPI 之后立刻把先建好的 worker
- * 调度起来，不设门槛的话它会在后面的 worker 还没被 fork 出来之前就把预算吃光。
+ * worker 数必须多于 hart 数，否则各占一个 hart、没有竞争，权重无从体现；且必须全部
+ * 创建完毕后才开跑，否则先建好的 worker 会在后面的还没 fork 出来时就把预算吃光。
  * ============================================================ */
 #define CFS_WORKERS (2 * CORE_NUMBER) /* 保证可运行任务数 > hart 数，制造真实竞争 */
 
-/* 这个用例**只测权重是否生效，不测有没有人被饿死**——后者由等权重的
- * sched_cfs_nostarve_test() 负责。这条分工是 2026-08-31 查那个断续出现的 73/74
- * （`all CFS workers ran` 偶发失败）时定下来的，原因值得写清楚，免得又被合回去：
- *
- * nice-10 权重 9548、nice+10 权重 110，四个 worker 总权重 2*9548 + 2*110 = 19316，
- * 每个低权重 worker 的应得份额只有 110/19316 = 0.57%。预算 400 时期望只有 2.3 次，
- * "至少 1 次"直接压在噪声底上。但把预算加到 4000 之后**次数一点没变**，还是 2——
- * 份额与预算无关，那是被饿死而不是分得少的特征，顺着这条线查出了两个真的内核 bug
- * （vruntime 整数截断、改 nice 前不结算，均已修，见 sched.c）。
- *
- * 修完之后用次数仍然测不准，根因是**观测量选错了**：CFS 分配的是 CPU 时间，而
- * 轮转次数 = 时间 / 单轮成本；单轮成本取决于那次让出有没有真的发生 switch_to——
- * 重权重 worker 让出后往往被重新选中，走"不真正切换"的快路径，每轮约 1.2 µs；
- * 低权重 worker 每次轮到都要付一次真正的 switch_to（含 satp 写入 + sfence.vma，
- * QEMU 下实测约 100 µs）。差 40 倍，于是次数由开销而非权重决定，实测出现过
- * nice-10 拿 691、nice+10 拿 3309 的**反转**。
- *
- * 改成断言累计 CPU 时间之后，实测比值稳定在 70~90 倍（理论 86.8），余量充足。
- * 次数只留着打印和"预算是否耗尽"用。无饥饿则交给等权重的用例，那里四个 worker
- * 行为对称、单轮成本一致，次数才是可信的观测量。 */
+/* 这个用例只测权重是否生效，不测有没有人被饿死（后者由等权重的 sched_cfs_nostarve_test()
+ * 负责，那里 worker 行为对称，次数才是可信的观测量）。
+ * 断言的是累计 CPU 时间而不是轮转次数：重权重 worker 让出后常被重新选中、走不真正切换的
+ * 快路径，低权重 worker 每次都付一次真正的 switch_to，单轮成本差几十倍，次数于是由开销
+ * 而非权重决定。次数只留着打印和"预算是否耗尽"用。 */
 #define CFS_BUDGET  4000
 
 static volatile int cfs_budget;
 static volatile int cfs_count[CFS_WORKERS];
 static volatile uint64_t cfs_rt[CFS_WORKERS]; /* 测量阶段内各自累计的真实 CPU 时间 */
 
-/* 起跑线闸门（rt_sched_test.c 也用，故非 static）：worker 阻塞在这上面，由 init
- * **一次性广播**放行。
- * 两条要求都是踩出来的，改动前请先看完：
- *
- * ① **不能忙等**。原先写的是 `while (!cfs_start) sched_schedule();`——忙等是真的在
- *    烧 CPU，每个 worker 烧掉多少取决于它落在哪个 hart、跟谁抢，实测能差三个数量级
- *    （一个 worker 在屏障上累计 13 毫秒，另一个只有 50 微秒）。烧得多的那个进入测量
- *    阶段时 vruntime 已经背了十几万的债，一次都轮不到。**这是屏障污染了起跑线，
- *    不是调度器不公平**——CFS 让多吃了 CPU 的任务等，恰恰是对的。阻塞则不累积运行
- *    时间，唤醒重新入队时 fair_enqueue 把 vruntime 统一钳到 min_vruntime，起跑线才齐。
- *
- * ② **放行必须是一次广播，不能逐个唤醒**。用信号量试过（init 连调 CFS_WORKERS 次
- *    sem_up）：前两个被唤醒的 worker 会立刻把 init 抢下 CPU，等 init 再跑起来放行
- *    后两个时，预算早被前两个吃光——实测出现过等权重下 `counts: 208 192 0 0`，
- *    以及加权用例里轻权重独自跑了 4.4 毫秒导致 CPU 时间反转。waitq_wake_all 在持锁
- *    状态下一次唤醒全部，没有这个窗口。
- *
- * 也试过 sched_sleep_ticks 轮询：起跑线同样齐，但受 tick 粒度拖累，单次运行从
- * 0.5 秒涨到 12 秒以上，不值。 */
+/* 起跑线闸门（rt_sched_test.c 也用，故非 static）：worker 阻塞在这上面，由 init 一次性广播放行。
+ * ① 不能忙等：忙等在烧 CPU，各 worker 烧多少取决于落在哪个 hart，进入测量时 vruntime 已参差不齐；
+ *   阻塞不累积运行时间，唤醒入队时 vruntime 统一钳到 min_vruntime，起跑线才齐。
+ * ② 放行必须是一次广播：逐个唤醒时先醒的 worker 会抢下 init 的 CPU，后面的还没放行预算就被吃光。
+ *   waitq_wake_all 在持锁状态下一次唤醒全部，没有这个窗口。 */
 static osslock_t    cfs_gate_lock;
 static waitq_t      cfs_gate_wq;
 static volatile int cfs_gate_open;
@@ -313,15 +281,12 @@ static void sched_cfs_fairness_test(void)
            CFS_WORKERS, low_cnt, high_cnt, (int)low_rt, (int)high_rt);
 
     sched_test_check("budget fully consumed", low_cnt + high_cnt == CFS_BUDGET);
-    /* **断言 CPU 时间而不是轮转次数**。CFS 分配的是时间；轮转次数 = 时间 / 单轮成本，
-     * 而单轮成本取决于该次让出有没有真的发生 switch_to（快路径约 1.2 µs，真切换约
-     * 100 µs，差 40 倍），跟权重无关。用次数断言时实测出现过 nice-10 拿 691、
-     * nice+10 拿 3309 的反转——不是调度器错了，是这个观测量选错了。 */
+    /* 断言 CPU 时间而不是轮转次数，理由见 CFS_BUDGET 处的说明 */
     sched_test_check("lower nice got more CPU time", low_rt > high_rt);
 }
 
 /* ============================================================
- * 无饥饿测试：**等权重**下每个 worker 都必须被调度到，且份额大致均等
+ * 无饥饿测试：等权重下每个 worker 都必须被调度到，且份额大致均等
  *
  * 与上面的公平性用例分工：那边比例悬殊（87:1），单轮成本又不对称，测得出"权重生效"
  * 但测不出"没人被饿死"；这边全部 nice 0，四个 worker 行为对称、单轮成本一致，
@@ -419,16 +384,9 @@ static void *timer_bg_worker(void *arg)
     return NULL;
 }
 
-/* 用 ktime_get_ns()（直读硬件 time CSR）而不是 tick_get_os_tick() 来量。
- *
- * 原来用的是 cpu0 的**软件 tick 计数**，那个量里混了三样东西：睡眠开始时距下一次
- * tick 边界的相位、被唤醒后到真正跑起来的调度延迟、以及 tick 本身的抖动。于是
- * "睡 3 个 tick"量出来 3 或 4 都是正常的，偶尔还会是 2——4 核浸泡 200 次里中过 1 次
- * （0.5%），当时看着像内核早醒，实际内核完全正确：sched_sleep_ticks 换算成绝对纳秒，
- * sched_check_timers 也是拿 ktime_get_ns() 比对，真实睡眠时长从来没短过。
- *
- * 换成同一个时基之后，断言才真正在验"睡够了没有"。测量窗口仍然包含唤醒到运行的
- * 延迟，但那只会让 elapsed 变大，不影响 >= 这个方向。 */
+/* 用 ktime_get_ns()（直读 time CSR）而不是软件 tick 计数来量：tick 计数混着睡眠起点的相位、
+ * 唤醒到运行的调度延迟与 tick 抖动，"睡 3 个 tick"量出 2 也不代表内核早醒。换成与
+ * sched_check_timers 同一个时基，断言才真正在验"睡够了没有"；唤醒延迟只会让 elapsed 变大。 */
 static void *timer_sleep_worker(void *arg)
 {
     (void)arg;

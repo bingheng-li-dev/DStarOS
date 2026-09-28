@@ -3,6 +3,9 @@
 
 #include "stringops.h"
 
+/**
+ * @brief 复制 len 字节；实现上也处理重叠，任一指针为 NULL 时返回 NULL
+ */
 void *memcpy(void *dst, const void *src, size_t len)
 {
     if (NULL == dst || NULL == src)
@@ -37,6 +40,9 @@ void *memcpy(void *dst, const void *src, size_t len)
     return ret;
 }
 
+/**
+ * @brief 把 s 起的 n 字节填成 c
+ */
 void *memset(void *s, int c, size_t n)
 {
     const unsigned char uc = c;
@@ -46,18 +52,9 @@ void *memset(void *s, int c, size_t n)
     return s;
 }
 
-/* *
- * memmove - copies the values of @n bytes from the location pointed by @src to
- * the memory area pointed by @dst. @src and @dst are allowed to overlap.
- * @dst     pointer to the destination array where the content is to be copied
- * @src     pointer to the source of data to by copied
- * @n:      number of bytes to copy
- *
- * The memmove() function returns @dst.
- * 
- * 比memcpy更安全：memmove在copy两个有重叠区域的内存时可以保证copy的正确
- * 
- * */
+/**
+ * @brief 复制 n 字节，src 与 dst 允许重叠；返回 dst
+ */
 void *memmove(void *dst, const void *src, size_t n)
 {
     const char *s = src;
@@ -80,6 +77,9 @@ void *memmove(void *dst, const void *src, size_t n)
     return dst;
 }
 
+/**
+ * @brief 按无符号字节比较前 n 字节
+ */
 int memcmp(const void *s1, const void *s2, size_t n)
 {
     const unsigned char *p = s1, *q = s2;
@@ -94,6 +94,9 @@ int memcmp(const void *s1, const void *s2, size_t n)
     return 0;
 }
 
+/**
+ * @brief 比较至多 n 个字符
+ */
 int strncmp(const char *p, const char *q, uint32_t n)
 {
     while (n > 0 && *p && *p == *q)
@@ -103,6 +106,9 @@ int strncmp(const char *p, const char *q, uint32_t n)
     return (uint8_t)*p - (uint8_t)*q;
 }
 
+/**
+ * @brief 查找字符 c 首次出现的位置，找不到返回 NULL（不匹配结尾的 '\0'，与标准库不同）
+ */
 char *strchr(const char *s, char c)
 {
     for (; *s; s++)
@@ -111,6 +117,9 @@ char *strchr(const char *s, char c)
     return 0;
 }
 
+/**
+ * @brief 字符串长度
+ */
 size_t strlen(const char *s)
 {
     size_t n;

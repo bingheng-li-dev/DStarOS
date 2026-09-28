@@ -43,7 +43,6 @@ static pframe_t *slab_pick_partial(kmem_cache_t *cache);
 static void slab_page_init(kmem_cache_t *cache, pframe_t *frame);
 
 /**
- * @name slab_init
  * @brief 建立通用尺寸类 cache 与 8 个命名 cache
  * @note 必须在 MMU 开启之后、任何 kmalloc 调用之前由 hart 0 调用一次。
  *   slab 内部保存的全是 KVA，放在 MMU 前初始化会让 pmm_init_after_mmu_enable
@@ -76,7 +75,6 @@ void slab_init(void)
 }
 
 /**
- * @name slab_cache_create
  * @brief 在静态 cache 表里占用一个槽位并初始化
  * @param[in] name cache 名，仅用于统计输出，必须是常量字符串
  * @param[in] size 对象大小（字节），会向上对齐到 8 字节
@@ -128,6 +126,9 @@ kmem_cache_t *slab_cache_create(const char *name, uint32_t size)
     return cache;
 }
 
+/**
+ * @brief 按字节数取通用尺寸类 cache，超过上限返回 NULL
+ */
 kmem_cache_t *slab_size_cache(uint64_t size)
 {
     if (size == 0 || size > SLAB_MAX_OBJ_SIZE)
@@ -145,7 +146,6 @@ kmem_cache_t *slab_size_cache(uint64_t size)
 }
 
 /**
- * @name slab_cache_alloc
  * @brief 从 cache 取一个对象，取不到时向 PMM 要一页新的 slab
  * @param[in,out] cache 目标 cache
  * @retval NULL 物理内存耗尽
@@ -214,7 +214,6 @@ void *slab_cache_alloc(kmem_cache_t *cache)
 }
 
 /**
- * @name slab_cache_free
  * @brief 把对象还回它所属的 slab 页，整页空闲时回收或留作保留页
  * @param[in,out] cache 对象所属 cache
  * @param[in,out] frame 对象所在的 slab 页
@@ -255,7 +254,6 @@ void slab_cache_free(kmem_cache_t *cache, pframe_t *frame, void *obj)
 }
 
 /**
- * @name slab_reclaim_all
  * @brief 把所有 cache 的保留页与整页空闲的 slab 页吐还给 PMM
  * @note 只能在不持有 pmm_lock 的上下文里调用；逐 cache 加解锁，不用一把大锁罩全表。
  */
@@ -307,6 +305,10 @@ void slab_reclaim_all(void)
     }
 }
 
+/**
+ * @brief 取一页，失败就先回收再试一次
+ * @note 调用者不得持有 pmm_lock。
+ */
 pframe_t *slab_alloc_page_retry(void)
 {
     pframe_t *frame = pmm_alloc_page();
@@ -318,6 +320,9 @@ pframe_t *slab_alloc_page_retry(void)
     return pmm_alloc_page();
 }
 
+/**
+ * @brief 打印各 cache 的对象大小与占用统计
+ */
 void slab_dump_stats(void)
 {
     printf("slab stats: name/objsize/objs_per_slab/nr_slabs/nr_inuse\n");
@@ -371,7 +376,7 @@ static void slab_requeue(kmem_cache_t *cache, pframe_t *frame)
 }
 
 /* 从最高非空档取页：优先喂"快满的页"，让空闲对象集中到少数页上，
- * 整页空闲才有机会出现，Step 5 的空页回收才有东西可回收。 */
+ * 整页空闲才有机会出现，slab_reclaim_all() 才有东西可回收。 */
 static pframe_t *slab_pick_partial(kmem_cache_t *cache)
 {
     for (int32_t i = SLAB_NR_BUCKETS - 1; i >= 0; i--)

@@ -71,41 +71,41 @@ typedef int64_t  Elf64_Sxword;
 /* 一个 ELF 文件头 */
 struct elf64_hdr
 {
-    unsigned char e_ident[EI_NIDENT]; /* 魔数与元信息：[0..3]="\x7fELF"，[4]=类别(1=32位/2=64位)，[5]=字节序，[6]=ELF版本，[7]=OS/ABI，[8..15]=填充 */
-    Elf64_Half e_type;                /* 文件类型：ET_REL=1可重定位，ET_EXEC=2可执行，ET_DYN=3共享对象 */
-    Elf64_Half e_machine;             /* 目标架构：EM_RISCV=243 */
-    Elf64_Word e_version;             /* ELF格式版本，当前固定为1（EV_CURRENT） */
-    Elf64_Addr e_entry;               /* 程序入口虚拟地址，加载后跳转至此处执行 */
-    Elf64_Off  e_phoff;               /* 程序头表（Program Header Table）在文件中的字节偏移 */
-    Elf64_Off  e_shoff;               /* 节头表（Section Header Table）在文件中的字节偏移 */
-    Elf64_Word e_flags;               /* 处理器相关标志位；RISC-V用于标识ISA子集与ABI */
-    Elf64_Half e_ehsize;              /* ELF文件头本身的字节大小，64位ELF固定为64 */
-    Elf64_Half e_phentsize;           /* 程序头表中每个条目的字节大小，固定为56 */
-    Elf64_Half e_phnum;               /* 程序头表条目数量，即段（segment）数 */
-    Elf64_Half e_shentsize;           /* 节头表中每个条目的字节大小，固定为64 */
-    Elf64_Half e_shnum;               /* 节头表条目数量，即节（section）数 */
-    Elf64_Half e_shstrndx;            /* 节名字符串表（.shstrtab）在节头表中的下标 */
+    unsigned char e_ident[EI_NIDENT]; /* 魔数、类别、字节序、版本、OS/ABI */
+    Elf64_Half e_type;                /* ET_REL / ET_EXEC / ET_DYN */
+    Elf64_Half e_machine;             /* EM_RISCV */
+    Elf64_Word e_version;
+    Elf64_Addr e_entry;               /* 程序入口虚拟地址 */
+    Elf64_Off  e_phoff;               /* 程序头表的文件偏移 */
+    Elf64_Off  e_shoff;               /* 节头表的文件偏移 */
+    Elf64_Word e_flags;               /* RISC-V 用于标识 ISA 子集与 ABI */
+    Elf64_Half e_ehsize;
+    Elf64_Half e_phentsize;           /* 程序头表每项字节数，固定 56 */
+    Elf64_Half e_phnum;
+    Elf64_Half e_shentsize;
+    Elf64_Half e_shnum;
+    Elf64_Half e_shstrndx;            /* .shstrtab 在节头表中的下标 */
 };
 typedef struct elf64_hdr Elf64_Ehdr;
 
 /* 一个 ELF 段（segment） */
 struct elf64_phdr {
-    Elf64_Word  p_type;   /* 段类型：PT_LOAD=1需加载到内存，PT_DYNAMIC=2动态链接信息，PT_INTERP=3解释器路径，PT_NULL=0忽略 */
-    Elf64_Word  p_flags;  /* 段权限标志：PF_X=1可执行，PF_W=2可写，PF_R=4可读，可组合（如PF_R|PF_X=5代码段） */
-    Elf64_Off   p_offset; /* 段内容在ELF文件中的起始字节偏移（相对文件头） */
-    Elf64_Addr  p_vaddr;  /* 段加载到内存的起始虚拟地址；elf_load据此建立VMA并映射PTE */
-    Elf64_Addr  p_paddr;  /* 段的物理地址，用户态ELF通常与p_vaddr相同，内核一般忽略此字段 */
-    Elf64_Xword p_filesz; /* 段在文件中的字节数；文件内容拷贝范围为[p_offset, p_offset+p_filesz) */
-    Elf64_Xword p_memsz;  /* 段在内存中占用的字节数；p_memsz >= p_filesz，多出部分（.bss）需清零 */
-    Elf64_Xword p_align;  /* 对齐要求（2的幂次）；p_vaddr和p_offset须同余于p_align，0或1表示无需对齐 */
+    Elf64_Word  p_type;   /* PT_LOAD / PT_PHDR / ... */
+    Elf64_Word  p_flags;  /* PF_R / PF_W / PF_X */
+    Elf64_Off   p_offset; /* 段内容的文件偏移 */
+    Elf64_Addr  p_vaddr;
+    Elf64_Addr  p_paddr;  /* 内核忽略 */
+    Elf64_Xword p_filesz; /* 段在文件中的字节数 */
+    Elf64_Xword p_memsz;  /* 段在内存中的字节数，多出 p_filesz 的部分（.bss）清零 */
+    Elf64_Xword p_align;
 };
 typedef struct elf64_phdr Elf64_Phdr;
 
 /**
  * @brief elf_load 的出参：进入新程序所需的全部信息
- * @details phdr_va 是**程序头表在新地址空间里的虚拟地址**，不是文件偏移；
+ * @details phdr_va 是程序头表在新地址空间里的虚拟地址，不是文件偏移；
  *   musl 的 __init_tls 靠 AT_PHDR/AT_PHENT/AT_PHNUM 找 PT_TLS 段。
- *   求不出来时 phdr_va 与 phnum **一起**置 0——要么全对要么全 0，
+ *   求不出来时 phdr_va 与 phnum 一起置 0——要么全对要么全 0，
  *   填一半会让 musl 拿着假地址去解引用。
  */
 typedef struct elf_info
@@ -116,6 +116,7 @@ typedef struct elf_info
     uint16_t  phnum;    /* 程序头个数；phdr_va 为 0 时本字段同为 0 */
 } elf_info_t;
 
+/* 把内存里的 ELF 镜像装进 mm；校验失败返回负的错误码 */
 int elf_load(mm_t *mm, const unsigned char *image, uint64_t size, elf_info_t *info);
 
-#endif
+#endif /* _ELF_H_ */

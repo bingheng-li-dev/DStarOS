@@ -203,10 +203,9 @@ static void test_unlink_evict(void)
     expect(make_file(DCACHE_TEST_DEEP, "deep"), "recreate deep.txt");
 }
 
-/* 组 5：重命名——目录改名之后，缓存在子树里的后代必须仍然能用。
- * fatfs 适配层曾经把绝对路径存进 inode，改名只更新被改的那一个，后代全部指向旧路径；
- * 没有缓存时后代 close 即销毁所以碰不到，有缓存之后一碰就中。现在路径改成沿 dentry
- * 链现推，这组用例守着这个性质：改完名字后代照样打开，而且是**命中缓存**打开的。 */
+/* 组 5：重命名——目录改名之后，缓存在子树里的后代必须仍然能用，而且是命中缓存打开的。
+ * 路径若存进 inode，改名只更新被改的那一个，后代全部指向旧路径；这组用例守着
+ * "路径沿 dentry 链现推"这个性质。 */
 static void test_rename_subtree(void)
 {
     dcache_stats_t before, after;
@@ -245,7 +244,7 @@ static void test_rename_subtree(void)
     dentry_t *old = vfs_lookup("/dctest/rn/c.txt");
     expect(old == NULL, "old directory name no longer resolves");
 
-    /* 第二种情形：改名的时候后代**正被打开**（d_ref > 0）。这种后代剪枝够不着，
+    /* 第二种情形：改名的时候后代正被打开（d_ref > 0）。这种后代剪枝够不着，
      * 只有"路径不再存进 inode"才治得了。ftruncate 走 i_op->truncate，会重新推导
      * 一次路径——若还是旧路径，f_open 根本找不到这个文件。 */
     file_t *held = vfs_open("/dctest/rn2/c.txt", O_RDWR, NULL);

@@ -8,7 +8,7 @@
  * 实现的源码。涉及章节：Binary Encoding、Base、TIME、IPI、HSM、SRST，以及
  * Legacy 扩展中仍在使用的 Console Putchar。
  *
- * **只声明本内核实际调用到的部分**。规范里其余的扩展、功能号、错误码和状态
+ * 只声明本内核实际调用到的部分。规范里其余的扩展、功能号、错误码和状态
  * 枚举都没有列进来，要用时照规范补；凡是被裁掉的，下面都在注释里点了名，
  * 以免补的时候漏看隐式递增的枚举值。
  *
@@ -21,7 +21,7 @@
 
 #include <stdint.h>
 
-/* 与 SBI 无关的通用位掩码工具，历史上就放在这里，cpu.c 组装 hart_mask 时用它。 */
+/* 与 SBI 无关的通用位掩码工具，cpu.c 组装 hart_mask 时用它。 */
 #ifndef BIT
 #define BIT(n) (1UL << (n))
 #endif
@@ -205,7 +205,7 @@ static inline void sbi_console_putchar(int ch)
  * @param[in] stime_value 绝对时间值（与 time CSR 同一时基）
  * @note 用标准 TIME 扩展而非 Legacy 的 SET_TIMER：后者在 RustSBI 0.4.0 下
  *   是哑的——调用直接返回、mtimecmp 并不会被真正写入，S 态定时器中断永远
- *   不会触发。这个坑和 sbi_shutdown() 踩过的是同一类。
+ *   不会触发。
  */
 static inline void sbi_set_timer(uint64_t stime_value)
 {

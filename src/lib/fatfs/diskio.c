@@ -13,11 +13,7 @@
 #include "bio.h"
 #include "errorcode.h"
 
-/**
- * @brief 设备状态折算成 FatFS 的 DSTATUS
- * @param[in] dev 设备描述符，可为 NULL
- * @return 未注册或未就绪为 STA_NOINIT；只读设备为 STA_PROTECT；否则 0
- */
+/* 设备状态折算成 DSTATUS：未注册/未就绪 STA_NOINIT，只读 STA_PROTECT，否则 0 */
 static DSTATUS diskio_status_of(const bdev_t *dev)
 {
     if (dev == NULL || !dev->ready)
@@ -27,10 +23,9 @@ static DSTATUS diskio_status_of(const bdev_t *dev)
     return dev->read_only ? STA_PROTECT : 0;
 }
 
-/*
- * disk_initialize - 初始化磁盘驱动（幂等，见 bdev_open）
- * @pdrv: 物理驱动器编号
- * 返回：0 或 STA_PROTECT 表示就绪；STA_NOINIT 表示失败
+/**
+ * @brief 初始化磁盘驱动（幂等，见 bdev_open）
+ * @return 0 或 STA_PROTECT 表示就绪；STA_NOINIT 表示失败
  */
 DSTATUS disk_initialize(BYTE pdrv)
 {
@@ -42,21 +37,16 @@ DSTATUS disk_initialize(BYTE pdrv)
     return diskio_status_of(dev);
 }
 
-/*
- * disk_status - 获取磁盘驱动器状态
- * @pdrv: 物理驱动器编号
+/**
+ * @brief 查询磁盘驱动器状态
  */
 DSTATUS disk_status(BYTE pdrv)
 {
     return diskio_status_of(bdev_get(pdrv));
 }
 
-/*
- * disk_read - 读取扇区数据
- * @pdrv:   物理驱动器编号
- * @buff:   读取数据的目标缓冲区
- * @sector: 起始扇区地址（设备内 LBA）
- * @count:  读取的扇区数量
+/**
+ * @brief 读扇区，经块缓存；越界返回 RES_PARERR
  */
 DRESULT disk_read(BYTE pdrv, BYTE *buff, DWORD sector, UINT count)
 {
@@ -72,13 +62,9 @@ DRESULT disk_read(BYTE pdrv, BYTE *buff, DWORD sector, UINT count)
     return (bio_read(dev, sector, buff, count) == ENO0_NO_ERROR) ? RES_OK : RES_ERROR;
 }
 
-/*
- * disk_write - 写入扇区数据
- * @pdrv:   物理驱动器编号
- * @buff:   待写入数据的源缓冲区
- * @sector: 起始扇区地址（设备内 LBA）
- * @count:  写入的扇区数量
- * 注：直写（write-through）——返回时数据已在设备上，缓存里没有待落盘的块。
+/**
+ * @brief 写扇区，经块缓存；越界返回 RES_PARERR
+ * @note 直写（write-through）：返回时数据已在设备上，缓存里没有待落盘的块。
  */
 DRESULT disk_write(BYTE pdrv, const BYTE *buff, DWORD sector, UINT count)
 {
@@ -98,11 +84,8 @@ DRESULT disk_write(BYTE pdrv, const BYTE *buff, DWORD sector, UINT count)
     return (bio_write(dev, sector, buff, count) == ENO0_NO_ERROR) ? RES_OK : RES_ERROR;
 }
 
-/*
- * disk_ioctl - 磁盘设备控制
- * @pdrv: 物理驱动器编号
- * @cmd:  控制命令
- * @buff: 命令参数缓冲区
+/**
+ * @brief 磁盘设备控制（CTRL_SYNC / GET_SECTOR_COUNT / GET_SECTOR_SIZE / GET_BLOCK_SIZE）
  */
 DRESULT disk_ioctl(BYTE pdrv, BYTE cmd, void *buff)
 {

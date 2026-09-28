@@ -7,7 +7,7 @@
 #include <stdint.h>
 
 /* UART0 的 PLIC 中断号。QEMU virt 取自 qemu hw/riscv/virt.c；
- * VF2 实测自 /soc/serial@10000000 的 interrupts = <0x20>。 */
+ * VF2 取自设备树 serial@10000000 的 interrupts = <0x20>。 */
 #if defined(VF2)
 #define UART_IRQ    32
 #else

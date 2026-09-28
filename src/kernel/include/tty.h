@@ -19,15 +19,12 @@ typedef struct file_operations file_operations_t;
  * 不要求单次写具备 PIPE_BUF 那种原子性。 */
 #define TTY_BUF_SIZE 256
 
-/* 一批喂入里最多同时挂起多少个尚未被 read() 消费的行首 ^D。正常交互场景下这个数字
- * 几乎恒为 0/1（读者跟得上）；但输入若整批异步喂入（管道喂 QEMU stdin 就是这样），
- * 读者可能远远落后于生产者，用户/脚本完全可能在被读走之前又连续按了几次 ^D——
- * 每个 ^D 都是流里一个独立的零宽标记，必须各自在 read_pos 追到它的位置时单独交付
- * 一次 EOF，不能只用一个全局标志位（否则后一个 ^D 的位置会覆盖前一个，前一个
- * 未交付的 EOF 就此丢失，读者会在该看到 EOF 的地方直接读到后面的数据）。 */
+/* 最多同时挂起多少个尚未被 read() 消费的行首 ^D。批量喂入时读者可能远远落后，
+ * 连按的每个 ^D 都是流里独立的零宽标记，须在 read_pos 追到各自位置时单独交付，
+ * 所以用队列而不是一个标志位（否则后一个会覆盖前一个）。 */
 #define TTY_MAX_PENDING_EOF 4
 
-/**
+/*
  * TTY 设备核心结构体。全系统一个单例（一个串口即一个终端，不做多终端/pty）。
  * `buf`/`read_pos`/`line_pos`/`edit_pos` 是三索引环形缓冲：
  *   [read_pos, line_pos) 是已提交成行、可被 tty_read() 取走的数据；
@@ -41,18 +38,14 @@ typedef struct tty
     uint32_t  read_pos;           /* 下一个交给 tty_read() 的字节 */
     uint32_t  line_pos;           /* 已提交成行的末尾 */
     uint32_t  edit_pos;           /* 已敲入的末尾（含未提交半行） */
-    uint32_t  eof_queue[TTY_MAX_PENDING_EOF]; /* 尚未交付的行首 ^D 位置，按发生顺序排列
-                                    * （== 各自发生时的 edit_pos）。tty_read() 必须等
-                                    * read_pos 追到队首那个位置才交付一次 EOF（返回 0），
-                                    * 不能只看"当前 line_pos 是否等于 read_pos"——否则
-                                    * ^D 之后如果又提交了新的一行，line_pos 前移，这个
-                                    * 判断条件就再也不成立，EOF 被新数据悄悄吞掉 */
+    /* 尚未交付的行首 ^D 位置（发生时的 edit_pos），按发生顺序；交付规则见 tty_read() */
+    uint32_t  eof_queue[TTY_MAX_PENDING_EOF];
     uint8_t   eof_count;           /* eof_queue 中排队的 EOF 个数 */
     waitq_t   wq_read;            /* 等一整行（或 raw 模式下等至少一个字节）的读者 */
     struct linux_termios tio;     /* 当前 termios 设置 */
     struct winsize       ws;      /* 固定 24x80 */
-    int16_t   foreground_pgid;    /* 前台进程组：^C / ^\ 打给它。初值 1（init 的 pgid），
-                                   * ash 起来之后由 TIOCSPGRP 改写 */
+    /* 前台进程组：^C / ^\ 打给它。初值 1（init 的 pgid），ash 起来之后由 TIOCSPGRP 改写 */
+    int16_t   foreground_pgid;
 } tty_t;
 
 /* 初始化全局 TTY 单例：自旋锁 + 等待队列 + termios 默认值。
@@ -98,4 +91,4 @@ extern file_operations_t tty_fops;
  * 那样会把其它设备的 f_private 错当 tty_t* 解释，是内存安全问题，不只是逻辑错误。 */
 tty_t *tty_from_file(file_t *f);
 
-#endif
+#endif /* _TTY_H_ */

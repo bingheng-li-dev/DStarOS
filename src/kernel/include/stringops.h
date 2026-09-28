@@ -15,4 +15,4 @@ int strncmp(const char *p, const char *q, uint32_t n);
 char *strchr(const char *s, char c);
 size_t strlen(const char *s);
 
-#endif
+#endif /* _STRINGOPS_H_ */

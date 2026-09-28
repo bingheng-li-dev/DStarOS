@@ -675,7 +675,7 @@ static void test_smp_stress(void)
 }
 
 /* 内核 ABI 的 struct sigaction（24 字节，sa_mask 在最后，无 sa_restorer）。
- * 这里只用来把 SIGPIPE 设成 SIG_IGN——阶段 7 给 pipe_write 补上 SIGPIPE 之后，
+ * 这里只用来把 SIGPIPE 设成 SIG_IGN——pipe_write 会投 SIGPIPE，不忽略的话
  * 向读端已关闭的管道写会先把本进程杀掉，测试根本走不到检查 -EPIPE 那一行。
  * 真实程序（含 BusyBox）想拿到 EPIPE 返回值也必须先忽略 SIGPIPE，写法一致。 */
 struct k_sigaction
