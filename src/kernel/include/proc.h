@@ -64,7 +64,6 @@ struct sched_class;
 typedef enum proc_status sta_t;
 typedef struct proc_context ctx_t;
 typedef struct proc_control_block pcb_t;
-typedef struct proc_pid_map pids_t;
 
 enum proc_status
 {
@@ -188,16 +187,9 @@ struct proc_control_block
     uint64_t proc_fcsr;
 };
 
-struct proc_pid_map
-{
-    int16_t pid;
-    struct list_head pid_stk_linker;
-};
-
 extern void switch_to(ctx_t *from, ctx_t *to);
 
 char *set_proc_name(pcb_t *proc, const char *name);
-char *get_proc_name(pcb_t *proc);
 int16_t do_fork(uint32_t clone_flags, uintptr_t stack, intstkf_t *regs);
 void do_exit(int16_t error_code) __attribute__((noreturn));
 /* 被信号杀死的退出路径：wait status 的低 7 位是信号号，而不是 (code<<8) */
@@ -208,6 +200,8 @@ int16_t create_kernel_thread_by_fork(void *func(void *), void *args, uint32_t cl
 /* 按 pid 查找 pcb（find_proc_by_pid 的公开包装）；未找到返回 NULL。
  * @note 内部自取 proc_list_lock，**调用者不得已经持有它**（自旋锁不可重入）。 */
 pcb_t *proc_find_by_pid(int16_t pid);
+/* 当前进程的父进程 pid（getppid），没有父进程返回 0 */
+int16_t proc_get_ppid(void);
 
 /* 在 proc_list_lock 保护下按 pid / pgid 找到进程并**立刻**对它调用 fn。
  * kill 这类"查到就要动手"的场景必须用它，而不是先 proc_find_by_pid 再动手——

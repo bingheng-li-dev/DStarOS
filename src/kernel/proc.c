@@ -26,8 +26,10 @@ struct list_head proc_list;
  * 交给别人）。锁序：tty->lock → proc_list_lock → sighand->lock → run_queue.lock，
  * 单向；持有本锁期间不得睡眠、不得取 VFS 大锁。 */
 static osslock_t proc_list_lock;
-/* Stack of all dealloced pids.In order to pmm_alloc_pages these pids again. */
-struct list_head pid_stack;
+/* pid 位图：第 n 位为 1 表示 pid n 已被占用（ZOMBIE 也算，收割时才释放）。
+ * 用独立的锁，不与 proc_list_lock 嵌套。 */
+static osslock_t pid_lock;
+static uint64_t pid_bitmap[PID_MAX_VALUE / 64 + 1];
 /* Amount of processes. */
 uint16_t task_count = 0;
 
@@ -78,14 +80,6 @@ char *set_proc_name(pcb_t *proc, const char *name)
     return memcpy(proc->proc_pname, name, n);
 }
 
-/* Remember to recycle memory of name. */
-char *get_proc_name(pcb_t *proc)
-{
-    char *name = kmalloc(PNAME_MAX_LENGTH);
-    memset(name, 0, sizeof(name));
-    return memcpy(name, proc->proc_pname, PNAME_MAX_LENGTH);
-}
-
 /* @param stack the parent's user stack pointer. if stack==0, It means to fork a kernel thread. */
 int16_t do_fork(uint32_t clone_flags, uintptr_t stack, intstkf_t *regs)
 {
@@ -122,6 +116,14 @@ int16_t do_fork(uint32_t clone_flags, uintptr_t stack, intstkf_t *regs)
         new_proc->proc_sig_pending = 0;
     }
 
+    /* pid 也在 copy_proc_mm 之前分配，理由同上 */
+    int16_t pid = alloc_pid_map();
+    if (pid < 0)
+    {
+        goto f4;
+    }
+    new_proc->proc_pid = pid;
+
     copy_proc_mm(clone_flags, new_proc);
     copy_proc_stk(new_proc, stack, regs);
 
@@ -151,22 +153,18 @@ int16_t do_fork(uint32_t clone_flags, uintptr_t stack, intstkf_t *regs)
     /* 子进程继承父进程的 fd 表：浅拷贝指针 + 每个 file_t 的 f_count++（父子共享打开文件与偏移）*/
     proc_fd_copy(new_proc, proc_get_current());
 
-
-    int16_t pid = ENO3_NOFREE_PID;
-    pid = alloc_pid_map();
-    new_proc->proc_pid = pid;
-
 #if DEBUG_PROC_do_fork
     printf("do_fork::pid:%d\n", pid);
 #endif
 
+    /* 父子链与 proc_parent 一律在 proc_list_lock 下改：退出的进程会把孤儿过继给
+     * init，与 init 自己的 do_wait 在不同 hart 上并发操作同一条 proc_children */
     irq_key_t plist_key = spinlock_acquire(&proc_list_lock);
     list_add(&(new_proc->proc_list_linker), &(proc_list));
     task_count = task_count + 1;
-    spinlock_release(&proc_list_lock, plist_key);
-
     new_proc->proc_parent = proc_get_current();
     list_add_tail(&(new_proc->proc_sibling_linker), &(proc_get_current()->proc_children));
+    spinlock_release(&proc_list_lock, plist_key);
 
     new_proc->proc_state = RUNNING;
     sched_activate(new_proc);
@@ -177,6 +175,14 @@ f1:
 f2:
     kfree(new_proc);
     return ENO1_NOMORE_MEM;
+f4:
+    if (new_proc->proc_sighand != NULL)
+    {
+        kfree(new_proc->proc_sighand);
+    }
+    kfree((void *)(new_proc->kernel_stack));
+    kfree(new_proc);
+    return ENO3_NOFREE_PID;
 f3:
     kfree((void *)(new_proc->kernel_stack));
     kfree(new_proc);
@@ -239,6 +245,7 @@ static void exit_common(int16_t error_code, uint8_t sig)
     pcb_t *init_proc = find_proc_by_pid(1);
     bool has_orphan = false;
     struct list_head *pos, *tmp;
+    irq_key_t plist_key = spinlock_acquire(&proc_list_lock);
     list_for_each_safe(pos, tmp, &curr->proc_children)
     {
         pcb_t *child = list_entry(pos, pcb_t, proc_sibling_linker);
@@ -247,6 +254,7 @@ static void exit_common(int16_t error_code, uint8_t sig)
         list_add_tail(&child->proc_sibling_linker, &init_proc->proc_children);
         has_orphan = true;
     }
+    spinlock_release(&proc_list_lock, plist_key);
     if (has_orphan)
     {
         wakeup(init_proc);
@@ -263,18 +271,25 @@ static void exit_common(int16_t error_code, uint8_t sig)
     }
     curr->proc_exit_code = error_code;
     curr->proc_exit_sig = sig;
-    curr->proc_state = ZOMBIE;
     /* pid 不在这里回收——ZOMBIE 期间 pid 必须继续"占用"，
      * 否则两次退出之间创建的新进程可能撞上同一个 pid。
      * 真正的回收在 do_wait() 收割时才做 */
-    if (curr->proc_parent)
+
+    /* 置 ZOMBIE、读父进程、通知父进程都在 proc_list_lock 下：父进程只能在这把锁下
+     * 被它自己的父进程收割，锁在手里就不会通知到一个已释放的 pcb；而父进程若已先
+     * 退出，它在过继时（同一把锁下）早把 proc_parent 改成了 init。 */
+    plist_key = spinlock_acquire(&proc_list_lock);
+    curr->proc_state = ZOMBIE;
+    pcb_t *parent = curr->proc_parent;
+    if (parent)
     {
         /* SIGCHLD 默认动作是忽略，signal_send 的忽略优化会把它直接丢掉，
          * 所以对没装 handler 的父进程这一句等于零成本 */
-        signal_send(curr->proc_parent, SIGCHLD);
-        wakeup(curr->proc_parent);
+        signal_send(parent, SIGCHLD);
+        wakeup(parent);
     }
-    
+    spinlock_release(&proc_list_lock, plist_key);
+
     sched_schedule();
 
     panic("Zombie task resumed, should never happen\n");
@@ -316,66 +331,74 @@ int16_t do_wait(int16_t pid, int *status, int options)
         cur->proc_state = INTERRUPTIBLE;
 
         bool has_child = false;
+        pcb_t *child = NULL;
         struct list_head *pos;
+        irq_key_t plist_key = spinlock_acquire(&proc_list_lock);
         list_for_each(pos, &cur->proc_children)
         {
-            pcb_t *child = list_entry(pos, pcb_t, proc_sibling_linker);
-            if (pid > 0 && child->proc_pid != pid)
+            pcb_t *c = list_entry(pos, pcb_t, proc_sibling_linker);
+            if (pid > 0 && c->proc_pid != pid)
             {
                 continue;
             }
             has_child = true;
-            if (child->proc_state == ZOMBIE)
+            if (c->proc_state == ZOMBIE)
             {
-                cur->proc_state = RUNNING;
-
-                /* 子进程在 do_exit 里的顺序是"先置 ZOMBIE + wakeup(父进程)，再
-                 * sched_schedule()"，所以父进程被唤醒时，子进程很可能还站在自己的
-                 * 内核栈上往 switch_to 走（接上 IPI 之后父进程会被立刻唤醒到另一个
-                 * hart 上）。必须等它真正把上下文保存完、
-                 * 彻底离开 CPU，才能回收它的内核栈和 PCB——否则就是在它脚下把正在
-                 * 使用的栈释放掉，典型表现是内核线程（proc_mm 为 NULL）在随机地址
-                 * 上页错误。proc_on_cpu 由 sched_finish_switch() 在 switch_to 完成后
-                 * 清零，单核下父进程能跑起来就说明子进程早已让出，循环不会真的转。 */
-                while (child->proc_on_cpu)
-                {
-                    sched_schedule();
-                }
-
-                int16_t cpid = child->proc_pid;
-                if (status)
-                {
-                    /* POSIX wait status：低 7 位是把它杀死的信号号，为 0 才表示正常
-                     * 退出（此时高 8 位是退出码）。ash 的 $? = 128 + signo 靠这个算 */
-                    *status = child->proc_exit_sig != 0
-                                  ? (child->proc_exit_sig & 0x7f)
-                                  : ((child->proc_exit_code & 0xff) << 8);
-                }
-
-                /* times() 的 tms_cutime：把子进程（及它已收割的孙辈）的累计执行时间
-                 * 归并到父进程。**必须赶在下面 kfree(child) 之前**，顺序反了就是读
-                 * 已释放内存。 */
-                cur->proc_sum_exec_runtime_children +=
-                    child->proc_sum_exec_runtime + child->proc_sum_exec_runtime_children;
-
-                /* 收割：从父的 children、全局 proc_list 摘掉，释放它自己没法释放的
-                 * 内核栈与 PCB（还站在上面跑的时候不能自己拆），回收 PID */
-                list_del(&child->proc_sibling_linker);
-                irq_key_t plist_key = spinlock_acquire(&proc_list_lock);
-                list_del(&child->proc_list_linker);
+                /* 在锁内摘链：之后既不会被 kill 查到，也不会被收割第二次 */
+                list_del(&c->proc_sibling_linker);
+                list_del(&c->proc_list_linker);
                 task_count -= 1;
-                spinlock_release(&proc_list_lock, plist_key);
-                if (child->proc_sighand)
-                {
-                    kfree(child->proc_sighand);
-                    child->proc_sighand = NULL;
-                }
-                dealloc_kernel_stack(child);
-                dealloc_pid_map(cpid);
-                kfree(child);
-
-                return cpid;
+                child = c;
+                break;
             }
+        }
+        spinlock_release(&proc_list_lock, plist_key);
+
+        if (child != NULL)
+        {
+            cur->proc_state = RUNNING;
+
+            /* 子进程在 do_exit 里的顺序是"先置 ZOMBIE + wakeup(父进程)，再
+             * sched_schedule()"，所以父进程被唤醒时，子进程很可能还站在自己的
+             * 内核栈上往 switch_to 走（接上 IPI 之后父进程会被立刻唤醒到另一个
+             * hart 上）。必须等它真正把上下文保存完、
+             * 彻底离开 CPU，才能回收它的内核栈和 PCB——否则就是在它脚下把正在
+             * 使用的栈释放掉，典型表现是内核线程（proc_mm 为 NULL）在随机地址
+             * 上页错误。proc_on_cpu 由 sched_finish_switch() 在 switch_to 完成后
+             * 清零，单核下父进程能跑起来就说明子进程早已让出，循环不会真的转。 */
+            while (child->proc_on_cpu)
+            {
+                sched_schedule();
+            }
+
+            int16_t cpid = child->proc_pid;
+            if (status)
+            {
+                /* POSIX wait status：低 7 位是把它杀死的信号号，为 0 才表示正常
+                 * 退出（此时高 8 位是退出码）。ash 的 $? = 128 + signo 靠这个算 */
+                *status = child->proc_exit_sig != 0
+                              ? (child->proc_exit_sig & 0x7f)
+                              : ((child->proc_exit_code & 0xff) << 8);
+            }
+
+            /* times() 的 tms_cutime：把子进程（及它已收割的孙辈）的累计执行时间
+             * 归并到父进程。**必须赶在下面 kfree(child) 之前**，顺序反了就是读
+             * 已释放内存。 */
+            cur->proc_sum_exec_runtime_children +=
+                child->proc_sum_exec_runtime + child->proc_sum_exec_runtime_children;
+
+            /* 收割：释放它自己没法释放的内核栈与 PCB（还站在上面跑的时候不能
+             * 自己拆），回收 PID */
+            if (child->proc_sighand)
+            {
+                kfree(child->proc_sighand);
+                child->proc_sighand = NULL;
+            }
+            dealloc_kernel_stack(child);
+            dealloc_pid_map(cpid);
+            kfree(child);
+
+            return cpid;
         }
 
         if (!has_child)
@@ -746,6 +769,10 @@ int do_exec(intstkf_t *sp, const char *path, char *const *argv, char *const *env
 
     /* 6) 全新用户栈 VMA（懒分配）并在上面铺 argc/argv/envp/auxv；fd 表其余部分原样保留 */
     vma_t *stk = vmm_vma_create(USER_STACK_TOP - USER_STACK_LEN, USER_STACK_TOP, VMP_R | VMP_W);
+    if (stk == NULL)
+    {
+        panic("do_exec: no memory for the user stack VMA after point of no return");
+    }
     vmm_vma_insert(new_mm, stk);
 
     virAddr_t user_sp;
@@ -801,7 +828,7 @@ void proc_early_init(void)
 {
     spinlock_init(&proc_list_lock);
     INIT_LIST_HEAD(&proc_list);
-    INIT_LIST_HEAD(&pid_stack);
+    spinlock_init(&pid_lock);
 }
 
 void proc_init(void)
@@ -1035,6 +1062,19 @@ static pcb_t *find_proc_by_pid(int16_t pid)
     return NULL;
 }
 
+/**
+ * @brief 当前进程的父进程 pid；没有父进程时返回 0
+ * @note 在 proc_list_lock 下读：父进程可能正在退出、随即被收割释放。
+ */
+int16_t proc_get_ppid(void)
+{
+    irq_key_t plist_key = spinlock_acquire(&proc_list_lock);
+    pcb_t *p = proc_get_current()->proc_parent;
+    int16_t ppid = (p != NULL) ? (int16_t)p->proc_pid : 0;
+    spinlock_release(&proc_list_lock, plist_key);
+    return ppid;
+}
+
 /* 按 pid 查找 pcb 的公开包装，供 do_wait 之外的模块（如调度回归测试）使用。 */
 pcb_t *proc_find_by_pid(int16_t pid)
 {
@@ -1078,45 +1118,34 @@ int proc_apply_by_pgid(int16_t pgid, void (*fn)(pcb_t *p, int arg), int arg)
     return count;
 }
 
+/* 从上次分配处往后找下一个空闲 pid，用满 [1, PID_MAX_VALUE] 后回绕——刚释放的号
+ * 要等一整圈才会再发出去，按 pid 操作的 wait/kill 不容易误伤复用了旧号的新进程 */
 static int16_t alloc_pid_map(void)
 {
     static uint16_t last_alloc = 0;
+    int16_t ret = ENO3_NOFREE_PID;
 
-    /* 优先复用已归还的 pid：FIFO（摘链表头，dealloc_pid_map 从链表尾插入）——
-     * 最早归还的先被复用，尽量拖延"刚死的进程 pid 立刻被新进程占用"这个复用陷阱，
-     * 不然以后 wait/kill 之类按 pid 操作的功能可能误伤到复用了旧 pid 的新进程 */
-    if (!list_empty(&pid_stack))
-    {
-        struct list_head *head = pid_stack.next;
-        pids_t *cur = list_entry(head, pids_t, pid_stk_linker);
-        list_del_init(head);
-        int16_t ret = cur->pid;
-        kfree(cur);
-        return ret;
-    }
-
-    /* 没有可复用的：发一个全新号；用满 [1, PID_MAX_VALUE] 后从头回绕，
-     * 每个候选号都用 find_proc_by_pid 确认真的空闲，避免跟存活进程撞号 */
+    irq_key_t pid_lock_key = spinlock_acquire(&pid_lock);
     for (uint16_t tried = 0; tried < PID_MAX_VALUE; tried++)
     {
         last_alloc = (last_alloc % PID_MAX_VALUE) + 1;
-        if (find_proc_by_pid(last_alloc) == NULL)
+        uint64_t bit = 1UL << (last_alloc % 64);
+        if ((pid_bitmap[last_alloc / 64] & bit) == 0)
         {
-            return (int16_t)last_alloc;
+            pid_bitmap[last_alloc / 64] |= bit;
+            ret = (int16_t)last_alloc;
+            break;
         }
     }
-
-    return ENO3_NOFREE_PID; /* 整个 pid 空间都被占满 */
+    spinlock_release(&pid_lock, pid_lock_key);
+    return ret;
 }
 
-/* A "pids_t" will be alloced when a pid were being dealloced. */
 static void dealloc_pid_map(int16_t pid)
 {
-    /* Alloc a new "pids_t". */
-    pids_t *cur = (pids_t *)kmalloc(sizeof(pids_t));
-    cur->pid = pid;
-    /* 插到尾部，配合 alloc_pid_map 从头摘，构成 FIFO */
-    list_add_tail(&(cur->pid_stk_linker), &pid_stack);
+    irq_key_t pid_lock_key = spinlock_acquire(&pid_lock);
+    pid_bitmap[pid / 64] &= ~(1UL << (pid % 64));
+    spinlock_release(&pid_lock, pid_lock_key);
 }
 
 void idle(void)

@@ -37,11 +37,9 @@ int elf_load(mm_t *mm, const unsigned char *image, uint64_t size, elf_info_t *in
 {
     Elf64_Ehdr *ehdr = (Elf64_Ehdr *)image; /* 文件头在image最开头 */
 
-    /* 最小校验：ELF 来源可能是磁盘/未来 execve 传入的用户文件，不可信，
-     * 因此返回错误码交由调用者（如未来的 do_exec）决定如何处理。
-     * 不做 p_vaddr 范围 / p_align 校验：那是地址空间隔离问题，与本函数的内存安全无关；
-     * 但 size 边界必须校验——一旦 image 来自磁盘，越界的 e_phoff/p_offset/p_filesz
-     * 会导致读取 image 缓冲区之外的内核内存。 */
+    /* ELF 来自磁盘、由用户 execve 指定，不可信：校验失败返回错误码交给调用者。
+     * size 边界必须校验，越界的 e_phoff/p_offset/p_filesz 会读到 image 之外的内核内存；
+     * p_vaddr 的范围也必须校验，第三遍是直接按 p_vaddr 写内存的。 */
     if (memcmp(ehdr->e_ident, ELFMAG, SELFMAG) != 0)
     {
         printf("%s: bad ELF magic\n", __FUNCTION__);
@@ -137,6 +135,13 @@ int elf_load(mm_t *mm, const unsigned char *image, uint64_t size, elf_info_t *in
         if (ph->p_memsz > (uint64_t)(-1) - ph->p_vaddr - PGSIZE)
         {
             printf("%s: segment %d address range overflows\n", __FUNCTION__, i);
+            return ENO6_INVAL_PARAM;
+        }
+        /* 段必须整个落在用户区，并给紧跟其后的堆留出 USER_HEAP_MAX（堆不得碰到 mmap 区）。
+         * 放过一个落在内核高半段的段，第三遍的 memcpy 就是在替用户改写内核内存。 */
+        if (ph->p_vaddr + ph->p_memsz > USER_MMAP_BASE - USER_HEAP_MAX)
+        {
+            printf("%s: segment %d outside user space\n", __FUNCTION__, i);
             return ENO6_INVAL_PARAM;
         }
         /* ELF 规范要求 PT_LOAD 按 p_vaddr 升序排列且内存区间互不重叠。

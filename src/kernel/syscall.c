@@ -1014,8 +1014,7 @@ static long sys_getpid(void)
 
 static long sys_getppid(void)
 {
-    pcb_t *p = proc_get_current()->proc_parent;
-    return p ? p->proc_pid : 0;
+    return proc_get_ppid();
 }
 
 static long sys_clone(intstkf_t *sp)
