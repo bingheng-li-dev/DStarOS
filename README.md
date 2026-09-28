@@ -44,32 +44,24 @@ bash scripts/run.sh   # 启动 QEMU（默认 4 核；SMP=2 bash scripts/run.sh �
 
 ### 3. QEMU：回归
 
-每套回归对应 `src/debug/debug.h` 里的一个 `DEBUG_*_TEST` 开关，**一次只开一个**：
+回归套件由 `src/debug/debug.h` 里的 `DEBUG_SUITE` 选择，取值是套件名的大写加 `SUITE_` 前缀：
 
 ```bash
 # 例：跑 memtest
-#   1. 把 debug.h 里的 DEBUG_MEM_TEST 改成 1（其余 DEBUG_*_TEST 保持 0）
+#   1. 把 debug.h 里的 DEBUG_SUITE 改成 SUITE_MEM
 make
 bash scripts/regress.sh mem        # 可加次数：bash scripts/regress.sh mem 5
-#   2. 跑完把开关改回 0
+#   2. 跑完改回 SUITE_NONE
+
+bash scripts/regress_all.sh        # 或者一次跑完全部 19 套，自动切换并复位
+bash scripts/regress_all.sh mem bb # 只跑指定几套
 ```
 
-| 套件 | 开关 | 套件 | 开关 |
-|---|---|---|---|
-| sched | `DEBUG_SCHED_TEST` | sig | `DEBUG_SIGNAL_TEST` |
-| slab | `DEBUG_SLAB_TEST` | time | `DEBUG_TIME_TEST` |
-| dcache | `DEBUG_DCACHE_TEST` | seg | `DEBUG_SEG_TEST` |
-| vfs | `DEBUG_VFS_TEST` | wait | `DEBUG_WAIT_TEST` |
-| file | `DEBUG_FILE_TEST` | trap | `DEBUG_TRAP_TEST` |
-| pipe | `DEBUG_PIPE_TEST` | musl | `DEBUG_MUSL_TEST` |
-| tty | `DEBUG_TTY_TEST` | msys | `DEBUG_MSYSCHECK_TEST` |
-| mem | `DEBUG_MEM_TEST` | mroot | `DEBUG_MROOTFS_TEST` |
-| exec | `DEBUG_EXEC_TEST` | mfp | `DEBUG_MFP_TEST` |
-| | | bb | `DEBUG_BUSYBOX_TEST` |
+套件：`sched` `slab` `dcache` `vfs`（内核态），`file` `pipe` `tty` `mem` `exec` `sig` `time` `seg` `wait`
+`trap` `musl` `msys` `mroot` `mfp` `bb`（用户态）。
 
 - 通过时输出形如 `[mem] run 1: === memtest done: 54 pass  0 fail ===`；失败时打印 `FAILED` 及原因，完整串口日志存到容器的 `/tmp/regress-<套件>-<次>-fail.log`。
-- **bb 套件额外要求** `DEBUG_BUSYBOX_INTERACTIVE` 设为 0，跑完改回 1（交付形态是交互式 ash，会停在提示符等到超时）。
-- **交付形态**：所有 `DEBUG_*_TEST` 为 0、`DEBUG_BUSYBOX_INTERACTIVE` 为 1。提交代码前确认开关已复位。
+- **交付形态**：`DEBUG_SUITE` 为 `SUITE_NONE`。提交代码前确认已复位。
 
 ### 4. VF2：构建镜像
 

@@ -4,15 +4,16 @@
 /**
  * @file slab_test.c
  * @brief slab 分配器内核态自检
- * @details 由 proc_init()（proc.c）在 DEBUG_SLAB_TEST 打开时调用 run_slab_tests()，
+ * @details DEBUG_SUITE 为 SUITE_SLAB 时由 debug_suite_run() 调用，
  *   跑完直接关机。覆盖四组：基本分配/释放/复用、通用尺寸类 kmalloc 往返、
  *   碎片化下的分档效果、空页回收与 slab_reclaim_all()。
  */
 
 #include "debug.h"
 
-#if DEBUG_SLAB_TEST
+#if DEBUG_SUITE == SUITE_SLAB
 
+#include "suites.h"
 #include "slab.h"
 #include "pmm.h"
 #include "kmalloc.h"
@@ -332,6 +333,9 @@ static void test_reclaim(void)
     kfree(small);
 }
 
+/**
+ * @brief slab 自检入口
+ */
 void run_slab_tests(void)
 {
     slab_pass = 0;
@@ -345,4 +349,4 @@ void run_slab_tests(void)
     printf("=== slabtest done: %d pass  %d fail ===\n", slab_pass, slab_fail);
 }
 
-#endif /* DEBUG_SLAB_TEST */
+#endif /* DEBUG_SUITE == SUITE_SLAB */

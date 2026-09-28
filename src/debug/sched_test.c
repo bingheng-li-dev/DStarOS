@@ -6,7 +6,7 @@
  * @brief 调度器回归测试（CFS/idle 类、生命周期、公平性）+ 全套测试聚合入口
  *
  * @details
- *   由 init 进程（pid 1，正规调度任务）在 DEBUG_SCHED_TEST 打开时调用 run_sched_tests()。
+ *   DEBUG_SUITE 为 SUITE_SCHED 时由 init 进程（pid 1，正规调度任务）调用 run_sched_tests()。
  *   init 作为协作式测试驱动：fork 出 worker 内核线程，worker 跑完自己的逻辑后 return
  *   （经 kernel_thread_entry 落到 do_exit），init 用 do_wait 收割，从而端到端触发
  *   do_fork / sched_activate / sched_schedule / do_exit / wakeup / do_wait 整条链路。
@@ -22,13 +22,17 @@
 #include "ktime.h"
 #include "atomic.h"
 #include "sync.h"
+#include "suites.h"
 
 /* ============================================================
- * 共享断言计数器（sync_test.c / rt_sched_test.c 也用，故非 static）
+ * 各调度类子套件共用的断言
  * ============================================================ */
-int sched_test_pass = 0;
-int sched_test_fail = 0;
+static int sched_test_pass = 0;
+static int sched_test_fail = 0;
 
+/**
+ * @brief 记一条断言结果并打印 [PASS]/[FAIL]
+ */
 void sched_test_check(const char *name, int cond)
 {
     if (cond)
@@ -420,19 +424,13 @@ static void sched_timed_sleep_test(void)
 }
 
 /* ============================================================
- * 聚合入口：由 init（DEBUG_SCHED_TEST）调用
+ * 聚合入口
  * ============================================================ */
+/**
+ * @brief 调度器回归入口，依次跑本文件与 sync/rt/waitq/pipe 各子套件
+ */
 void run_sched_tests(void)
 {
-    /* 其他测试文件的入口 */
-    extern void sync_sem_wakeup_test(void);
-    extern void sync_mutex_test(void);
-    extern void rt_preempt_cfs_test(void);
-    extern void rt_rr_rotation_test(void);
-    extern void waitq_single_wakeup_test(void);
-    extern void waitq_broadcast_test(void);
-    extern void run_pipe_tests(void);
-
     printf("\n======== SCHEDULER REGRESSION TESTS ========\n");
     sched_test_pass = 0;
     sched_test_fail = 0;

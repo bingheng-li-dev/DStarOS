@@ -184,6 +184,8 @@ void do_exit_signal(int sig) __attribute__((noreturn));
 int16_t do_wait(int16_t pid, int *status, int options);
 int do_exec(intstkf_t *sp, const char *path, char *const *argv, char *const *envp);
 int16_t create_kernel_thread_by_fork(void *func(void *), void *args, uint32_t clone_flags);
+/* 当前内核线程变身用户进程，加载 path 并进入 U 态，不返回 */
+void proc_run_user_program(const char *path, const char *const argv[], int argc);
 /* 按 pid 查找 pcb（find_proc_by_pid 的公开包装）；未找到返回 NULL。
  * @note 内部自取 proc_list_lock，调用者不得已经持有它（自旋锁不可重入）。 */
 pcb_t *proc_find_by_pid(int16_t pid);

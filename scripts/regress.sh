@@ -1,7 +1,7 @@
 #!/bin/bash
 # 回归套件运行器（容器内使用）：bash scripts/regress.sh <suite> [runs]
 #   suite: sched | slab | dcache | vfs | file | pipe | tty | mem | exec | sig | time | seg | wait | trap | musl | msys | mroot | mfp | bb
-# 切换套件前必须自行改 src/debug/debug.h 里对应的开关（U 态那批开关互斥）再 make。
+# 切换套件前必须自行把 src/debug/debug.h 的 DEBUG_SUITE 改成对应的 SUITE_* 再 make。
 #
 # 用户程序从 rootfs 镜像加载：镜像比 user/*.elf 旧的话，回归会静默地测上一版程序，
 # 改了测试却看不到变化。

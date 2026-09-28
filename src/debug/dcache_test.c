@@ -4,19 +4,20 @@
 /**
  * @file dcache_test.c
  * @brief 目录项缓存（LRU dcache）内核态自检
- * @details 由 proc_init()（proc.c）在 DEBUG_DCACHE_TEST 打开时调用 run_dcache_tests()，
+ * @details DEBUG_SUITE 为 SUITE_DCACHE 时由 debug_suite_run() 调用，
  *   跑完直接关机。覆盖七组：基本命中、LRU 复活、父引用与祖先链、删除逐出、
  *   重命名后子树仍可用、水位线与内存归还、进程退出归还 cwd 引用。
  *
  *   SMP 并发那一组不在这里——两个 hart 同时 open/close 同一批路径由
- *   DEBUG_FILE_TEST（user/filetest.c 的双子进程阶段）在 -smp 2 下覆盖，
+ *   SUITE_FILE（user/filetest.c 的双子进程阶段）覆盖，
  *   那条路径走的是真实 syscall 壳，连 vfs_big_lock 一起压到。
  */
 
 #include "debug.h"
 
-#if DEBUG_DCACHE_TEST
+#if DEBUG_SUITE == SUITE_DCACHE
 
+#include "suites.h"
 #include "vfs.h"
 #include "pmm.h"
 #include "slab.h"
@@ -421,6 +422,9 @@ static void setup(void)
     make_file(DCACHE_TEST_DEEP, "deep");
 }
 
+/**
+ * @brief 目录项缓存自检入口
+ */
 void run_dcache_tests(void)
 {
     dcache_pass = 0;
@@ -443,4 +447,4 @@ void run_dcache_tests(void)
     printf("=== dcachetest done: %d pass  %d fail ===\n", dcache_pass, dcache_fail);
 }
 
-#endif /* DEBUG_DCACHE_TEST */
+#endif /* DEBUG_SUITE == SUITE_DCACHE */

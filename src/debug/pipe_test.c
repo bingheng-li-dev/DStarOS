@@ -16,6 +16,7 @@
  */
 
 #include "console.h"
+#include "suites.h"
 #include "proc.h"
 #include "sched.h"
 #include "sync.h"
@@ -30,7 +31,6 @@
 /* SMP 下等待另一个 hart 上的 reader 到达某个阶段时，主动让出的最大次数上限 */
 #define PIPE_YIELD_SPINS 10000
 
-extern void sched_test_check(const char *name, int cond);
 
 /* 手工初始化一个 pipe_t：buf 用 kmalloc(PIPE_SIZE)，测试场景不追求走
  * pmm_alloc_page（那是整页分配器的事，与 pipe_read 本身的逻辑无关），语义等价。 */

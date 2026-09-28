@@ -18,6 +18,7 @@
 #include "linux_abi.h"
 #include "ktime.h"
 #include "fpu.h"
+#include "suites.h"
 
 /* 全部进程的链表（各 hart 的 idle 不在其中） */
 struct list_head proc_list;
@@ -1255,7 +1256,7 @@ static void proc_signal_init_user(pcb_t *p)
 /**
  * @brief 建独立用户地址空间、从根文件系统加载指定程序并进入 U 态
  * @param[in] path 可执行文件在根文件系统里的绝对路径
- * @details 第一个用户进程的加载路径，程序来自 rootfs 镜像。读法与 `do_exec` 一致：一次 kmalloc 把整个文件读进内核堆，`elf_load` 把各段拷进
+ * @details 内核线程变身用户进程的加载路径，程序来自 rootfs 镜像。读法与 `do_exec` 一致：一次 kmalloc 把整个文件读进内核堆，`elf_load` 把各段拷进
  *   用户页之后立刻归还。区别只在参数来源——`do_exec` 的 path/argv 来自用户空间要
  *   `copy_from_user`，这里的是内核里的字面量。
  * @note argv 由调用方给全，含 argv[0]——BusyBox 靠 argv[0] 分发 applet。
@@ -1263,7 +1264,7 @@ static void proc_signal_init_user(pcb_t *p)
  * @note 找不到文件时 panic 并提示跑 `make rootfs`：这条路径上没有可降级的余地，
  *   静默失败只会表现成"内核起来了但什么都没发生"。
  */
-static void run_user_program(const char *path, const char *const argv[], int argc)
+void proc_run_user_program(const char *path, const char *const argv[], int argc)
 {
     /* 1) 独立用户 mm（新 PGD + 复制内核半段） */
     mm_t *mm = create_user_mm();
@@ -1359,90 +1360,6 @@ static void run_user_program(const char *path, const char *const argv[], int arg
     enter_user_mode(einfo.entry, user_sp);
 }
 
-/* 第一个用户进程跑哪个程序，由 debug.h 里那批互斥的 DEBUG_*_TEST 开关选；
- * 程序都由 tools/build_rootfs.sh 放在 rootfs 镜像的 /bin 下。 */
-#if DEBUG_EXEC_TEST
-#define USER_PROGRAM_PATH "/bin/exectest.elf"
-#elif DEBUG_FILE_TEST
-#define USER_PROGRAM_PATH "/bin/filetest.elf"
-#elif DEBUG_PIPE_TEST
-#define USER_PROGRAM_PATH "/bin/pipetest.elf"
-#elif DEBUG_TTY_TEST
-#define USER_PROGRAM_PATH "/bin/ttytest.elf"
-#elif DEBUG_MEM_TEST
-#define USER_PROGRAM_PATH "/bin/memtest.elf"
-#elif DEBUG_SIGNAL_TEST
-#define USER_PROGRAM_PATH "/bin/sigtest.elf"
-#elif DEBUG_TIME_TEST
-#define USER_PROGRAM_PATH "/bin/timetest.elf"
-#elif DEBUG_SEG_TEST
-#define USER_PROGRAM_PATH "/bin/segtest.elf"
-#elif DEBUG_MUSL_TEST
-#define USER_PROGRAM_PATH "/bin/mhello.elf"
-#elif DEBUG_MSYSCHECK_TEST
-#define USER_PROGRAM_PATH "/bin/msyscheck.elf"
-#elif DEBUG_MROOTFS_TEST
-#define USER_PROGRAM_PATH "/bin/mrootfs.elf"
-#elif DEBUG_WAIT_TEST
-#define USER_PROGRAM_PATH "/bin/waittest.elf"
-#elif DEBUG_TRAP_TEST
-#define USER_PROGRAM_PATH "/bin/trapkill.elf"
-#elif DEBUG_BUSYBOX_TEST
-#define USER_PROGRAM_PATH "/bin/busybox"
-#elif DEBUG_MFP_TEST
-#define USER_PROGRAM_PATH "/bin/mfptest.elf"
-#elif DEBUG_FORK_WAIT_TEST
-/* 这个开关靠内核态 init 的收割循环打印 "reaped pid=..."，不能让 PID 1 变身；
- * 给它一个跑完就退出的程序占位，收割循环才有东西可收。 */
-#define USER_PROGRAM_PATH "/bin/hello.elf"
-#else
-/* 没有任何测试开关打开 = 生产形态：PID 1 自己变身 /sbin/init。
- * BOOT_AS_INIT 只在这一支定义，于是往上面那条链里新加测试开关时不用记得
- * 同步维护它——新开关一旦命中，这一支就走不到，BOOT_AS_INIT 自动是 0。 */
-#define USER_PROGRAM_PATH "/sbin/init"
-#define BOOT_AS_INIT 1
-#endif
-
-#ifndef BOOT_AS_INIT
-#define BOOT_AS_INIT 0
-#endif
-
-/* 只有 BusyBox 需要真正的 argv——它按 argv[0]（以及 standalone 模式下的 argv[1]）
- * 决定跑哪个 applet。其余程序一个参数都不看，给一个程序名占住 argv[0] 即可。 */
-#if DEBUG_BUSYBOX_TEST
-#if DEBUG_BUSYBOX_INTERACTIVE
-#define USER_PROGRAM_ARGV { "busybox", "sh" }
-#else
-/* BusyBox 冒烟串。用 && 串起来：任何一条失败就短路，收尾的标记打不出来，
- * regress.sh 于是判"suite did not finish"——不然命令挂了也会被当成通过。
- * 每一段对应一类 syscall：echo=write、ls=getdents64/newfstatat、cat=openat/read、
- * mkdir/rmdir=mkdirat/unlinkat、管道=pipe2+clone+wait4、pwd=getcwd、uname、sleep。
- * 那些 >/dev/null 不是为了安静——重定向走的正是 ash 的 savefd()，也就是
- * fcntl(F_DUPFD, 10) 那条路径，顺带把 NOFILE 放大那条改动压进来。 */
-#define USER_PROGRAM_ARGV { "busybox", "sh", "-c", "echo bb-echo && ls / >/dev/null && cat /etc/issue >/dev/null && mkdir /tmp/bb && ls /tmp >/dev/null && rmdir /tmp/bb && ls / | cat >/dev/null && pwd >/dev/null && uname >/dev/null && sleep 0 && echo === bbtest done ===" }
-#endif
-#else
-#define USER_PROGRAM_ARGV { "init" }
-#endif
-
-/* argv[0] 一律写程序名而不是路径：BusyBox 按 argv[0] 分发 applet，
- * 其余程序不看 argv[0]，统一成这个形状省得两套约定。 */
-static const char *const user_program_argv[] = USER_PROGRAM_ARGV;
-
-static void run_first_user_program(void)
-{
-    run_user_program(USER_PROGRAM_PATH, user_program_argv,
-                     (int)(sizeof(user_program_argv) / sizeof(user_program_argv[0])));
-}
-
-#if DEBUG_FORK_WAIT_TEST
-static void run_fork_wait_test_program(void)
-{
-    static const char *const fw_argv[] = { "fork_wait" };
-    run_user_program("/bin/fork_wait.elf", fw_argv, 1);
-}
-#endif
-
 static int16_t init(void)
 {
     printf("%s::Hello! I'm the init process!!\n", __FUNCTION__);
@@ -1465,101 +1382,15 @@ static int16_t init(void)
     printf("[init] kernel thread KVA after switch_to: PASS\n");
 #endif
 
-#if DEBUG_SLAB_TEST
-    /* slab 分配器自检：跑完直接关机，不启动用户程序。测试代码在 src/debug/slab_test.c。 */
-    {
-        extern void run_slab_tests(void);
-        run_slab_tests();
-        sbi_shutdown();
-    }
-#endif
-
-#if DEBUG_VFS_TEST
-    /* VFS/FatFS 回归：跑完直接关机，不启动用户程序。测试代码在 src/debug/vfs_fatfs_test.c。 */
-    {
-        extern void vfs_test(void);
-        vfs_test();
-        sbi_shutdown();
-    }
-#endif
-
-#if DEBUG_DCACHE_TEST
-    /* 目录项缓存自检：跑完直接关机，不启动用户程序。测试代码在 src/debug/dcache_test.c。 */
-    {
-        extern void run_dcache_tests(void);
-        run_dcache_tests();
-        sbi_shutdown();
-    }
-#endif
-
-#if DEBUG_SCHED_TEST
-    /* 调度器/同步回归测试：以 init（正规调度任务）为驱动，fork 若干 worker 并收割，
-     * 端到端触发 CFS/RT/idle 三类、sched_schedule、sleep/wakeup、信号量、do_fork/exit/wait。
-     * 跑完直接关机，不再启动用户程序。测试代码在 src/debug 下的 sched_test.c 等文件。 */
-    {
-        extern void run_sched_tests(void);
-        run_sched_tests();
-        printf("[init] scheduler tests done, shutting down\n");
-        sbi_shutdown();
-    }
-#endif
-
-#if DEBUG_FORK_WAIT_TEST
-    /* 验证 sys_clone/sys_wait4：见 user/fork_wait.c，跑完串口应看到 "child: hi" 和
-     * "parent: reaped pid=<N> exitcode=42"，随后这个测试进程自己 exit(0) 被 init 收割。 */
-    {
-        int16_t fw_pid = create_kernel_thread_by_fork((void *)run_fork_wait_test_program, NULL, 0);
-        if (fw_pid < 0)
-        {
-            panic("Failed to fork fork_wait test program thread!\n");
-        }
-    }
-#endif
-
-#if BOOT_AS_INIT
-    /* 生产形态：PID 1 自己变身成 /sbin/init，不 fork、也不再有内核态收割循环。
-     * 收割职责随之搬到用户态——do_exit 的孤儿过继目标仍然是 find_proc_by_pid(1)，
-     * 那正是变身之后的这个进程，内核侧的过继机制一行都没改。
-     * run_user_program 末尾是 enter_user_mode，正常情况下永不返回。 */
-    run_first_user_program();
-    panic("init: run_user_program(" USER_PROGRAM_PATH ") returned");
+#if DEBUG_SUITE
+    debug_suite_run();
+    return 0;
 #else
-    int16_t pid = create_kernel_thread_by_fork((void *)run_first_user_program, NULL, 0);
-    if (pid < 0)
-    {
-        panic("Failed to fork user program thread!\n");
-    }
-
-    /* 永久收割循环：孤儿最终都会过继到这里，没有这个循环孤儿僵尸会永久堆积。
-     * 回归形态专用：scripts/regress.sh 判一套跑完，靠的就是下面那句
-     * "no more children, shutting down" 之后 QEMU 退出。 */
-    while (1)
-    {
-        int status;
-        int16_t cpid = do_wait(-1, &status, 0);
-        if (cpid == ENO24_RESTARTSYS)
-        {
-            /* init 是内核线程（proc_sighand == NULL），走不到这里；留一手防止
-             * 以后 init 变成用户进程时"被信号打断"被误判成"没有子进程了"而关机 */
-            continue;
-        }
-        if (cpid > 0)
-        {
-            printf("[init] reaped pid=%d status=%d\n", cpid, (status >> 8) & 0xff);
-        }
-        else
-        {
-            printf("[init] no more children, shutting down\n");
-#if DEBUG_MEM_TEST || DEBUG_FILE_TEST
-            /* 压力用例跑完之后核对各 cache 的 nr_inuse 是否回到基线（vma_cache 尤其）*/
-            slab_dump_stats();
-            vfs_dcache_stats();
-            printf("[init] pmm_free_list.fnsize=%d\n", pmm_free_list.fnsize);
+    /* PID 1 自己变身 /sbin/init：孤儿过继目标仍是 find_proc_by_pid(1)，收割随之搬到用户态 */
+    static const char *const init_argv[] = { "init" };
+    proc_run_user_program("/sbin/init", init_argv, 1);
+    panic("init: run_user_program(/sbin/init) returned");
 #endif
-            sbi_shutdown();
-        }
-    }
-#endif /* BOOT_AS_INIT */
 }
 
 static void fork_out(void)

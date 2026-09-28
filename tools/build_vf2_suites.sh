@@ -5,13 +5,11 @@
 #   bash tools/build_vf2_suites.sh              # 全部 19 套
 #   bash tools/build_vf2_suites.sh wait mfp     # 只打指定的几套
 #
-# 每套只打开一个 DEBUG_*_TEST 开关、以 PLATFORM=VF2 全量重建，然后逐个核对：
-#   1. 测试开关恰好一个为 1——只核对"目标开关为 1"不够，上一套没清掉的开关会在
-#      proc.c 的 #elif 链里抢先生效，镜像跑的是另一套测试，且不会有任何报错；
-#   2. 零告警；
-#   3. 内核里有这一套的特征串（内核态套件用收尾标记，用户态套件用 USER_PROGRAM_PATH）；
-#   4. 所有 vf2-<suite>.img 的 CRC 互不相同——构建是确定性的，两套 CRC 相同就是打成了同一个镜像。
-# 结束时（含中途失败）把开关复位成交付形态，并重建 build/vf2-kernel.img。
+# 每套把 DEBUG_SUITE 设成对应的 SUITE_*、以 PLATFORM=VF2 全量重建，然后逐个核对：
+#   1. 零告警；
+#   2. 内核里有这一套的特征串（内核态套件用收尾标记，用户态套件用 USER_PROGRAM_PATH）；
+#   3. 所有 vf2-<suite>.img 的 CRC 互不相同——构建是确定性的，两套 CRC 相同就是打成了同一个镜像。
+# 结束时（含中途失败）把 DEBUG_SUITE 复位成交付形态，并重建 build/vf2-kernel.img。
 set -uo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -20,22 +18,6 @@ cd "$ROOT_DIR"
 D=src/debug/debug.h
 ALL_SUITES="sched slab dcache vfs file pipe tty mem exec sig time seg wait trap musl msys mroot mfp bb"
 SUITES="${*:-$ALL_SUITES}"
-
-switch_of() {
-    case $1 in
-        sched) echo DEBUG_SCHED_TEST ;;     slab)  echo DEBUG_SLAB_TEST ;;
-        dcache) echo DEBUG_DCACHE_TEST ;;   vfs)   echo DEBUG_VFS_TEST ;;
-        file)  echo DEBUG_FILE_TEST ;;      pipe)  echo DEBUG_PIPE_TEST ;;
-        tty)   echo DEBUG_TTY_TEST ;;       mem)   echo DEBUG_MEM_TEST ;;
-        exec)  echo DEBUG_EXEC_TEST ;;      sig)   echo DEBUG_SIGNAL_TEST ;;
-        time)  echo DEBUG_TIME_TEST ;;      seg)   echo DEBUG_SEG_TEST ;;
-        wait)  echo DEBUG_WAIT_TEST ;;      trap)  echo DEBUG_TRAP_TEST ;;
-        musl)  echo DEBUG_MUSL_TEST ;;      msys)  echo DEBUG_MSYSCHECK_TEST ;;
-        mroot) echo DEBUG_MROOTFS_TEST ;;   mfp)   echo DEBUG_MFP_TEST ;;
-        bb)    echo DEBUG_BUSYBOX_TEST ;;
-        *)     echo "" ;;
-    esac
-}
 
 signature_of() {
     case $1 in
@@ -53,31 +35,23 @@ signature_of() {
 }
 
 for s in $SUITES; do
-    [ -n "$(switch_of "$s")" ] || { echo "build_vf2_suites: 未知套件 '$s'（可选：$ALL_SUITES）" >&2; exit 2; }
+    case " $ALL_SUITES " in
+        *" $s "*) ;;
+        *) echo "build_vf2_suites: 未知套件 '$s'（可选：$ALL_SUITES）" >&2; exit 2 ;;
+    esac
 done
-
-ALL_SWITCHES=$(for s in $ALL_SUITES; do switch_of "$s"; done)
 
 # 宿主机偶尔会短暂占住 debug.h（编辑器、杀软），容器里 sed -i 的 rename 随之 Permission denied。
 # 失败时重试，并以文件里实际的值为准。
-set_switch() {
+set_suite() {
     local t
     for t in 1 2 3 4 5 6 7 8 9 10; do
-        sed -i "s/^\(#define $1 \)[0-9][0-9]*/\1$2/" "$D" 2>/dev/null
-        grep -qE "^#define $1 $2\b" "$D" && return 0
+        sed -i "s/^#define DEBUG_SUITE .*/#define DEBUG_SUITE $1/" "$D" 2>/dev/null
+        grep -qE "^#define DEBUG_SUITE $1\$" "$D" && return 0
         sleep 1
     done
-    echo "build_vf2_suites: 无法把 $1 设为 $2" >&2
+    echo "build_vf2_suites: 无法把 DEBUG_SUITE 设为 $1" >&2
     return 1
-}
-
-restore_switches() {
-    local m ok=0
-    for m in $ALL_SWITCHES; do
-        set_switch "$m" 0 || ok=1
-    done
-    set_switch DEBUG_BUSYBOX_INTERACTIVE 1 || ok=1
-    return $ok
 }
 
 crc_of() {
@@ -85,7 +59,7 @@ crc_of() {
 }
 
 finish() {
-    restore_switches || echo "build_vf2_suites: ⚠️ 开关复位失败，提交前务必检查 $D" >&2
+    set_suite SUITE_NONE || echo "build_vf2_suites: ⚠️ DEBUG_SUITE 复位失败，提交前务必检查 $D" >&2
     if make vf2img >/dev/null 2>&1; then
         echo "交付镜像已重建：build/vf2-kernel.img crc32=$(crc_of build/vf2-kernel.img)"
     else
@@ -96,23 +70,10 @@ trap finish EXIT
 
 fail=0
 for s in $SUITES; do
-    sw=$(switch_of "$s")
     out="build/vf2-$s.img"
     rm -f "$out"
 
-    restore_switches || { fail=1; continue; }
-    set_switch "$sw" 1 || { fail=1; continue; }
-    if [ "$s" = bb ]; then
-        # bb 的自动判据要求非交互形态；交付形态是交互 ash，会停在提示符不收尾
-        set_switch DEBUG_BUSYBOX_INTERACTIVE 0 || { fail=1; continue; }
-    fi
-
-    tests_on=$(for m in $ALL_SWITCHES; do grep -E "^#define $m 1\b" "$D"; done | wc -l)
-    if [ "$tests_on" != 1 ]; then
-        echo "[$s] FAIL 测试开关有 $tests_on 个为 1"
-        fail=1
-        continue
-    fi
+    set_suite "SUITE_$(echo "$s" | tr a-z A-Z)" || { fail=1; continue; }
 
     log="build/vf2-$s.log"
     if ! make vf2img >"$log" 2>&1; then

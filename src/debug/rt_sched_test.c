@@ -11,18 +11,12 @@
  */
 
 #include "console.h"
+#include "suites.h"
 #include "proc.h"
 #include "sched.h"
 #include "cpu.h"
 #include "atomic.h"
 
-extern void sched_test_check(const char *name, int cond);
-extern int sched_test_reap_all(void);
-/* 广播门闩：实现在 sched_test.c，两个测试文件共用（为什么必须是"阻塞 + 一次广播放行"
- * 而不是忙等或逐个唤醒，见那边的说明） */
-extern void sched_test_gate_init(void);
-extern void sched_test_gate_wait(void);
-extern void sched_test_gate_release(void);
 
 /* ============================================================
  * 测试一：RT 抢占 CFS —— 只要还有 RT 任务可运行，CFS 就分不到 CPU

@@ -12,6 +12,7 @@
  */
 
 #include "console.h"
+#include "suites.h"
 #include "proc.h"
 #include "sched.h"
 #include "sync.h"
@@ -22,8 +23,6 @@
  * 取够大以免误判，又不至于在真出问题时把测试挂死 */
 #define WAITQ_YIELD_SPINS 10000
 
-extern void sched_test_check(const char *name, int cond);
-extern int sched_test_reap_all(void);
 
 /* ============================================================
  * 测试一：单等待者 waitq_prepare 阻塞 + waitq_wake_all 唤醒

@@ -11,6 +11,7 @@
 #include "stringops.h"
 #include "linux_abi.h"
 #include "slab.h"
+#include "suites.h"
 
 static int vfs_pass = 0;
 static int vfs_fail = 0;
@@ -363,10 +364,9 @@ static void vfs_unmount_test(void)
 }
 
 /**
- * @note 调用前必须确保 proc_init() 已经跑过——vfs_lock() 内部的 sem_down() 需要一个
- *   有效的当前 pcb（哪怕是 idle），在那之前调用会缺页异常（同 fs_init() 的教训）。
- *   当前未被任何地方调用；将来若要接线，应比照 debug.c 里 vmm_test() 的调用位置
- *   （main()，在 proc_init() 之后）。
+ * @brief VFS/FatFS 回归入口
+ * @note 必须在进程上下文里调用：vfs_lock() 内部的 sem_down() 需要一个有效的当前 pcb；
+ *   也只能有一个执行流在跑，两边同时跑会并发操作同一批测试文件。
  */
 void vfs_test(void)
 {
