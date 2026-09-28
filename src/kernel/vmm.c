@@ -669,6 +669,90 @@ static void vmm_segfault(virAddr_t badva, const char *why)
     panic("segfault");
 }
 
+/* 写缺页且 PTE 已存在：写时复制。引用计数为 1 时原地恢复写权限，否则复制一页。
+ * PTE 不存在（从未映射过）返回 false，交给懒分配 */
+static bool vmm_cow_fault(mm_t *mm, virAddr_t page_va, pteflg_t flags)
+{
+    pte_t *ptep = get_pte(mm->pgd_ppn, page_va, false, true);
+    if (!ptep || !pte_is_valid(*ptep))
+    {
+        return false;
+    }
+
+    /* reference 的读-判断-改必须整体互斥：另一个共享此帧的进程可能正在
+     * 别的 hart 上对同一个 pframe_t 做同样的事。 */
+    irq_key_t vmm_lock_key = spinlock_acquire(&vmm_lock);
+
+    ppn_t old_ppn = (*ptep) >> PTE_PPN_OFFSET;
+    pframe_t *old_frame = convert_ppn2pframe(old_ppn);
+
+    if (old_frame->reference == 1)
+    {
+#if DEBUG_COW
+        printf("vmm: cow in-place va=0x%lx\n", page_va);
+#endif
+        *ptep = pte_create(old_ppn, flags);
+    }
+    else
+    {
+#if DEBUG_COW
+        printf("vmm: cow duplicate va=0x%lx refs=%u\n", page_va, old_frame->reference);
+#endif
+        pframe_t *new_frame = slab_alloc_page_retry();
+        if (!new_frame)
+        {
+            panic("vmm: OOM in COW fault handler");
+        }
+        new_frame->reference++;
+        memcpy((void *)convert_pframe2kva(new_frame),
+               (void *)pa_to_kva(convert_ppn2pa(old_ppn)), PGSIZE);
+        old_frame->reference--;
+        *ptep = pte_create(convert_pframe2ppn(new_frame), flags);
+    }
+
+    spinlock_release(&vmm_lock, vmm_lock_key);
+    tlb_flush_va(page_va);
+    return true;
+}
+
+/* 该 va 从未被映射过：懒分配一个清零页。
+ * 分配与清零放锁外（slab_alloc_page_retry 失败会走 slab_reclaim_all，不该拖进 vmm_lock），
+ * get_pte 建中间级 + 装 PTE 放锁内（两个执行流同时缺页会各建一份中间级、后者覆盖前者）。
+ * 拿到锁后要重看一眼 PTE：别的执行流可能已经在这空档里装好了，这时放掉自己那页用它的，
+ * 否则先装的那页被覆盖、永久泄漏。 */
+static void vmm_lazy_fault(mm_t *mm, virAddr_t page_va, pteflg_t flags)
+{
+    pframe_t *frame = slab_alloc_page_retry();
+    if (!frame)
+    {
+        panic("vmm: OOM in page fault handler");
+    }
+    memset((void *)convert_pframe2kva(frame), 0, PGSIZE);
+
+    irq_key_t vmm_lock_key = spinlock_acquire(&vmm_lock);
+
+    pte_t *ptep = get_pte(mm->pgd_ppn, page_va, true, true);
+    if (!ptep)
+    {
+        spinlock_release(&vmm_lock, vmm_lock_key);
+        pmm_free_pages(frame);
+        panic("vmm: get_pte failed in page fault");
+    }
+    if (pte_is_valid(*ptep))
+    {
+        spinlock_release(&vmm_lock, vmm_lock_key);
+        pmm_free_pages(frame);
+        tlb_flush_va(page_va);
+        return;
+    }
+
+    frame->reference++;
+    *ptep = pte_create(convert_pframe2ppn(frame), flags);
+
+    spinlock_release(&vmm_lock, vmm_lock_key);
+    tlb_flush_va(page_va);
+}
+
 /**
  * @brief 处理用户空间页错误（懒分配 + 写时复制拆分）
  * @param[in] badva      触发页错误的虚拟地址（来自 stval/sbadaddr）
@@ -716,82 +800,11 @@ void vmm_page_fault_handler(virAddr_t badva, int fault_type)
     virAddr_t page_va = badva & ~(PGSIZE - 1);
     pteflg_t  flags   = vma_prot_to_pte_flags(vma->vm_flag);
 
-    if (fault_type == 2)
+    if (fault_type == 2 && vmm_cow_fault(mm, page_va, flags))
     {
-        pte_t *ptep = get_pte(mm->pgd_ppn, page_va, false, true);
-        if (ptep && pte_is_valid(*ptep))
-        {
-            /* reference 的读-判断-改必须整体互斥：另一个共享此帧的进程可能正在
-             * 别的 hart 上对同一个 pframe_t 做同样的事。 */
-            irq_key_t vmm_lock_key = spinlock_acquire(&vmm_lock);
-
-            ppn_t old_ppn = (*ptep) >> PTE_PPN_OFFSET;
-            pframe_t *old_frame = convert_ppn2pframe(old_ppn);
-
-            if (old_frame->reference == 1)
-            {
-#if DEBUG_COW
-                printf("vmm: cow in-place va=0x%lx\n", page_va);
-#endif
-                *ptep = pte_create(old_ppn, flags);
-            }
-            else
-            {
-#if DEBUG_COW
-                printf("vmm: cow duplicate va=0x%lx refs=%u\n", page_va, old_frame->reference);
-#endif
-                pframe_t *new_frame = slab_alloc_page_retry();
-                if (!new_frame)
-                {
-                    panic("vmm: OOM in COW fault handler");
-                }
-                new_frame->reference++;
-                memcpy((void *)convert_pframe2kva(new_frame),
-                       (void *)pa_to_kva(convert_ppn2pa(old_ppn)), PGSIZE);
-                old_frame->reference--;
-                *ptep = pte_create(convert_pframe2ppn(new_frame), flags);
-            }
-
-            spinlock_release(&vmm_lock, vmm_lock_key);
-            tlb_flush_va(page_va);
-            return;
-        }
-    }
-
-    /* 该 va 从未被映射过：懒分配一个清零页。
-     * 分配与清零放锁外（slab_alloc_page_retry 失败会走 slab_reclaim_all，不该拖进 vmm_lock），
-     * get_pte 建中间级 + 装 PTE 放锁内（两个执行流同时缺页会各建一份中间级、后者覆盖前者）。
-     * 拿到锁后要重看一眼 PTE：别的执行流可能已经在这空档里装好了，这时放掉自己那页用它的，
-     * 否则先装的那页被覆盖、永久泄漏。 */
-    pframe_t *frame = slab_alloc_page_retry();
-    if (!frame)
-    {
-        panic("vmm: OOM in page fault handler");
-    }
-    memset((void *)convert_pframe2kva(frame), 0, PGSIZE);
-
-    irq_key_t vmm_lock_key = spinlock_acquire(&vmm_lock);
-
-    pte_t *ptep = get_pte(mm->pgd_ppn, page_va, true, true);
-    if (!ptep)
-    {
-        spinlock_release(&vmm_lock, vmm_lock_key);
-        pmm_free_pages(frame);
-        panic("vmm: get_pte failed in page fault");
-    }
-    if (pte_is_valid(*ptep))
-    {
-        spinlock_release(&vmm_lock, vmm_lock_key);
-        pmm_free_pages(frame);
-        tlb_flush_va(page_va);
         return;
     }
-
-    frame->reference++;
-    *ptep = pte_create(convert_pframe2ppn(frame), flags);
-
-    spinlock_release(&vmm_lock, vmm_lock_key);
-    tlb_flush_va(page_va);
+    vmm_lazy_fault(mm, page_va, flags);
 }
 
 /**
