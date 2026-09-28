@@ -113,6 +113,101 @@ static bool get_local_intr(void)
     return (read_csr(sstatus) & SSTATUS_SIE) != 0;
 }
 
+static void trap_interrupt(intstkf_t *sp, int cause)
+{
+    switch (cause)
+    {
+    case IRQ_S_SOFT:
+        /* 只用来把 wfi 中的 hart 踢醒，不做调度决策。
+         * 必须清本地 sip.SSIP，否则中断条件一直成立会立刻重新触发。 */
+        clear_csr(sip, MIP_SSIP);
+        break;
+    case IRQ_S_TIMER:
+        tick_int_handler();
+        break;
+    case IRQ_S_EXT:
+        trap_external_irq();
+        break;
+    default:
+#if DEBUG_INTSTACK
+        print_intstk(sp);
+#endif
+        printf("Unknown interrupt\n");
+        break;
+    }
+}
+
+/* 已处理返回 true；未知或不该出现的异常返回 false，由调用方 panic */
+static bool trap_exception(intstkf_t *sp, int cause)
+{
+    /* 只在追踪时打：syscall 走的是这条路径，每次都打会淹掉日志。 */
+#if DEBUG_INTSTACK
+    printf("\nException:\n");
+#endif
+    switch (cause)
+    {
+    case CAUSE_FAULT_LOAD:
+    case CAUSE_FAULT_STORE:
+        /* 访问异常（scause 5/7）不是缺页：目标地址后面没有设备或内存响应，缺页
+         * 处理器补不出这种错。单独打一行，否则会被误读成"映射没建上"，修法相反。 */
+        printf("%s access fault (no device or memory responds at this addr): "
+               "addr=0x%lx sepc=0x%lx\n",
+               (cause == CAUSE_FAULT_LOAD) ? "Load" : "Store",
+               (unsigned long)sp->sbadaddr, (unsigned long)sp->sepc);
+        vmm_page_fault_handler((virAddr_t)sp->sbadaddr,
+                               (cause == CAUSE_FAULT_LOAD) ? 1 : 2);
+        return true;
+    case CAUSE_FAULT_INSTRUCTION_PAGE:
+        vmm_page_fault_handler((virAddr_t)sp->sbadaddr, 0);
+        return true;
+    case CAUSE_FAULT_LOAD_PAGE:
+        vmm_page_fault_handler((virAddr_t)sp->sbadaddr, 1);
+        return true;
+    case CAUSE_FAULT_STORE_PAGE:
+        vmm_page_fault_handler((virAddr_t)sp->sbadaddr, 2);
+        return true;
+    case CAUSE_USER_ECALL:
+        /* ecall 是 4 字节，sepc 指向它自己；不加 4 会 sret 回来重复执行。 */
+        sp->sepc += 4;
+        /* a0 马上会被返回值覆盖，而 SA_RESTART 重启该 syscall 时要原样还给它；
+         * a7（调用号）在帧里原封不动，不用另存 */
+        proc_get_current()->proc_syscall_orig_a0 = sp->x10_a0;
+        sp->x10_a0 = (uint64_t)syscall_dispatch(sp);
+        return true;
+    case CAUSE_SUPERVISOR_ECALL:
+        printf("Environment call from S-mode");
+        return true;
+    case CAUSE_MISALIGNED_FETCH:
+        trap_user_exception(sp, "instruction address misaligned", SIGBUS);
+        return true;
+    case CAUSE_FAULT_FETCH:
+        trap_user_exception(sp, "instruction access fault", SIGSEGV);
+        return true;
+    case CAUSE_ILLEGAL_INSTRUCTION:
+        trap_user_exception(sp, "illegal instruction", SIGILL);
+        return true;
+    case CAUSE_BREAKPOINT:
+        trap_user_exception(sp, "breakpoint", SIGTRAP);
+        return true;
+    case CAUSE_MISALIGNED_LOAD:
+        trap_user_exception(sp, "load address misaligned", SIGBUS);
+        return true;
+    case CAUSE_MISALIGNED_STORE:
+        trap_user_exception(sp, "store address misaligned", SIGBUS);
+        return true;
+    case CAUSE_HYPERVISOR_ECALL:
+        printf("Environment call from H-mode");
+        break;
+    case CAUSE_MACHINE_ECALL:
+        printf("Environment call from M-mode");
+        break;
+    default:
+        printf("Unknown exception : %08x", cause);
+        break;
+    }
+    return false;
+}
+
 /**
  * @brief trap 的实际分发逻辑
  */
@@ -140,95 +235,10 @@ static void trap_dispatch(intstkf_t *sp)
 
     if (sp->scause & (1UL << 63))
     {
-        
-        switch (cause)
-        {
-        case IRQ_S_SOFT:
-            /* 只用来把 wfi 中的 hart 踢醒，不做调度决策。
-             * 必须清本地 sip.SSIP，否则中断条件一直成立会立刻重新触发。 */
-            clear_csr(sip, MIP_SSIP);
-            break;
-        case IRQ_S_TIMER:
-            tick_int_handler();
-            break;
-        case IRQ_S_EXT:
-            trap_external_irq();
-            break;
-        default:
-#if DEBUG_INTSTACK
-            print_intstk(sp);
-#endif
-            printf("Unknown interrupt\n");
-            break;
-        }
+        trap_interrupt(sp, cause);
     }
-    else
+    else if (!trap_exception(sp, cause))
     {
-        /* 只在追踪时打：syscall 走的是这条路径，每次都打会淹掉日志。 */
-#if DEBUG_INTSTACK
-        printf("\nException:\n");
-#endif
-        switch (cause)
-        {
-        case CAUSE_FAULT_LOAD:
-        case CAUSE_FAULT_STORE:
-            /* 访问异常（scause 5/7）不是缺页：目标地址后面没有设备或内存响应，缺页
-             * 处理器补不出这种错。单独打一行，否则会被误读成"映射没建上"，修法相反。 */
-            printf("%s access fault (no device or memory responds at this addr): "
-                   "addr=0x%lx sepc=0x%lx\n",
-                   (cause == CAUSE_FAULT_LOAD) ? "Load" : "Store",
-                   (unsigned long)sp->sbadaddr, (unsigned long)sp->sepc);
-            vmm_page_fault_handler((virAddr_t)sp->sbadaddr,
-                                   (cause == CAUSE_FAULT_LOAD) ? 1 : 2);
-            return;
-        case CAUSE_FAULT_INSTRUCTION_PAGE:
-            vmm_page_fault_handler((virAddr_t)sp->sbadaddr, 0);
-            return;
-        case CAUSE_FAULT_LOAD_PAGE:
-            vmm_page_fault_handler((virAddr_t)sp->sbadaddr, 1);
-            return;
-        case CAUSE_FAULT_STORE_PAGE:
-            vmm_page_fault_handler((virAddr_t)sp->sbadaddr, 2);
-            return;
-        case CAUSE_USER_ECALL:
-            /* ecall 是 4 字节，sepc 指向它自己；不加 4 会 sret 回来重复执行。 */
-            sp->sepc += 4;
-            /* a0 马上会被返回值覆盖，而 SA_RESTART 重启该 syscall 时要原样还给它；
-             * a7（调用号）在帧里原封不动，不用另存 */
-            proc_get_current()->proc_syscall_orig_a0 = sp->x10_a0;
-            sp->x10_a0 = (uint64_t)syscall_dispatch(sp);
-            return;
-        case CAUSE_SUPERVISOR_ECALL:
-            printf("Environment call from S-mode");
-            return;
-        case CAUSE_MISALIGNED_FETCH:
-            trap_user_exception(sp, "instruction address misaligned", SIGBUS);
-            return;
-        case CAUSE_FAULT_FETCH:
-            trap_user_exception(sp, "instruction access fault", SIGSEGV);
-            return;
-        case CAUSE_ILLEGAL_INSTRUCTION:
-            trap_user_exception(sp, "illegal instruction", SIGILL);
-            return;
-        case CAUSE_BREAKPOINT:
-            trap_user_exception(sp, "breakpoint", SIGTRAP);
-            return;
-        case CAUSE_MISALIGNED_LOAD:
-            trap_user_exception(sp, "load address misaligned", SIGBUS);
-            return;
-        case CAUSE_MISALIGNED_STORE:
-            trap_user_exception(sp, "store address misaligned", SIGBUS);
-            return;
-        case CAUSE_HYPERVISOR_ECALL:
-            printf("Environment call from H-mode");
-            break;
-        case CAUSE_MACHINE_ECALL:
-            printf("Environment call from M-mode");
-            break;
-        default:
-            printf("Unknown exception : %08x", cause);
-            break;
-        }
         panic("Not pageFaultHander or Ecall Exception!!");
     }
 }
