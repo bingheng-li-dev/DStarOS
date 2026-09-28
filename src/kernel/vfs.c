@@ -915,6 +915,61 @@ static dentry_t *cross_mountpoints(dentry_t *d)
     return d;
 }
 
+/* 解析起点：绝对路径从全局根开始（并跳过开头的 '/'），相对路径从 cwd 开始。返回持有一个引用的 dentry */
+static dentry_t *lookup_start(const char **path)
+{
+    dentry_t *start = vfs_root_dentry;
+    if (**path == '/')
+    {
+        while (**path == '/')
+        {
+            (*path)++;
+        }
+    }
+    else
+    {
+        pcb_t *cur_proc = proc_get_current();
+        if (cur_proc && cur_proc->proc_cwd)
+        {
+            start = cur_proc->proc_cwd;
+        }
+    }
+    dentry_get(start);
+    return start;
+}
+
+/* 走一步 ".."，接管 cur 的引用、返回持有一个引用的新位置。
+ * 已在全局根则原地不动；在文件系统局部根（d_parent 指向自身）上要反向穿过挂载点，
+ * 取宿主目录项的父节点——找不到宿主就留在局部根（理论上不应发生）。 */
+static dentry_t *lookup_dotdot(dentry_t *cur)
+{
+    if (cur == vfs_root_dentry)
+    {
+        return cur;
+    }
+
+    dentry_t *parent = cur->d_parent;
+    if (parent == cur)
+    {
+        vfsmount_t *mnt = NULL;
+        irq_key_t vfs_fs_lock_key = spinlock_acquire(&vfs_fs_lock);
+        if (cur->d_inode && cur->d_inode->i_sb)
+        {
+            mnt = find_mount_by_sb(cur->d_inode->i_sb);
+        }
+        spinlock_release(&vfs_fs_lock, vfs_fs_lock_key);
+
+        if (!mnt || !mnt->mnt_host_dentry || !mnt->mnt_host_dentry->d_parent)
+        {
+            return cur;
+        }
+        parent = mnt->mnt_host_dentry->d_parent;
+    }
+    dentry_get(parent);
+    dentry_put(cur);
+    return parent;
+}
+
 /**
  * @brief 将路径字符串解析为对应的目录项
  * @param[in] path 要解析的路径字符串（绝对或相对）
@@ -939,30 +994,7 @@ dentry_t *vfs_lookup(const char *path)
         return NULL;  /* 根文件系统尚未挂载 */
     }
 
-    dentry_t *cur;
-
-    if (path[0] == '/')
-    {
-        cur = vfs_root_dentry;
-        dentry_get(cur);
-        while (*path == '/')
-        {
-            path++;
-        }
-    }
-    else
-    {
-        pcb_t *cur_proc = proc_get_current();
-        if (cur_proc && cur_proc->proc_cwd)
-        {
-            cur = cur_proc->proc_cwd;
-        }
-        else
-        {
-            cur = vfs_root_dentry;
-        }
-        dentry_get(cur);
-    }
+    dentry_t *cur = lookup_start(&path);
 
     /* 纯 "/" 路径或空相对路径：直接返回当前节点 */
     if (*path == '\0')
@@ -994,39 +1026,7 @@ dentry_t *vfs_lookup(const char *path)
 
         if (comp[0] == '.' && comp[1] == '.' && comp[2] == '\0')
         {
-            /* 已在全局根，".." 原地不动 */
-            if (cur == vfs_root_dentry)
-            {
-                continue;
-            }
-
-            /* 若当前节点是文件系统局部根（d_parent 指向自身），需反向穿越挂载点 */
-            if (cur->d_parent == cur)
-            {
-                /* 在挂载点链表中找到对应的 vfsmount，取宿主目录项的父节点 */
-                vfsmount_t *mnt = NULL;
-                irq_key_t vfs_fs_lock_key = spinlock_acquire(&vfs_fs_lock);
-                if (cur->d_inode && cur->d_inode->i_sb)
-                {
-                    mnt = find_mount_by_sb(cur->d_inode->i_sb);
-                }
-                spinlock_release(&vfs_fs_lock, vfs_fs_lock_key);
-
-                if (mnt && mnt->mnt_host_dentry && mnt->mnt_host_dentry->d_parent)
-                {
-                    dentry_t *host_parent = mnt->mnt_host_dentry->d_parent;
-                    dentry_get(host_parent);
-                    dentry_put(cur);
-                    cur = host_parent;
-                }
-                /* 如果找不到宿主，保持在当前局部根（理论上不应发生）*/
-                continue;
-            }
-
-            dentry_t *parent = cur->d_parent;
-            dentry_get(parent);
-            dentry_put(cur);
-            cur = parent;
+            cur = lookup_dotdot(cur);
             continue;
         }
 
