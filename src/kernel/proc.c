@@ -622,6 +622,52 @@ static int setup_user_stack(const exec_args_t *args, const elf_info_t *info,
 }
 
 /**
+ * @brief 把整个可执行文件读进内核堆
+ * @param[in]  path     绝对路径
+ * @param[out] img_out  成功时指向 kmalloc 出的镜像，由调用方 kfree
+ * @param[out] size_out 文件字节数；打不开时不写
+ * @retval ENO0_NO_ERROR     成功
+ * @retval ENO5_NOSUCH_ENTRY 打不开
+ * @retval ENO6_INVAL_PARAM  空文件或短读
+ * @retval ENO1_NOMORE_MEM   内存不足
+ */
+static int read_exec_image(const char *path, unsigned char **img_out, off_t *size_out)
+{
+    vfs_lock();
+    file_t *f = vfs_open(path, O_RDONLY, NULL);
+    if (f == NULL)
+    {
+        vfs_unlock();
+        return ENO5_NOSUCH_ENTRY;
+    }
+
+    int ret = ENO0_NO_ERROR;
+    unsigned char *img = NULL;
+    off_t size = vfs_lseek(f, 0, SEEK_END);
+    vfs_lseek(f, 0, SEEK_SET);
+    if (size <= 0)
+    {
+        ret = ENO6_INVAL_PARAM;
+    }
+    else if ((img = kmalloc((size_t)size)) == NULL)
+    {
+        ret = ENO1_NOMORE_MEM;
+    }
+    else if (vfs_read(f, img, (size_t)size) != (ssize_t)size)
+    {
+        kfree(img);
+        img = NULL;
+        ret = ENO6_INVAL_PARAM;
+    }
+    vfs_close(f);
+    vfs_unlock();
+
+    *size_out = size;
+    *img_out = img;
+    return ret;
+}
+
+/**
  * @brief 用 path 指向的 ELF 替换当前进程的地址空间（execve 语义：换脑不换壳）
  * @param[in,out] sp   当前 syscall 的 trap 帧；成功时被改写为"进入新程序"的帧
  * @param[in]     path 用户空间的程序路径字符串
@@ -673,40 +719,14 @@ int do_exec(intstkf_t *sp, const char *path, char *const *argv, char *const *env
         return ret;
     }
 
-    /* 2) 打开并把整个 ELF 读进内核堆 */
-    vfs_lock();
-    file_t *f = vfs_open(kpath, O_RDONLY, NULL);
-    if (f == NULL)
+    /* 2) 把整个 ELF 读进内核堆 */
+    unsigned char *img;
+    off_t size;
+    ret = read_exec_image(kpath, &img, &size);
+    if (ret != ENO0_NO_ERROR)
     {
-        vfs_unlock();
         exec_args_free(&args);
-        return ENO5_NOSUCH_ENTRY;
-    }
-    off_t size = vfs_lseek(f, 0, SEEK_END);
-    vfs_lseek(f, 0, SEEK_SET);
-    if (size <= 0)
-    {
-        vfs_close(f);
-        vfs_unlock();
-        exec_args_free(&args);
-        return ENO6_INVAL_PARAM;
-    }
-    unsigned char *img = kmalloc((size_t)size);
-    if (img == NULL)
-    {
-        vfs_close(f);
-        vfs_unlock();
-        exec_args_free(&args);
-        return ENO1_NOMORE_MEM;
-    }
-    ssize_t rd = vfs_read(f, img, (size_t)size);
-    vfs_close(f);
-    vfs_unlock();
-    if (rd != (ssize_t)size)
-    {
-        kfree(img);
-        exec_args_free(&args);
-        return ENO6_INVAL_PARAM;
+        return ret;
     }
 
     /* 3) 建新地址空间并切过去（旧 mm 先留着）*/
@@ -1223,38 +1243,28 @@ void proc_run_user_program(const char *path, const char *const argv[], int argc)
     tlb_flush_all();
 
     /* 3) 从根文件系统读出整个 ELF，解析：按 PT_LOAD 段建 VMA、映射、拷贝内容 */
-    vfs_lock();
-    file_t *f = vfs_open(path, O_RDONLY, NULL);
-    if (f == NULL)
+    unsigned char *img;
+    off_t size = 0;
+    int ret = read_exec_image(path, &img, &size);
+    if (ret == ENO5_NOSUCH_ENTRY)
     {
-        vfs_unlock();
         panic("run_user_program: cannot open %s (rootfs image missing? run `make rootfs`)", path);
     }
-    off_t size = vfs_lseek(f, 0, SEEK_END);
-    vfs_lseek(f, 0, SEEK_SET);
-    if (size <= 0)
+    if (ret == ENO1_NOMORE_MEM)
     {
-        vfs_close(f);
-        vfs_unlock();
-        panic("run_user_program: %s is empty", path);
-    }
-    unsigned char *img = kmalloc((size_t)size);
-    if (img == NULL)
-    {
-        vfs_close(f);
-        vfs_unlock();
         panic("run_user_program: no memory for %s (%ld bytes)", path, (long)size);
     }
-    ssize_t rd = vfs_read(f, img, (size_t)size);
-    vfs_close(f);
-    vfs_unlock();
-    if (rd != (ssize_t)size)
+    if (ret != ENO0_NO_ERROR)
     {
+        if (size <= 0)
+        {
+            panic("run_user_program: %s is empty", path);
+        }
         panic("run_user_program: short read on %s", path);
     }
 
     elf_info_t einfo;
-    int ret = elf_load(mm, img, (uint64_t)size, &einfo);
+    ret = elf_load(mm, img, (uint64_t)size, &einfo);
     /* elf_load 已把各段内容拷进用户页，缓冲区可以还了 */
     kfree(img);
     if (ret != ENO0_NO_ERROR)
