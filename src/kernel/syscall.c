@@ -143,12 +143,12 @@ static long sys_read(int fd, char *ubuf, uint64_t len)
     return ret;
 }
 
-/* writev(fd, iov, iovcnt)：逐段调用 do_write_locked，遇到出错/短写就停，
- * 返回已写出的总字节数（一个字节都没写出去时返回负 ENO*）。 */
-static long sys_writev(int fd, const struct iovec *uiov, int iovcnt)
+/* readv / writev 共用：逐段读写，遇到出错或短读写（含 EOF）就停，不跨段"凑够"；
+ * 返回已完成的总字节数，一个字节都没完成时透传这一段的错误码。 */
+static long sys_rw_iov(int fd, const struct iovec *uiov, int iovcnt, bool is_write)
 {
     file_t *f = proc_fd_get(fd);
-    if (!f || !f->f_op || !f->f_op->write)
+    if (!f || !f->f_op || (is_write && !f->f_op->write) || (!is_write && !f->f_op->read))
     {
         return ENO19_BAD_FD;
     }
@@ -191,17 +191,25 @@ static long sys_writev(int fd, const struct iovec *uiov, int iovcnt)
         {
             continue;
         }
-        long r = do_write_locked(f, (const char *)kiov[i].iov_base, kiov[i].iov_len, kbuf);
+        long r;
+        if (is_write)
+        {
+            r = do_write_locked(f, (const char *)kiov[i].iov_base, kiov[i].iov_len, kbuf);
+        }
+        else
+        {
+            r = do_read_locked(f, (char *)kiov[i].iov_base, kiov[i].iov_len, kbuf);
+        }
         if (r < 0)
         {
             if (total == 0)
             {
-                total = r; /* 还没写出任何字节，透传这一段的错误码 */
+                total = r;
             }
             break;
         }
         total += r;
-        if ((uint64_t)r < kiov[i].iov_len) /* 这一段短写，后面的段不再继续 */
+        if ((uint64_t)r < kiov[i].iov_len)
         {
             break;
         }
@@ -216,77 +224,14 @@ static long sys_writev(int fd, const struct iovec *uiov, int iovcnt)
     return total;
 }
 
-/* readv(fd, iov, iovcnt)：逐段调用 do_read_locked，按段顺序填充，
- * 遇到短读（含 EOF）就停——不跨段"凑够"，这是 POSIX readv 的常见实现方式。 */
+static long sys_writev(int fd, const struct iovec *uiov, int iovcnt)
+{
+    return sys_rw_iov(fd, uiov, iovcnt, true);
+}
+
 static long sys_readv(int fd, const struct iovec *uiov, int iovcnt)
 {
-    file_t *f = proc_fd_get(fd);
-    if (!f || !f->f_op || !f->f_op->read)
-    {
-        return ENO19_BAD_FD;
-    }
-    if (iovcnt < 0 || iovcnt > SYS_IOV_MAX)
-    {
-        return ENO6_INVAL_PARAM;
-    }
-    if (iovcnt == 0)
-    {
-        return 0;
-    }
-
-    struct iovec *kiov = kmalloc(sizeof(struct iovec) * (size_t)iovcnt);
-    if (!kiov)
-    {
-        return ENO1_NOMORE_MEM;
-    }
-    if (copy_from_user(kiov, uiov, sizeof(struct iovec) * (size_t)iovcnt) != 0)
-    {
-        kfree(kiov);
-        return ENO8_NULL_POINTER;
-    }
-
-    char *kbuf = kmalloc(SYS_RW_BUF_SIZE);
-    if (!kbuf)
-    {
-        kfree(kiov);
-        return ENO1_NOMORE_MEM;
-    }
-
-    long total = 0;
-    bool need_lock = vfs_file_needs_lock(f);
-    if (need_lock)
-    {
-        vfs_lock();
-    }
-    for (int i = 0; i < iovcnt; i++)
-    {
-        if (kiov[i].iov_len == 0)
-        {
-            continue;
-        }
-        long r = do_read_locked(f, (char *)kiov[i].iov_base, kiov[i].iov_len, kbuf);
-        if (r < 0)
-        {
-            if (total == 0)
-            {
-                total = r;
-            }
-            break;
-        }
-        total += r;
-        if ((uint64_t)r < kiov[i].iov_len) /* 短读（含 EOF）：不再继续后面的段 */
-        {
-            break;
-        }
-    }
-    if (need_lock)
-    {
-        vfs_unlock();
-    }
-
-    kfree(kbuf);
-    kfree(kiov);
-    return total;
+    return sys_rw_iov(fd, uiov, iovcnt, false);
 }
 
 /**
