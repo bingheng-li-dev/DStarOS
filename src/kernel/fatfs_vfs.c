@@ -1019,6 +1019,20 @@ static uint16_t fatfs_dirent_reclen(const char *name)
     return (uint16_t)((need + 7) & ~(size_t)7);
 }
 
+/* 缓冲区放不下时暂存这条：它已经从 FatFS 游标里消费掉了，不存就永久丢失 */
+static void fatfs_stash_pending(fatfs_dir_priv_t *dpriv, const char *name, bool is_dir)
+{
+    size_t nlen = strlen(name);
+    if (nlen > _MAX_LFN)
+    {
+        nlen = _MAX_LFN;
+    }
+    memcpy(dpriv->pending_name, name, nlen);
+    dpriv->pending_name[nlen] = '\0';
+    dpriv->pending_is_dir     = is_dir;
+    dpriv->has_pending        = true;
+}
+
 /**
  * @brief 读取目录项，填充紧凑排列的 struct linux_dirent64 记录（getdents64 后端）
  * @retval >0 已填字节数
@@ -1098,16 +1112,7 @@ static int fatfs_readdir_cb(file_t *file, void *buf, size_t len)
             }
             if (from_readdir)
             {
-                /* 这条已经从 FatFS 游标里消费掉了，必须暂存，否则永久丢失 */
-                size_t nlen = strlen(name);
-                if (nlen > _MAX_LFN)
-                {
-                    nlen = _MAX_LFN;
-                }
-                memcpy(dpriv->pending_name, name, nlen);
-                dpriv->pending_name[nlen] = '\0';
-                dpriv->pending_is_dir     = is_dir;
-                dpriv->has_pending        = true;
+                fatfs_stash_pending(dpriv, name, is_dir);
             }
             break;
         }
