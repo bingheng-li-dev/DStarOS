@@ -33,60 +33,94 @@ static inline virAddr_t round_up_page(virAddr_t va)
     return (va + PGSIZE - 1) & ~(PGSIZE - 1);
 }
 
-/**
- * @brief 把内存里的 ELF 镜像装进 mm：按 PT_LOAD 建 VMA、映射、拷贝内容，再建堆 VMA
- */
-int elf_load(mm_t *mm, const unsigned char *image, uint64_t size, elf_info_t *info)
+/* 文件头校验：ELF 来自磁盘、由用户 execve 指定，不可信。
+ * 程序头表必须整体落在 [0, size) 内，否则后面按它读到的是 image 之外的内核内存。 */
+static int elf_check_header(const Elf64_Ehdr *ehdr, uint64_t size)
 {
-    Elf64_Ehdr *ehdr = (Elf64_Ehdr *)image;
-
-    /* ELF 来自磁盘、由用户 execve 指定，不可信：校验失败返回错误码交给调用者。
-     * size 边界必须校验，越界的 e_phoff/p_offset/p_filesz 会读到 image 之外的内核内存；
-     * p_vaddr 的范围也必须校验，第三遍是直接按 p_vaddr 写内存的。 */
     if (memcmp(ehdr->e_ident, ELFMAG, SELFMAG) != 0)
     {
-        printf("%s: bad ELF magic\n", __FUNCTION__);
+        printf("elf_load: bad ELF magic\n");
         return ENO6_INVAL_PARAM;
     }
     if (ehdr->e_ident[EI_CLASS] != ELFCLASS64 || ehdr->e_machine != EM_RISCV)
     {
-        printf("%s: unsupported class/machine\n", __FUNCTION__);
+        printf("elf_load: unsupported class/machine\n");
         return ENO6_INVAL_PARAM;
     }
     if (ehdr->e_phnum == 0)
     {
-        printf("%s: e_phnum is 0\n", __FUNCTION__);
+        printf("elf_load: e_phnum is 0\n");
         return ENO6_INVAL_PARAM;
     }
-    /* e_phentsize 不是 sizeof(Elf64_Phdr) 时，下面按 sizeof(Elf64_Phdr) 步进的数组
+    /* e_phentsize 不是 sizeof(Elf64_Phdr) 时，按 sizeof(Elf64_Phdr) 步进的数组
      * 访问就会用错误的 stride 解析程序头表 */
     if (ehdr->e_phentsize != sizeof(Elf64_Phdr))
     {
-        printf("%s: unexpected e_phentsize\n", __FUNCTION__);
+        printf("elf_load: unexpected e_phentsize\n");
         return ENO6_INVAL_PARAM;
     }
-    /* 程序头表整体必须落在 [0, size) 内；先比较再相减，避免 e_phoff 接近
-     * UINT64_MAX 时 e_phoff + 表长 发生整数回绕 */
+    /* 先比较再相减，避免 e_phoff 接近 UINT64_MAX 时 e_phoff + 表长 发生整数回绕 */
     if (ehdr->e_phoff > size ||
         (uint64_t)ehdr->e_phnum * ehdr->e_phentsize > size - ehdr->e_phoff)
     {
-        printf("%s: program header table out of bounds\n", __FUNCTION__);
+        printf("elf_load: program header table out of bounds\n");
         return ENO6_INVAL_PARAM;
     }
+    return ENO0_NO_ERROR;
+}
 
+/* 单个 PT_LOAD 的校验。prev 是上一个 PT_LOAD（没有时为 NULL） */
+static int elf_check_seg(const Elf64_Phdr *ph, const Elf64_Phdr *prev, uint64_t size, int i)
+{
+    /* 段内容必须落在 [0, size) 内，否则 memcpy 会读到 image 缓冲区之外。
+     * 仅在 p_filesz > 0 时检查：纯 .bss 段不读文件，链接器可以把它的 p_offset 放在文件末尾之后。 */
+    if (ph->p_filesz > 0 && (ph->p_offset > size || ph->p_filesz > size - ph->p_offset))
+    {
+        printf("elf_load: segment %d file range out of bounds\n", i);
+        return ENO6_INVAL_PARAM;
+    }
+    /* p_memsz < p_filesz 违反 ELF 规范；p_memsz - p_filesz 是无符号减法，
+     * 一旦发生会下溢成天文数字，喂给 memset 就是巨量越界写 */
+    if (ph->p_memsz < ph->p_filesz)
+    {
+        printf("elf_load: segment %d p_memsz < p_filesz\n", i);
+        return ENO6_INVAL_PARAM;
+    }
+    /* p_vaddr + p_memsz 回绕的话 round_up_page 会算出一个比 start 还小的 end，
+     * 建出来的 VMA 区间是空的，随后的 memcpy 却照写不误 */
+    if (ph->p_memsz > (uint64_t)(-1) - ph->p_vaddr - PGSIZE)
+    {
+        printf("elf_load: segment %d address range overflows\n", i);
+        return ENO6_INVAL_PARAM;
+    }
+    /* 段必须整个落在用户区，并给紧跟其后的堆留出 USER_HEAP_MAX（堆不得碰到 mmap 区）。
+     * 放过一个落在内核高半段的段，填内容时的 memcpy 就是在替用户改写内核内存。 */
+    if (ph->p_vaddr + ph->p_memsz > USER_MMAP_BASE - USER_HEAP_MAX)
+    {
+        printf("elf_load: segment %d outside user space\n", i);
+        return ENO6_INVAL_PARAM;
+    }
+    /* ELF 规范要求 PT_LOAD 按 p_vaddr 升序排列且内存区间互不重叠。
+     * 这两条是合并算法的前提（线性扫一遍即可），也是安全前提：
+     * 区间一旦重叠，后写的段会静默盖掉先写的段的内容。 */
+    if (prev != NULL && ph->p_vaddr < prev->p_vaddr + prev->p_memsz)
+    {
+        printf("elf_load: segment %d overlaps or is out of order\n", i);
+        return ENO6_INVAL_PARAM;
+    }
+    return ENO0_NO_ERROR;
+}
+
+/* 第一遍：校验各 PT_LOAD 并记下它的页对齐落地范围（只算不落实），顺带求程序头表的用户 VA。
+ * AT_PHDR 优先取 PT_PHDR（GNU ld 通常会生成），否则退回"覆盖了 e_phoff 的那个 PT_LOAD 段"。 */
+static int elf_collect_segs(const Elf64_Ehdr *ehdr, const unsigned char *image, uint64_t size,
+                            elf_seg_t *segs, int *nload_out, virAddr_t *phdr_va_out)
+{
     Elf64_Phdr *phdr_base = (Elf64_Phdr *)(image + ehdr->e_phoff);
-    /* AT_PHDR 的两条求法，优先 PT_PHDR（GNU ld 通常会生成），否则退回
-     * "覆盖了 e_phoff 的那个 PT_LOAD 段" */
     virAddr_t pt_phdr_va = 0;
     virAddr_t phdr_in_load_va = 0;
-
-    /* 装载分三遍走：先把地址空间的形状算清楚，再落实映射，最后才填内容。
-     * 不能"一个 PT_LOAD 建一个 VMA、马上映射再拷贝"：段是文件的单位，页是地址空间的单位，
-     * 相邻两段可能共用一页，后一段的映射会换掉那页、丢掉前一段的内容，两个 VMA 还会重叠。 */
-    elf_seg_t segs[ELF_MAX_LOAD_SEG];
     int nload = 0;
 
-    /* 第一遍：校验各 PT_LOAD，并记下它的页对齐落地范围（只算不落实） */
     for (int i = 0; i < ehdr->e_phnum; i++)
     {
         Elf64_Phdr *ph = &phdr_base[i];
@@ -100,7 +134,7 @@ int elf_load(mm_t *mm, const unsigned char *image, uint64_t size, elf_info_t *in
         }
         if (nload >= ELF_MAX_LOAD_SEG)
         {
-            printf("%s: too many PT_LOAD segments\n", __FUNCTION__);
+            printf("elf_load: too many PT_LOAD segments\n");
             return ENO6_INVAL_PARAM;
         }
         /* 程序头表通常落在第一个 PT_LOAD 段里（它从文件偏移 0 开始映射） */
@@ -108,49 +142,13 @@ int elf_load(mm_t *mm, const unsigned char *image, uint64_t size, elf_info_t *in
         {
             phdr_in_load_va = ph->p_vaddr + (ehdr->e_phoff - ph->p_offset);
         }
-
-        /* 段内容必须落在 [0, size) 内，否则下面的 memcpy 会读到 image 缓冲区之外。
-         * 仅在 p_filesz > 0 时检查：纯 .bss 段不读文件，链接器可以把它的 p_offset 放在文件末尾之后。 */
-        if (ph->p_filesz > 0 && (ph->p_offset > size || ph->p_filesz > size - ph->p_offset))
+        int ret = elf_check_seg(ph, nload > 0 ? segs[nload - 1].ph : NULL, size, i);
+        if (ret != ENO0_NO_ERROR)
         {
-            printf("%s: segment %d file range out of bounds\n", __FUNCTION__, i);
-            return ENO6_INVAL_PARAM;
-        }
-        /* p_memsz < p_filesz 违反 ELF 规范；下面 p_memsz - p_filesz 是无符号减法，
-         * 一旦发生会下溢成天文数字，喂给 memset 就是巨量越界写 */
-        if (ph->p_memsz < ph->p_filesz)
-        {
-            printf("%s: segment %d p_memsz < p_filesz\n", __FUNCTION__, i);
-            return ENO6_INVAL_PARAM;
-        }
-        /* p_vaddr + p_memsz 回绕的话 round_up_page 会算出一个比 start 还小的 end，
-         * 建出来的 VMA 区间是空的，随后的 memcpy 却照写不误 */
-        if (ph->p_memsz > (uint64_t)(-1) - ph->p_vaddr - PGSIZE)
-        {
-            printf("%s: segment %d address range overflows\n", __FUNCTION__, i);
-            return ENO6_INVAL_PARAM;
-        }
-        /* 段必须整个落在用户区，并给紧跟其后的堆留出 USER_HEAP_MAX（堆不得碰到 mmap 区）。
-         * 放过一个落在内核高半段的段，第三遍的 memcpy 就是在替用户改写内核内存。 */
-        if (ph->p_vaddr + ph->p_memsz > USER_MMAP_BASE - USER_HEAP_MAX)
-        {
-            printf("%s: segment %d outside user space\n", __FUNCTION__, i);
-            return ENO6_INVAL_PARAM;
-        }
-        /* ELF 规范要求 PT_LOAD 按 p_vaddr 升序排列且内存区间互不重叠。
-         * 这两条是下面合并算法的前提（线性扫一遍即可），也是安全前提：
-         * 区间一旦重叠，第三遍里后写的段会静默盖掉先写的段的内容。 */
-        if (nload > 0)
-        {
-            Elf64_Phdr *prev = segs[nload - 1].ph;
-            if (ph->p_vaddr < prev->p_vaddr + prev->p_memsz)
-            {
-                printf("%s: segment %d overlaps or is out of order\n", __FUNCTION__, i);
-                return ENO6_INVAL_PARAM;
-            }
+            return ret;
         }
 
-        /* 段权限统一额外加 VMP_W：第三遍要往刚映射好的页里拷内容，而 SUM 不豁免 PTE 的
+        /* 段权限统一额外加 VMP_W：填内容时要往刚映射好的页里拷，而 SUM 不豁免 PTE 的
          * R/W/X 位；没有"拷完再改回只读"的原语，所以用户代码段也可写（无 W^X，已知简化）。 */
         pgprot_t flag = VMP_W;
         if (ph->p_flags & PF_R)
@@ -170,12 +168,19 @@ int elf_load(mm_t *mm, const unsigned char *image, uint64_t size, elf_info_t *in
     }
     if (nload == 0)
     {
-        printf("%s: no PT_LOAD segment\n", __FUNCTION__);
+        printf("elf_load: no PT_LOAD segment\n");
         return ENO6_INVAL_PARAM;
     }
 
-    /* 第二遍：把各段的页范围并成互不重叠的区间，一个区间建一个 VMA、只映射一次。
-     * 段已按 p_vaddr 升序，线性扫一遍即可完成合并。 */
+    *nload_out = nload;
+    *phdr_va_out = (pt_phdr_va != 0) ? pt_phdr_va : phdr_in_load_va;
+    return ENO0_NO_ERROR;
+}
+
+/* 第二遍：把各段的页范围并成互不重叠的区间，一个区间建一个 VMA、只映射一次。
+ * 段已按 p_vaddr 升序，线性扫一遍即可完成合并。*max_end_out 是最高那个区间的末尾。 */
+static int elf_map_segs(mm_t *mm, const elf_seg_t *segs, int nload, virAddr_t *max_end_out)
+{
     elf_seg_t merged[ELF_MAX_LOAD_SEG];
     int nmerged = 0;
     for (int i = 0; i < nload; i++)
@@ -196,7 +201,6 @@ int elf_load(mm_t *mm, const unsigned char *image, uint64_t size, elf_info_t *in
         }
     }
 
-    virAddr_t max_end = 0;
     for (int i = 0; i < nmerged; i++)
     {
         vma_t *vma = vmm_vma_create(merged[i].start, merged[i].end, merged[i].prot);
@@ -209,7 +213,40 @@ int elf_load(mm_t *mm, const unsigned char *image, uint64_t size, elf_info_t *in
         {
             return ENO1_NOMORE_MEM;
         }
-        max_end = vma->vm_end; /* 合并结果按地址升序，最后一个自然是最高处 */
+        *max_end_out = vma->vm_end; /* 合并结果按地址升序，最后一个自然是最高处 */
+    }
+    return ENO0_NO_ERROR;
+}
+
+/**
+ * @brief 把内存里的 ELF 镜像装进 mm：按 PT_LOAD 建 VMA、映射、拷贝内容，再建堆 VMA
+ * @details 装载分三遍走：先把地址空间的形状算清楚，再落实映射，最后才填内容。
+ *   不能"一个 PT_LOAD 建一个 VMA、马上映射再拷贝"：段是文件的单位，页是地址空间的单位，
+ *   相邻两段可能共用一页，后一段的映射会换掉那页、丢掉前一段的内容，两个 VMA 还会重叠。
+ */
+int elf_load(mm_t *mm, const unsigned char *image, uint64_t size, elf_info_t *info)
+{
+    Elf64_Ehdr *ehdr = (Elf64_Ehdr *)image;
+    int ret = elf_check_header(ehdr, size);
+    if (ret != ENO0_NO_ERROR)
+    {
+        return ret;
+    }
+
+    elf_seg_t segs[ELF_MAX_LOAD_SEG];
+    int nload = 0;
+    virAddr_t phdr_va = 0;
+    ret = elf_collect_segs(ehdr, image, size, segs, &nload, &phdr_va);
+    if (ret != ENO0_NO_ERROR)
+    {
+        return ret;
+    }
+
+    virAddr_t max_end = 0;
+    ret = elf_map_segs(mm, segs, nload, &max_end);
+    if (ret != ENO0_NO_ERROR)
+    {
+        return ret;
     }
 
     /* 第三遍：把文件内容填进已经映好的页。各段的字节区间互不重叠（第一遍已校验），
@@ -230,7 +267,7 @@ int elf_load(mm_t *mm, const unsigned char *image, uint64_t size, elf_info_t *in
     }
 
     info->entry   = ehdr->e_entry;
-    info->phdr_va = (pt_phdr_va != 0) ? pt_phdr_va : phdr_in_load_va;
+    info->phdr_va = phdr_va;
     /* 求不出程序头表地址时 phnum 必须一起清零，见 elf_info_t 的注释 */
     info->phent   = (info->phdr_va != 0) ? ehdr->e_phentsize : 0;
     info->phnum   = (info->phdr_va != 0) ? ehdr->e_phnum : 0;
