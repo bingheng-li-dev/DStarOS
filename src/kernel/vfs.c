@@ -1891,6 +1891,34 @@ int vfs_unlink(const char *path)
     return ret;
 }
 
+/* 磁盘上已经改名成功之后同步目录项缓存：old_d 挪到 new_parent 下、改名为 new_name。
+ * 新名字要先分配好再动 old_d：分配失败时只能把 old_d 从树上摘掉（同 unlink），
+ * 让之后的 lookup 回到底层按新名字重建。 */
+static void rename_move_dentry(dentry_t *old_d, dentry_t *new_parent, const char *new_name)
+{
+    int nl = (int)strlen(new_name);
+    char *new_d_name = (char *)kmalloc(nl + 1);
+    if (new_d_name == NULL)
+    {
+        dentry_detach(old_d);
+        return;
+    }
+    memcpy(new_d_name, new_name, nl + 1);
+
+    /* 改父目录意味着子→父引用要跟着搬家——先给新父加引用，摘链改名之后再放掉旧父的那一份 */
+    dentry_t *old_parent = (old_d->d_parent != old_d) ? old_d->d_parent : NULL;
+    list_del(&old_d->d_child);
+    kfree(old_d->d_name);
+    old_d->d_name = new_d_name;
+    old_d->d_parent = new_parent;
+    dentry_get(new_parent);
+    list_add(&old_d->d_child, &new_parent->d_subdirs);
+    if (old_parent != NULL)
+    {
+        dentry_put(old_parent);
+    }
+}
+
 /**
  * @brief 重命名或移动文件/目录
  * @param[in] oldpath 源路径
@@ -1916,43 +1944,41 @@ int vfs_rename(const char *oldpath, const char *newpath)
         return ENO5_NOSUCH_ENTRY;
     }
 
+    dentry_t *new_parent = NULL;
+    dentry_t *new_d = NULL;
+    int ret;
     char new_ppath[VFS_PATH_MAX], new_name[VFS_NAME_MAX];
     if (split_path(newpath, new_ppath, VFS_PATH_MAX, new_name, VFS_NAME_MAX) < 0)
     {
-        dentry_put(old_d);
-        return ENO11_NAME_TOO_LONG;
+        ret = ENO11_NAME_TOO_LONG;
+        goto out;
     }
 
-    dentry_t *new_parent = vfs_lookup(new_ppath);
+    new_parent = vfs_lookup(new_ppath);
     if (!new_parent)
     {
-        dentry_put(old_d);
-        return ENO5_NOSUCH_ENTRY;
+        ret = ENO5_NOSUCH_ENTRY;
+        goto out;
     }
     if (!new_parent->d_inode || !S_ISDIR(new_parent->d_inode->i_mode))
     {
-        dentry_put(old_d);
-        dentry_put(new_parent);
-        return ENO9_NOT_DIR;
+        ret = ENO9_NOT_DIR;
+        goto out;
     }
-
-    if (old_d->d_inode && new_parent->d_inode &&
-        old_d->d_inode->i_sb != new_parent->d_inode->i_sb)
+    if (old_d->d_inode && old_d->d_inode->i_sb != new_parent->d_inode->i_sb)
     {
-        dentry_put(old_d);
-        dentry_put(new_parent);
-        return ENO14_CROSS_DEV;
+        ret = ENO14_CROSS_DEV;
+        goto out;
     }
 
-    dentry_t *new_d = dentry_create(new_name, NULL, new_parent, NULL);
+    new_d = dentry_create(new_name, NULL, new_parent, NULL);
     if (!new_d)
     {
-        dentry_put(old_d);
-        dentry_put(new_parent);
-        return ENO1_NOMORE_MEM;
+        ret = ENO1_NOMORE_MEM;
+        goto out;
     }
 
-    int ret = ENO0_NO_ERROR;
+    ret = ENO0_NO_ERROR;
     if (old_d->d_parent && old_d->d_parent->d_inode &&
         old_d->d_parent->d_inode->i_op &&
         old_d->d_parent->d_inode->i_op->rename)
@@ -1961,48 +1987,22 @@ int vfs_rename(const char *oldpath, const char *newpath)
                   old_d->d_parent->d_inode, old_d,
                   new_parent->d_inode, new_d);
     }
+    if (ret == ENO0_NO_ERROR)
+    {
+        rename_move_dentry(old_d, new_parent, new_name);
+    }
 
-    if (ret != ENO0_NO_ERROR)
+out:
+    if (new_d)
     {
         dentry_put(new_d);
-        dentry_put(old_d);
-        dentry_put(new_parent);
-        return ret;
     }
-
-    /* 磁盘上已经改名成功。新名字要先分配好再动 old_d：分配失败时只能把 old_d
-     * 从树上摘掉（同 unlink），让之后的 lookup 回到底层按新名字重建。 */
-    int nl = (int)strlen(new_name);
-    char *new_d_name = (char *)kmalloc(nl + 1);
-    if (new_d_name == NULL)
-    {
-        dentry_detach(old_d);
-        dentry_put(new_d);
-        dentry_put(old_d);
-        dentry_put(new_parent);
-        return ENO0_NO_ERROR;
-    }
-    memcpy(new_d_name, new_name, nl + 1);
-
-    /* 将原目录项移到新父目录下，更新名称。改父目录意味着子→父引用要
-     * 跟着搬家——先给新父加引用，摘链改名之后再放掉旧父的那一份。 */
-    dentry_t *old_parent = (old_d->d_parent != old_d) ? old_d->d_parent : NULL;
-    list_del(&old_d->d_child);
-    kfree(old_d->d_name);
-    old_d->d_name = new_d_name;
-    old_d->d_parent = new_parent;
-    dentry_get(new_parent);
-    list_add(&old_d->d_child, &new_parent->d_subdirs);
-    if (old_parent != NULL)
-    {
-        dentry_put(old_parent);
-    }
-
-    dentry_put(new_d);
-
     dentry_put(old_d);
-    dentry_put(new_parent);
-    return ENO0_NO_ERROR;
+    if (new_parent)
+    {
+        dentry_put(new_parent);
+    }
+    return ret;
 }
 
 /**
