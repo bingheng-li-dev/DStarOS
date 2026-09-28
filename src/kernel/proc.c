@@ -621,6 +621,21 @@ static int setup_user_stack(const exec_args_t *args, const elf_info_t *info,
     return ENO0_NO_ERROR;
 }
 
+/* 造一个"sret 即从 entry 开始执行新程序"的 trap 帧，除 sp 外的通用寄存器全为 0。
+ * 用户的 tp 是 TLS 指针，不是 hart 号；hart 号由内核栈顶的保留槽维持（见 KSTACK_RESERVED）。
+ * sstatus 每一位都要想清楚。SIE 必须清：trap_return 会在 sret 前把它整个写回，中断若在
+ * sscratch 已置为栈顶之后被打开，时钟中断会被误判成来自 U 态、新帧压在本帧上
+ * （sret 用 SPIE 恢复中断）；在 syscall trap 里硬件已清过 SIE，这里照样清，不让这条不变式
+ * 依赖"调用者恰好在 trap 上下文里"。FS 置 Initial，用户态可以直接用浮点。 */
+static void user_trapframe_init(intstkf_t *f, virAddr_t entry, virAddr_t ustack)
+{
+    memset(f, 0, sizeof(intstkf_t));
+    f->sepc    = entry;
+    f->x2_sp   = ustack;
+    f->sstatus = (read_csr(sstatus) & ~SSTATUS_SPP & ~SSTATUS_SIE & ~SSTATUS_FS)
+                 | SSTATUS_SPIE | SSTATUS_SUM | SSTATUS_FS_INITIAL;
+}
+
 /**
  * @brief 把整个可执行文件读进内核堆
  * @param[in]  path     绝对路径
@@ -790,14 +805,7 @@ int do_exec(intstkf_t *sp, const char *path, char *const *argv, char *const *env
     }
 
     /* 7) 改写当前 trap 帧：sret 直接进入新程序（复用 syscall 返回路径，不另起 enter_user_mode）*/
-    memset(sp, 0, sizeof(intstkf_t));
-    sp->sepc    = einfo.entry;
-    sp->x2_sp   = user_sp;
-    sp->x4_tp   = cpu_get_core_id();
-    /* 清 SIE 的理由同 enter_user_mode。在 syscall trap 里硬件已清过 SIE，这里再清一次，
-     * 是为了不让这条不变式依赖"调用者恰好在 trap 上下文里"。 */
-    sp->sstatus = (read_csr(sstatus) & ~SSTATUS_SPP & ~SSTATUS_SIE & ~SSTATUS_FS)
-                  | SSTATUS_SPIE | SSTATUS_SUM | SSTATUS_FS_INITIAL;
+    user_trapframe_init(sp, einfo.entry, user_sp);
 
     return ENO0_NO_ERROR;
 }
@@ -1378,16 +1386,7 @@ void enter_user_mode(virAddr_t entry, virAddr_t ustack)
     pcb_t *cur = proc_get_current();
     intstkf_t *f = (intstkf_t *)(PROC_KSTACK_TOP(cur) - sizeof(intstkf_t));
 
-    memset(f, 0, sizeof(intstkf_t));
-    f->sepc    = entry;
-    f->x2_sp   = ustack;
-    /* 用户的 tp 是 TLS 指针，不是 hart 号；hart 号由内核栈顶的保留槽维持（见 KSTACK_RESERVED） */
-    f->x4_tp   = 0;
-    /* 帧是凭空造的，sstatus 每一位都要想清楚。SIE 必须清：trap_return 会在 sret 前把它
-     * 整个写回，中断若在 sscratch 已置为栈顶之后被打开，时钟中断会被误判成来自 U 态、
-     * 新帧压在本帧上（sret 用 SPIE 恢复中断）。FS 置 Initial，用户态可以直接用浮点。 */
-    f->sstatus = (read_csr(sstatus) & ~SSTATUS_SPP & ~SSTATUS_SIE & ~SSTATUS_FS)
-                 | SSTATUS_SPIE | SSTATUS_SUM | SSTATUS_FS_INITIAL;
+    user_trapframe_init(f, entry, ustack);
     /* 不能在这里写 sscratch：它在 S 态必须为 0，trap_entry 靠它判断 trap 来自 U 态。
      * trap_return 在 SPP==0 分支、关中断的尾段会算出同样的值。 */
     fork_out_asm(f);
