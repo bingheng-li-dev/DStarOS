@@ -60,11 +60,11 @@ void panic_impl(const char *func, int line, char *s, ...)
     va_list args;
     /* 绕开 ConsoleLock：panic 可能在持锁上下文里被调用 */
     const char *pre = "\npanic at ";
-    for (const char *p = pre; *p; p++) 
+    for (const char *p = pre; *p; p++)
     {
         sbi_console_putchar((int)*p);
     }
-    for (const char *p = func; *p; p++) 
+    for (const char *p = func; *p; p++)
     {
         sbi_console_putchar((int)*p);
     }
@@ -72,26 +72,30 @@ void panic_impl(const char *func, int line, char *s, ...)
     char linebuf[12];
     int i = 0;
     int n = line;
-    if (n == 0) 
+    if (n == 0)
     {
         linebuf[i++] = '0';
-    } 
-    else 
+    }
+    else
     {
-        while (n > 0) {
+        while (n > 0)
+        {
             linebuf[i++] = '0' + (n % 10);
             n /= 10;
         }
-        for (int l = 0, r = i - 1; l < r; l++, r--) {
-            char tmp = linebuf[l]; linebuf[l] = linebuf[r]; linebuf[r] = tmp;
+        for (int l = 0, r = i - 1; l < r; l++, r--)
+        {
+            char tmp = linebuf[l];
+            linebuf[l] = linebuf[r];
+            linebuf[r] = tmp;
         }
     }
-    for (int j = 0; j < i; j++) 
+    for (int j = 0; j < i; j++)
     {
         sbi_console_putchar((int)linebuf[j]);
     }
     const char *sep = ": ";
-    for (const char *p = sep; *p; p++) 
+    for (const char *p = sep; *p; p++)
     {
         sbi_console_putchar((int)*p);
     }
@@ -101,5 +105,6 @@ void panic_impl(const char *func, int line, char *s, ...)
     sbi_console_putchar('\n');
     panicked = true;
     while (true)
-        ;
+    {
+    }
 }

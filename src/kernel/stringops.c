@@ -48,7 +48,9 @@ void *memset(void *s, int c, size_t n)
     const unsigned char uc = c;
     unsigned char *su;
     for (su = s; 0 < n; ++su, --n)
+    {
         *su = uc;
+    }
     return s;
 }
 
@@ -100,9 +102,13 @@ int memcmp(const void *s1, const void *s2, size_t n)
 int strncmp(const char *p, const char *q, uint32_t n)
 {
     while (n > 0 && *p && *p == *q)
+    {
         n--, p++, q++;
+    }
     if (n == 0)
+    {
         return 0;
+    }
     return (uint8_t)*p - (uint8_t)*q;
 }
 
@@ -112,8 +118,12 @@ int strncmp(const char *p, const char *q, uint32_t n)
 char *strchr(const char *s, char c)
 {
     for (; *s; s++)
+    {
         if (*s == c)
+        {
             return (char *)s;
+        }
+    }
     return 0;
 }
 
@@ -125,6 +135,7 @@ size_t strlen(const char *s)
     size_t n;
 
     for (n = 0; s[n]; n++)
-        ;
+    {
+    }
     return n;
 }

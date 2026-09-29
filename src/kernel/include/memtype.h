@@ -16,7 +16,7 @@
  * +----9----+----9---+----9---+---12--+
  * |  VPN[2] | VPN[1] | VPN[0] | PGOFF |
  * +---------+----+---+--------+-------+
- * 
+ *
  * Sv39 physical address:
  * +----26---+----9---+----9---+---12--+
  * |  PPN[2] | PPN[1] | PPN[0] | PGOFF |
@@ -200,7 +200,7 @@ static inline void tlb_flush_all(void)
     asm volatile("sfence.vma");
 }
 
-/** 
+/**
  * @brief 刷新指定虚拟地址的tlb缓存
  * @param va 需要刷新的虚拟地址
  * @details sfence.vma有两个参数rs1和rs2：sfence.vma rs2, rs1

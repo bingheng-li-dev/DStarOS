@@ -1158,7 +1158,7 @@ static long sys_wait4(int pid, int *ustatus, int options, void *rusage)
             return ENO8_NULL_POINTER;
         }
     }
-    
+
     return ret;
 }
 

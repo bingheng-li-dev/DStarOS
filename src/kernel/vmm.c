@@ -454,9 +454,18 @@ virAddr_t vmm_mmap_find_free_area(mm_t *mm, uint64_t len)
 static pteflg_t vma_prot_to_pte_flags(pgprot_t prot)
 {
     pteflg_t flags = PTE_U;
-    if (prot & VMP_R) flags |= PTE_R;
-    if (prot & VMP_W) flags |= PTE_W;
-    if (prot & VMP_X) flags |= PTE_X;
+    if (prot & VMP_R)
+    {
+        flags |= PTE_R;
+    }
+    if (prot & VMP_W)
+    {
+        flags |= PTE_W;
+    }
+    if (prot & VMP_X)
+    {
+        flags |= PTE_X;
+    }
     return flags;
 }
 

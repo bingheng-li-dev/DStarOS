@@ -37,7 +37,6 @@ static void trap_user_exception(intstkf_t *sp, const char *what, int sig)
     panic("%s in kernel mode", what);
 }
 
-
 /**
  * @brief S 态外部中断：从 PLIC 领取、分发、交还
  * @details 目前唯一路由过来的是 UART 接收中断，且只路由给 cpu0（见 plic_init()）。

@@ -591,7 +591,6 @@ void sdmmc_write_test(void)
 }
 #endif
 
-
 #if DEBUG_SDMMC_PROBE
 /**
  * @brief 切换多块传输，只供板上对比单块 / 多块的耗时与命令数

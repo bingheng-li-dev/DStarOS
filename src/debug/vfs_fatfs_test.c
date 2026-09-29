@@ -374,7 +374,8 @@ void vfs_test(void)
     /* ---- write + read roundtrip ---- */
     file_t *f = vfs_open("/hello.txt", O_RDWR | O_CREAT, NULL);
     check("open /hello.txt O_CREAT", f != NULL);
-    if (f) {
+    if (f)
+    {
         ssize_t w = vfs_write(f, "hello DStarOS", 13);
         check("write 13 bytes", w == 13);
         vfs_close(f);
@@ -384,7 +385,8 @@ void vfs_test(void)
     memset(buf, 0, sizeof(buf));
     f = vfs_open("/hello.txt", O_RDONLY, NULL);
     check("open /hello.txt O_RDONLY", f != NULL);
-    if (f) {
+    if (f)
+    {
         ssize_t r = vfs_read(f, buf, 13);
         check("read 13 bytes", r == 13);
         check("read content correct", strncmp(buf, "hello DStarOS", 13) == 0);
@@ -408,7 +410,8 @@ void vfs_test(void)
     /* ---- file in subdir ---- */
     f = vfs_open("/testdir/sub.txt", O_RDWR | O_CREAT, NULL);
     check("open /testdir/sub.txt O_CREAT", f != NULL);
-    if (f) {
+    if (f)
+    {
         ssize_t w = vfs_write(f, "sub", 3);
         check("write 3 bytes to subdir file", w == 3);
         vfs_close(f);
