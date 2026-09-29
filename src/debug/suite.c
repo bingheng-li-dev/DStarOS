@@ -89,14 +89,14 @@ static void run_user_suite(void)
     int fw_pid = create_kernel_thread_by_fork((void *)run_fork_wait_test_program, NULL, 0);
     if (fw_pid < 0)
     {
-        panic("Failed to fork fork_wait test program thread!\n");
+        panic("cannot fork the fork_wait program thread");
     }
 #endif
 
     int pid = create_kernel_thread_by_fork((void *)run_first_user_program, NULL, 0);
     if (pid < 0)
     {
-        panic("Failed to fork user program thread!\n");
+        panic("cannot fork the user program thread");
     }
 
     while (1)

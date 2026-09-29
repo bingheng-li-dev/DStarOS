@@ -105,7 +105,7 @@ static void init_kernel_offset_mapping(void)
     pframe_t *kernel_pgd_pframe = pmm_alloc_page();
     if (!kernel_pgd_pframe)
     {
-        panic("Failed to allocate page for kernel PGD!\n");
+        panic("cannot allocate the kernel PGD");
     }
     memset((void *)convert_pframe2pa(kernel_pgd_pframe), 0, PGSIZE);
     kernel_pgd_pframe->reference += 1;
@@ -233,7 +233,7 @@ void vmm_map_mmio_range(phyAddr_t pa_start, phyAddr_t pa_end)
                                   PTE_G | PTE_R | PTE_W, false);
         if (ret != ENO0_NO_ERROR)
         {
-            panic("vmm_map_mmio_range: failed at pa 0x%lx, ret %d\n", (unsigned long)pa, ret);
+            panic("failed at pa 0x%lx, ret %d", (unsigned long)pa, ret);
         }
     }
 }
@@ -259,7 +259,7 @@ void vmm_remove_identity_mapping(void)
         }
     }
     tlb_flush_all();
-    printf("virtual memory management inited!\n");
+    printf("vmm: inited\n");
 }
 
 /**

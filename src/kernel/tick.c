@@ -72,7 +72,7 @@ void tick_init(void)
     }
     tick_set_next_int(timebase);
     cpu_get_current()->tick = 0;
-    printf("%s::core %d tick inited!\n", __func__, cpu_get_core_id());
+    printf("tick: core %d inited\n", cpu_get_core_id());
 }
 
 /**

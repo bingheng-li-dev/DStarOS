@@ -71,7 +71,7 @@ void slab_init(void)
     pcb_cache    = slab_cache_create("pcb", sizeof(pcb_t));
     fil_cache    = slab_cache_create("fil", sizeof(FIL));
 
-    printf("slab allocator inited!\n");
+    printf("slab: inited\n");
 }
 
 /**
@@ -106,7 +106,7 @@ kmem_cache_t *slab_cache_create(const char *name, uint32_t size)
     if (cache == NULL)
     {
         spinlock_release(&cache_table_lock, cache_table_lock_key);
-        panic("slab: cache table exhausted\n");
+        panic("slab: cache table exhausted");
     }
 
     cache->name = name;

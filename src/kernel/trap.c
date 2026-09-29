@@ -88,7 +88,7 @@ void trap_init(void)
     /* @todo SUM 全程开着，正确做法是只在 copy_to/from_user 前后开。 */
     set_csr(sstatus, SSTATUS_SUM);
 
-    printf("core %ld trap inited!\n", cpu_get_core_id());
+    printf("trap: core %ld inited\n", cpu_get_core_id());
 }
 
 /**
@@ -131,7 +131,7 @@ static void trap_interrupt(intstkf_t *sp, int cause)
 #if DEBUG_INTSTACK
         print_intstk(sp);
 #endif
-        printf("Unknown interrupt\n");
+        printf("trap: unknown interrupt %d\n", cause);
         break;
     }
 }
@@ -174,7 +174,7 @@ static bool trap_exception(intstkf_t *sp, int cause)
         sp->x10_a0 = (uint64_t)syscall_dispatch(sp);
         return true;
     case CAUSE_SUPERVISOR_ECALL:
-        printf("Environment call from S-mode");
+        printf("trap: ecall from S-mode\n");
         return true;
     case CAUSE_MISALIGNED_FETCH:
         trap_user_exception(sp, "instruction address misaligned", SIGBUS);
@@ -195,13 +195,13 @@ static bool trap_exception(intstkf_t *sp, int cause)
         trap_user_exception(sp, "store address misaligned", SIGBUS);
         return true;
     case CAUSE_HYPERVISOR_ECALL:
-        printf("Environment call from H-mode");
+        printf("trap: ecall from H-mode\n");
         break;
     case CAUSE_MACHINE_ECALL:
-        printf("Environment call from M-mode");
+        printf("trap: ecall from M-mode\n");
         break;
     default:
-        printf("Unknown exception : %08x", cause);
+        printf("trap: unknown exception %d\n", cause);
         break;
     }
     return false;
@@ -217,7 +217,7 @@ static void trap_dispatch(intstkf_t *sp)
     if (get_local_intr())
     {
         /* 硬件进 trap 时自动清 SIE；这里还是 1 说明有人在关中断区间外进了 trap。 */
-        panic("%s::interrupts enabled.\n", __func__);
+        panic("interrupts enabled on trap entry");
     }
 #if DEBUG_BOOT_TRACE
     static int bt_trap_reports;
@@ -238,7 +238,7 @@ static void trap_dispatch(intstkf_t *sp)
     }
     else if (!trap_exception(sp, cause))
     {
-        panic("Not pageFaultHander or Ecall Exception!!");
+        panic("unhandled exception, scause=0x%lx sepc=0x%lx", sp->scause, sp->sepc);
     }
 }
 

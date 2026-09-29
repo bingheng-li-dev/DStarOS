@@ -304,7 +304,7 @@ static void exit_common(int16_t error_code, uint8_t sig)
 
     sched_schedule();
 
-    panic("Zombie task resumed, should never happen\n");
+    panic("Zombie task resumed, should never happen");
 }
 
 /**
@@ -847,7 +847,7 @@ void proc_init(void)
     pcb_t *idle = create_first_proc_idle();
     if (idle == NULL)
     {
-        panic("Failed to pmm_alloc_pages idle proc!!\n");
+        panic("cannot allocate the idle proc");
     }
     cpu_get_current()->idle_proc = idle;
     sched_set_current(idle);
@@ -963,13 +963,13 @@ static int16_t copy_proc_mm(uint32_t clone_flags, pcb_t *pcb)
     mm_t *mm = vmm_mm_create();
     if (!mm)
     {
-        panic("Failed to pmm_alloc_pages new mm for child process!\n");
+        panic("out of memory for the child mm");
     }
 
     /* 必须先建立独立 PGD 并设好 mm->pgd_ppn，vmm_mm_copy 才能向正确的页表写 PTE */
     if (vmm_mm_alloc_pgd(mm) != ENO0_NO_ERROR)
     {
-        panic("Failed to pmm_alloc_pages new page for child process PGD!\n");
+        panic("out of memory for the child PGD");
     }
 
     vmm_mm_copy(mm, proc_get_current()->proc_mm);
@@ -1322,7 +1322,7 @@ void proc_run_user_program(const char *path, const char *const argv[], int argc)
 
 static int16_t init(void)
 {
-    printf("%s::Hello! I'm the init process!!\n", __func__);
+    printf("init: pid 1 started\n");
 
 #if DEBUG_SUITE
     debug_suite_run();

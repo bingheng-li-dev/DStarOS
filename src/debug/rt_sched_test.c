@@ -122,7 +122,7 @@ void rt_preempt_cfs_test(void)
         }
     }
 
-    printf("  最先跑完的 RT worker 在序号 %d 退出，CFS 活动区间[%d..%d]\n",
+    printf("  first RT worker finished at seq %d, CFS active over [%d..%d]\n",
            first_rt_done, rtp_cfs_first, rtp_cfs_last);
     sched_test_check("both RT and CFS workers ran",
                      first_rt_done > 0 && rtp_cfs_first > 0);

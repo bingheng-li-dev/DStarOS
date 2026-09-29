@@ -84,7 +84,7 @@ void pmm_init(void)
     pmm_free_addr_list.fnsize = ppn_free_amount;
     list_add(&(free_frame_begin->free_addr_list_linker), &(pmm_free_addr_list.list_linker));
 
-    printf("pmm inited!\n");
+    printf("pmm: inited\n");
 }
 
 /**
