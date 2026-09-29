@@ -42,8 +42,10 @@ void sched_test_check(const char *name, int cond)
     ktest_check(&sched_kt, name, cond);
 }
 
-/* 收割当前进程的全部子进程，返回收割到的个数。
- * do_wait(-1) 在没有任何子进程时返回负值（ENO17_NO_CHILD），据此结束。 */
+/**
+ * @brief 收割当前进程的全部子进程，返回收割到的个数
+ * @details do_wait(-1) 在没有任何子进程时返回负值（ENO17_NO_CHILD），据此结束。
+ */
 int sched_test_reap_all(void)
 {
     int reaped = 0;
@@ -175,6 +177,9 @@ static osslock_t    cfs_gate_lock;
 static waitq_t      cfs_gate_wq;
 static volatile int cfs_gate_open;
 
+/**
+ * @brief 起跑闸门复位为关闭
+ */
 void sched_test_gate_init(void)
 {
     spinlock_init(&cfs_gate_lock);
@@ -182,6 +187,9 @@ void sched_test_gate_init(void)
     cfs_gate_open = 0;
 }
 
+/**
+ * @brief 睡在起跑闸门上，直到 sched_test_gate_release() 放行
+ */
 void sched_test_gate_wait(void)
 {
     irq_key_t cfs_gate_lock_key = spinlock_acquire(&cfs_gate_lock);
@@ -196,6 +204,9 @@ void sched_test_gate_wait(void)
     spinlock_release(&cfs_gate_lock, cfs_gate_lock_key);
 }
 
+/**
+ * @brief 打开起跑闸门，一次唤醒全部等待者
+ */
 void sched_test_gate_release(void)
 {
     irq_key_t cfs_gate_lock_key = spinlock_acquire(&cfs_gate_lock);

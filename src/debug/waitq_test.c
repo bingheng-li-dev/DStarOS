@@ -55,6 +55,9 @@ static void *wq_waiter(void *arg)
     return NULL;
 }
 
+/**
+ * @brief 单等待者：waitq_prepare 阻塞，waitq_wake_all 唤醒
+ */
 void waitq_single_wakeup_test(void)
 {
     printf("\n-- waitq: single waiter prepare / wake_all wakeup --\n");
@@ -111,6 +114,9 @@ static void *wqb_waiter(void *arg)
     return NULL;
 }
 
+/**
+ * @brief 多等待者：一次 waitq_wake_all 全部唤醒，不丢
+ */
 void waitq_broadcast_test(void)
 {
     printf("\n-- waitq: broadcast wake_all wakes every waiter, none lost --\n");

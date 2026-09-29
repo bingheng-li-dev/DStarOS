@@ -41,6 +41,9 @@ static void *sem_consumer(void *arg)
     return NULL;
 }
 
+/**
+ * @brief sem_down 阻塞睡眠，sem_up 唤醒
+ */
 void sync_sem_wakeup_test(void)
 {
     printf("\n-- semaphore: sem_down sleep / sem_up wakeup --\n");
@@ -95,6 +98,9 @@ static void *mtx_worker(void *arg)
     return NULL;
 }
 
+/**
+ * @brief 信号量当互斥锁用时临界区不交错
+ */
 void sync_mutex_test(void)
 {
     printf("\n-- semaphore: mutual exclusion (sem as mutex) --\n");

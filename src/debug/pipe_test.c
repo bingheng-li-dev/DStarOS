@@ -523,6 +523,9 @@ static void pipe_close_on_exec_test(void)
 /* ============================================================
  * 聚合入口：由 run_sched_tests()（sched_test.c）调用
  * ============================================================ */
+/**
+ * @brief 管道核心读写回归入口
+ */
 void run_pipe_tests(void)
 {
     pipe_read_basic_test();

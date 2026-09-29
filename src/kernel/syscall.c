@@ -239,8 +239,7 @@ static long sys_readv(int fd, const struct iovec *uiov, int iovcnt)
  * @note `mode`（权限位）当前被忽略——FAT 没有权限概念，vfs_open 内部固定按 0644/0755
  *   建 inode（见 fatfs_vfs.c 建 inode 的四处回调），与 O_CREAT 的调用方无关。
  * @note `dirfd` 只支持 `AT_FDCWD` 或路径本身是绝对路径这两种情况（此时 dirfd 被忽略）；
- *   传入其它 dirfd 值一律返回 `-EBADF`——真正的"相对某个已打开目录 fd 解析路径"需要
- *   `vfs_lookup` 支持从任意 dentry 起点解析，当前 VFS 没有这个能力，留给以后实测撞上再补。
+ *   传入其它 dirfd 值一律返回 `-EBADF`——`vfs_lookup` 只能从根或 cwd 起步解析。
  */
 static long sys_openat(int dirfd, const char *upath, int flags, int mode)
 {

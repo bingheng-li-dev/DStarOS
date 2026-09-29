@@ -95,8 +95,8 @@ extern char ebss[];      /* .bss 段结束 */
  *
  * U-Boot 的几个默认暂存地址（2023-02 SDK 固件）与上面的区间是重叠的：
  *     kernel_addr_r  = 0x40200000  恰好等于 KERNEL_START，booti 源即目标，无妨
- *     fdt_addr_r     = 0x46000000  落在页帧池内 ✗
- *     ramdisk_addr_r = 0x46100000  落在页帧池内 ✗
+ *     fdt_addr_r     = 0x46000000  落在页帧池内，冲突
+ *     ramdisk_addr_r = 0x46100000  落在页帧池内，冲突
  * 所以加载时不要用后两个变量：rootfs 直接写死 0x47000000，DTB 用
  * fdtcontroladdr（0xfffc56a0，在 KERNEL_MAP_END 之外）。rootfs 是我们自己按地址
  * 预载的，撞上了不会有任何报错，只会静默改坏内存。命令见 tools/build_vf2_image.sh。 */
