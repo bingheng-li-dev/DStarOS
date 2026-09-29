@@ -1162,7 +1162,7 @@ static file_system_type_t fatfs_fs_type = {
  */
 void fatfs_register(void)
 {
-    int16_t ret = register_filesystem(&fatfs_fs_type);
+    int ret = register_filesystem(&fatfs_fs_type);
     if (ret != ENO0_NO_ERROR)
     {
         printf("fatfs_register: failed, err=%d\n", ret);

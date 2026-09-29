@@ -80,7 +80,7 @@ void waitq_single_wakeup_test(void)
     spinlock_release(&wq_lock, wq_lock_key);
 
     int status = 0;
-    int16_t c = do_wait(-1, &status, 0);
+    int c = do_wait(-1, &status, 0);
     sched_test_check("waiter reaped after wake_all", c > 0);
     sched_test_check("waiter proceeded past waitq_prepare", wq_stage == 2);
 }

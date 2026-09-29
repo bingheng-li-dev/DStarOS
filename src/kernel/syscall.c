@@ -1150,7 +1150,7 @@ static long sys_wait4(int pid, int *ustatus, int options, void *rusage)
 {
     (void)rusage;
     int kstatus = 0;
-    int16_t ret = do_wait((int16_t)pid, &kstatus, options);
+    int ret = do_wait((int16_t)pid, &kstatus, options);
     if (ret > 0 && ustatus)
     {
         if (copy_to_user(ustatus, &kstatus, sizeof(kstatus)) != 0)

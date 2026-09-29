@@ -86,14 +86,14 @@ static void run_fork_wait_test_program(void)
 static void run_user_suite(void)
 {
 #if DEBUG_SUITE == SUITE_FORK_WAIT
-    int16_t fw_pid = create_kernel_thread_by_fork((void *)run_fork_wait_test_program, NULL, 0);
+    int fw_pid = create_kernel_thread_by_fork((void *)run_fork_wait_test_program, NULL, 0);
     if (fw_pid < 0)
     {
         panic("Failed to fork fork_wait test program thread!\n");
     }
 #endif
 
-    int16_t pid = create_kernel_thread_by_fork((void *)run_first_user_program, NULL, 0);
+    int pid = create_kernel_thread_by_fork((void *)run_first_user_program, NULL, 0);
     if (pid < 0)
     {
         panic("Failed to fork user program thread!\n");
@@ -102,7 +102,7 @@ static void run_user_suite(void)
     while (1)
     {
         int status;
-        int16_t cpid = do_wait(-1, &status, 0);
+        int cpid = do_wait(-1, &status, 0);
         if (cpid == ENO24_RESTARTSYS)
         {
             continue;

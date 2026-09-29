@@ -92,7 +92,7 @@ char *set_proc_name(pcb_t *proc, const char *name)
  * @param[in] stack 子进程的用户栈指针；0 表示 fork 内核线程
  * @return 子进程 pid；负值为错误码
  */
-int16_t do_fork(uint32_t clone_flags, uintptr_t stack, intstkf_t *regs)
+int do_fork(uint32_t clone_flags, uintptr_t stack, intstkf_t *regs)
 {
     if (task_count > PROC_MAX_AMOUNT)
     {
@@ -326,7 +326,7 @@ static void exit_common(int16_t error_code, uint8_t sig)
  *   "等任意"：ash 关掉 job control 之后不该走到这里，走到了就说明配置没关净，
  *   这个信号比一个含糊的实现有价值。
  */
-int16_t do_wait(int16_t pid, int *status, int options)
+int do_wait(int16_t pid, int *status, int options)
 {
     pcb_t *cur = proc_get_current();
 
@@ -813,7 +813,7 @@ int do_exec(intstkf_t *sp, const char *path, char *const *argv, char *const *env
 /**
  * @brief fork 一个执行 func(args) 的内核线程（与父进程共享地址空间）
  */
-int16_t create_kernel_thread_by_fork(void *func(void *), void *args, uint32_t clone_flags)
+int create_kernel_thread_by_fork(void *func(void *), void *args, uint32_t clone_flags)
 {
     intstkf_t regs;
     memset(&regs, 0, sizeof(intstkf_t));
@@ -854,7 +854,7 @@ void proc_init(void)
 
     if (cpu_get_core_id() == 0)
     {
-        int16_t id_init = create_kernel_thread_by_fork((void *)init, NULL, 0);
+        int id_init = create_kernel_thread_by_fork((void *)init, NULL, 0);
         pcb_t *pcb_init = find_proc_by_pid(id_init);
         const char *name = "init";
         set_proc_name(pcb_init, name);

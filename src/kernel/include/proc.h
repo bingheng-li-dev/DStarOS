@@ -181,13 +181,13 @@ void fork_out_asm(intstkf_t *regs) __attribute__((noreturn));
 void kernel_thread_entry(void);
 
 char *set_proc_name(pcb_t *proc, const char *name);
-int16_t do_fork(uint32_t clone_flags, uintptr_t stack, intstkf_t *regs);
+int do_fork(uint32_t clone_flags, uintptr_t stack, intstkf_t *regs);
 void do_exit(int16_t error_code) __attribute__((noreturn));
 /* 被信号杀死的退出路径：wait status 的低 7 位是信号号，而不是 (code<<8) */
 void do_exit_signal(int sig) __attribute__((noreturn));
-int16_t do_wait(int16_t pid, int *status, int options);
+int do_wait(int16_t pid, int *status, int options);
 int do_exec(intstkf_t *sp, const char *path, char *const *argv, char *const *envp);
-int16_t create_kernel_thread_by_fork(void *func(void *), void *args, uint32_t clone_flags);
+int create_kernel_thread_by_fork(void *func(void *), void *args, uint32_t clone_flags);
 /* 当前内核线程变身用户进程，加载 path 并进入 U 态，不返回 */
 void proc_run_user_program(const char *path, const char *const argv[], int argc);
 /* 按 pid 查找 pcb（find_proc_by_pid 的公开包装）；未找到返回 NULL。

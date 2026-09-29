@@ -554,7 +554,7 @@ static file_system_type_t **find_filesystem_by_name(const char *name, int len)
  * @retval ENO4_BUSY         已注册
  * @retval ENO8_NULL_POINTER 参数非法
  */
-int16_t register_filesystem(file_system_type_t *fs_type)
+int register_filesystem(file_system_type_t *fs_type)
 {
     file_system_type_t **fs_type_ptr;
     int16_t ret = ENO0_NO_ERROR;
@@ -594,7 +594,7 @@ int16_t register_filesystem(file_system_type_t *fs_type)
  * @retval ENO0_NO_ERROR    成功
  * @retval ENO5_NOSUCH_ENTRY 未找到
  */
-int16_t unregister_filesystem(file_system_type_t *fs_type)
+int unregister_filesystem(file_system_type_t *fs_type)
 {
     file_system_type_t **fs_type_ptr = &file_system_types;
 

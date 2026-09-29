@@ -387,7 +387,7 @@ static void test_exit_releases_cwd(void)
     int ref_before = cwd_dir_ref();
     expect(ref_before > 0, "cwd dir resolvable before the fork");
 
-    int16_t pid = create_kernel_thread_by_fork(cwd_worker, NULL, 0);
+    int pid = create_kernel_thread_by_fork(cwd_worker, NULL, 0);
     expect(pid > 0, "forked the chdir worker");
     if (pid > 0)
     {

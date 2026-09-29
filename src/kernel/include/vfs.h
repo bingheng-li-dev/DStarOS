@@ -310,8 +310,8 @@ void vfs_lock(void);
 void vfs_unlock(void);
 
 /* 文件系统注册与注销 */
-int16_t register_filesystem(file_system_type_t *fs_type);
-int16_t unregister_filesystem(file_system_type_t *fs_type);
+int register_filesystem(file_system_type_t *fs_type);
+int unregister_filesystem(file_system_type_t *fs_type);
 
 /* 挂载与卸载 */
 int vfs_mount(const char *path, const char *fs_type, void *data);

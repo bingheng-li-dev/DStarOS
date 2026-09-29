@@ -269,7 +269,7 @@ static file_system_type_t devfs_fs_type = {
  */
 void devfs_register(void)
 {
-    int16_t ret = register_filesystem(&devfs_fs_type);
+    int ret = register_filesystem(&devfs_fs_type);
     if (ret != ENO0_NO_ERROR)
     {
         printf("devfs_register: failed, err=%d\n", ret);

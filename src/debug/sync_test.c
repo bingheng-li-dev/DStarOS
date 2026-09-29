@@ -66,7 +66,7 @@ void sync_sem_wakeup_test(void)
 
     /* 收割 consumer：它被唤醒后越过 sem_down（stage=2）→ return → do_exit */
     int status = 0;
-    int16_t c = do_wait(-1, &status, 0);
+    int c = do_wait(-1, &status, 0);
     sched_test_check("consumer reaped after wakeup", c > 0);
     sched_test_check("consumer proceeded past sem_down", consumer_stage == 2);
 }

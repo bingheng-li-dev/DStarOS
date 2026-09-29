@@ -212,7 +212,7 @@ static void pipe_read_block_wakeup_test(void)
     spinlock_release(&pipe_block_p.lock, pipe_block_p_lock_key);
 
     int status = 0;
-    int16_t c = do_wait(-1, &status, 0);
+    int c = do_wait(-1, &status, 0);
     sched_test_check("reader reaped after wakeup", c > 0);
     sched_test_check("reader got correct length", pipe_block_ret == (ssize_t)msglen);
     sched_test_check("reader got correct content", memcmp(pipe_block_result, msg, msglen) == 0);
@@ -377,7 +377,7 @@ static void pipe_write_block_wakeup_test(void)
     sched_test_check("reader drained 1 byte", rr == 1);
 
     int status = 0;
-    int16_t c = do_wait(-1, &status, 0);
+    int c = do_wait(-1, &status, 0);
     sched_test_check("writer reaped after wakeup", c > 0);
     sched_test_check("writer completed the pending 1-byte write", pipe_wblock_ret == 1);
 
@@ -427,7 +427,7 @@ static void pipe_release_write_then_read_eof_test(void)
     vfs_close(pipe_rel1_wf); /* 关闭写端：writers 归零，应唤醒阻塞读者 */
 
     int status = 0;
-    int16_t c = do_wait(-1, &status, 0);
+    int c = do_wait(-1, &status, 0);
     sched_test_check("reader reaped after write end closed", c > 0);
     sched_test_check("reader got EOF (0) after write end closed", pipe_rel1_ret == 0);
 
@@ -479,7 +479,7 @@ static void pipe_release_read_then_write_epipe_test(void)
     vfs_close(pipe_rel2_rf); /* 关闭读端：readers 归零，应唤醒阻塞写者 */
 
     int status = 0;
-    int16_t c = do_wait(-1, &status, 0);
+    int c = do_wait(-1, &status, 0);
     sched_test_check("writer reaped after read end closed", c > 0);
     sched_test_check("writer got EPIPE after read end closed",
                       pipe_rel2_ret == ENO22_BROKEN_PIPE);
