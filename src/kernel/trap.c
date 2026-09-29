@@ -217,7 +217,7 @@ static void trap_dispatch(intstkf_t *sp)
     if (get_local_intr())
     {
         /* 硬件进 trap 时自动清 SIE；这里还是 1 说明有人在关中断区间外进了 trap。 */
-        panic("%s::interrupts enabled.\n", __FUNCTION__);
+        panic("%s::interrupts enabled.\n", __func__);
     }
 #if DEBUG_BOOT_TRACE
     static int bt_trap_reports;

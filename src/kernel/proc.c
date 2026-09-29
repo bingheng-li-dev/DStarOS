@@ -1322,7 +1322,7 @@ void proc_run_user_program(const char *path, const char *const argv[], int argc)
 
 static int16_t init(void)
 {
-    printf("%s::Hello! I'm the init process!!\n", __FUNCTION__);
+    printf("%s::Hello! I'm the init process!!\n", __func__);
 
 #if DEBUG_SUITE
     debug_suite_run();
