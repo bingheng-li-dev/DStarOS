@@ -20,4 +20,8 @@ extern char boot_stacks[];
 uint64_t cpu_get_core_id_asm(void);
 void cpu_set_core_id_asm(uint64_t core_id);
 
+/* startup.S 调用的 C 入口（init.c） */
+void os_init_before_mmu_enable(void);
+void os_init_after_mmu_enable(uint64_t cpu_id);
+
 #endif /* _STARTUP_H_ */

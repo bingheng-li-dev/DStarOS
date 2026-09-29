@@ -22,6 +22,7 @@
 #include "fpu.h"
 #include "fdt.h"
 #include "probes.h"
+#include "startup.h"
 
 /* 固件（OpenSBI/RustSBI）或 U-Boot booti 通过 a1 传进来的 DTB 物理地址，
  * 由 startup.S 在 bss 清零之后存入。时基自检与 hart 探测都要读它。 */

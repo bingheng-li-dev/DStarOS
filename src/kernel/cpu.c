@@ -74,8 +74,8 @@ void cpu_probe_harts(void)
     cpu_to_hart[0] = boot_hartid_raw;
     cpu_present_count = 1;
 
-    const void *cpus = fdt_find_node("/cpus");
-    if (cpus == NULL)
+    const void *cpus_node = fdt_find_node("/cpus");
+    if (cpus_node == NULL)
     {
         printf("cpu: %s -- running single core on boot hart %ld\n",
                fdt_is_available() ? "dtb has no /cpus" : "no usable dtb",
@@ -84,7 +84,7 @@ void cpu_probe_harts(void)
     }
 
     int n = 1;
-    for (const void *cpu = fdt_first_subnode(cpus);
+    for (const void *cpu = fdt_first_subnode(cpus_node);
          cpu != NULL;
          cpu = fdt_next_subnode(cpu))
     {

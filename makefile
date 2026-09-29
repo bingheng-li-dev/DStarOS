@@ -16,7 +16,7 @@ OBJCOPY := $(TOOLPREFIX)objcopy
 OBJDUMP := $(TOOLPREFIX)objdump
 
 CFLAGS := -O
-CFLAGS += -nostdlib -fno-pic -Wall -Werror
+CFLAGS += -nostdlib -fno-pic -Wall -Werror -Wmissing-prototypes -Wshadow
 CFLAGS += -mcmodel=medany -march=rv64imafdc -mabi=lp64d
 CFLAGS += -ffreestanding -fno-common -mno-relax
 CFLAGS += -MMD -MP
@@ -92,6 +92,9 @@ debugbuild:
 # 用 order-only 依赖（|）创建输出目录：目录时间戳不触发重编
 $(OUTDIR)/%.o: %.c | $(C_OUTDIR)
 	$(CC) $(CFLAGS) -c $< -o $@
+
+# FatFS 是第三方代码，不改源码：它有几个没进头文件的全局函数
+$(OUTDIR)/src/lib/fatfs/ff.o: CFLAGS += -Wno-missing-prototypes
 
 $(OUTDIR)/%.o: %.S | $(C_OUTDIR)
 	$(CC) $(CFLAGS) -Wa,-gdwarf-2 -c $< -o $@
