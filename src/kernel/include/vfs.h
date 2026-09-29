@@ -212,7 +212,7 @@ struct file_system_type
 struct super_block_operations
 {
     inode_t *(*alloc_inode)(super_block_t *sb);     /* 分配并初始化一个新 inode */
-    void     (*destory_inode)(inode_t *inode);      /* 销毁 inode，释放私有资源 */
+    void     (*destroy_inode)(inode_t *inode);      /* 销毁 inode，释放私有资源 */
     int      (*sync_fs)(super_block_t *sb);         /* 将脏数据同步到底层存储 */
     int      (*unmount)(super_block_t *sb);         /* 卸载文件系统，释放底层资源 */
 };
@@ -358,7 +358,7 @@ void destroy_super_block(super_block_t *sb);
 
 /* inode 操作（VFS 内部接口）*/
 inode_t *alloc_inode(super_block_t *sb);
-void     destory_inode(inode_t *inode);
+void     destroy_inode(inode_t *inode);
 
 /* 目录项操作（VFS 内部接口）*/
 dentry_t *dentry_create(const char *name, inode_t *inode,

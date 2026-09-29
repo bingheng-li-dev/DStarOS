@@ -205,7 +205,7 @@ static void nullfs_destroy_inode_cb(inode_t *inode)
 
 static super_block_operations_t nullfs_sb_ops = {
     .alloc_inode   = NULL,
-    .destory_inode = nullfs_destroy_inode_cb,
+    .destroy_inode = nullfs_destroy_inode_cb,
     .sync_fs       = NULL,
     .unmount       = NULL,
 };
@@ -339,7 +339,7 @@ static void vfs_unmount_test(void)
 
     nullfs_inodes_destroyed = 0;
     check("unmount /mnt2", vfs_unmount("/mnt2") == ENO0_NO_ERROR);
-    check("root inode went through destory_inode", nullfs_inodes_destroyed == 1);
+    check("root inode went through destroy_inode", nullfs_inodes_destroyed == 1);
 
     vfs_dcache_shrink(0xffffffffu);
     check("mount/unmount leaks no dentry", dentry_cache->nr_inuse == dentry_before);

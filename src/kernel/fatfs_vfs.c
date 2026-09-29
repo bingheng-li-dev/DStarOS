@@ -334,7 +334,7 @@ static int fatfs_unmount_cb(super_block_t *sb)
 
 static super_block_operations_t fatfs_sb_ops = {
     .alloc_inode   = fatfs_alloc_inode_cb,
-    .destory_inode = fatfs_destroy_inode_cb,
+    .destroy_inode = fatfs_destroy_inode_cb,
     .sync_fs       = fatfs_sync_fs_cb,
     .unmount       = fatfs_unmount_cb,
 };

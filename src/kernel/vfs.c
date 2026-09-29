@@ -255,7 +255,7 @@ static void dcache_evict(dentry_t *d)
          * 否则每解析一次路径就漏掉一个 inode。 */
         if (d->d_inode != NULL)
         {
-            destory_inode(d->d_inode);
+            destroy_inode(d->d_inode);
             d->d_inode = NULL;
         }
 
@@ -683,7 +683,7 @@ super_block_t *alloc_super_block(
  * @brief 从全局链表摘除并释放超级块
  * @param[in] sb 要销毁的超级块指针
  * @note 只摘链 + 释放超级块本身。根 dentry / 根 inode 不在这里回收——它们的
- *   destory_inode 要经 inode->i_sb->s_op 分发，必须赶在本函数之前放掉，
+ *   destroy_inode 要经 inode->i_sb->s_op 分发，必须赶在本函数之前放掉，
  *   见 vfs_unmount() 里的处理。调用前应先完成文件系统的卸载（unmount）。
  */
 void destroy_super_block(super_block_t *sb)
@@ -715,17 +715,17 @@ inode_t *alloc_inode(super_block_t *sb)
 }
 
 /**
- * @brief 通过超级块的 destory_inode 回调释放 inode
+ * @brief 通过超级块的 destroy_inode 回调释放 inode
  * @param[in] inode 要释放的 inode 指针
  */
-void destory_inode(inode_t *inode)
+void destroy_inode(inode_t *inode)
 {
     if (!inode || !inode->i_sb || !inode->i_sb->s_op ||
-        !inode->i_sb->s_op->destory_inode)
+        !inode->i_sb->s_op->destroy_inode)
     {
         return;
     }
-    inode->i_sb->s_op->destory_inode(inode);
+    inode->i_sb->s_op->destroy_inode(inode);
 }
 
 /* ============================================================
@@ -1258,9 +1258,9 @@ int vfs_unmount(const char *path)
 
     /* 归还根目录项创建时的那一个引用。文件系统局部根的 d_parent 指向自身，
      * dcache_should_cache() 因此为假，dentry_put 会直接走 dcache_evict——连带经
-     * s_op->destory_inode 回收根 inode。两件事的先后不能反：destory_inode 要经
+     * s_op->destroy_inode 回收根 inode。两件事的先后不能反：destroy_inode 要经
      * inode->i_sb->s_op 分发，超级块必须还活着；而底层文件系统的 unmount 回调
-     * 可能拆掉 destory_inode 依赖的状态，所以也放在它后面。 */
+     * 可能拆掉 destroy_inode 依赖的状态，所以也放在它后面。 */
     if (fs_root)
     {
         dentry_put(fs_root);
