@@ -83,7 +83,7 @@ static void test_hit(void)
     {
         return;
     }
-    dentry_put_pub(d1);
+    vfs_dentry_put(d1);
     stats_of(&a);
 
     /* 第二趟：三个分量应当全部命中缓存，一次 i_op->lookup 都不该发生 */
@@ -93,7 +93,7 @@ static void test_hit(void)
     expect(b.misses == a.misses, "second lookup produces no cache miss");
     expect(b.hits > a.hits, "second lookup counted as hits");
     expect(b.revives > a.revives, "leaf was revived from LRU");
-    dentry_put_pub(d2);
+    vfs_dentry_put(d2);
 
     /* 不同路径不能互相命中 */
     dentry_t *nx = vfs_lookup("/dctest/sub/nosuch.txt");
@@ -115,7 +115,7 @@ static void test_revive(void)
     }
     expect(list_empty(&d->d_lru), "in-use dentry is not on the LRU");
 
-    dentry_put_pub(d);
+    vfs_dentry_put(d);
     expect(d->d_ref == 0, "released dentry has d_ref == 0");
     expect(!list_empty(&d->d_lru), "released dentry entered the LRU");
 
@@ -123,7 +123,7 @@ static void test_revive(void)
     expect(again == d, "cache hit returns the cached object");
     expect(list_empty(&d->d_lru), "revived dentry left the LRU");
     expect(d->d_ref == 1, "revived dentry has exactly one holder");
-    dentry_put_pub(again);
+    vfs_dentry_put(again);
 }
 
 /* 组 3：父引用——缓存一个叶子会把整条祖先链钉住，回收时自底向上正确释放 */
@@ -141,7 +141,7 @@ static void test_parent_ref(void)
         expect(false, "parent ref: lookup deep.txt");
         return;
     }
-    dentry_put_pub(leaf);
+    vfs_dentry_put(leaf);
 
     /* 祖先链必须还活着：sub 与 dctest 各自只剩"一个子目录项"这一份引用 */
     dentry_t *sub  = leaf->d_parent;
@@ -175,7 +175,7 @@ static void test_unlink_evict(void)
         expect(false, "unlink evict: lookup deep.txt");
         return;
     }
-    dentry_put_pub(d);
+    vfs_dentry_put(d);
     expect(!list_empty(&d->d_lru), "target is cached before unlink");
 
     dcache_stats_t before, after;
@@ -213,7 +213,7 @@ static void test_rename_subtree(void)
     expect(c != NULL, "cache /dctest/rn/c.txt");
     if (c != NULL)
     {
-        dentry_put_pub(c);
+        vfs_dentry_put(c);
     }
 
     expect(vfs_rename("/dctest/rn", "/dctest/rn2") == ENO0_NO_ERROR, "rename dir");
@@ -304,7 +304,7 @@ static void test_watermark(void)
         dentry_t *d = vfs_lookup(path);
         if (d != NULL)
         {
-            dentry_put_pub(d);
+            vfs_dentry_put(d);
         }
     }
 
@@ -373,7 +373,7 @@ static int cwd_dir_ref(void)
     vfs_lock();
     dentry_t *d = vfs_lookup(DCACHE_TEST_CWD);
     int ref = (d != NULL) ? d->d_ref : -1;
-    dentry_put_pub(d);
+    vfs_dentry_put(d);
     vfs_unlock();
     return ref;
 }

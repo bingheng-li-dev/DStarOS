@@ -442,7 +442,7 @@ static void dentry_detach(dentry_t *d)
 /**
  * @brief 引用计数 +1（供 proc.c 等外部模块使用）
  */
-void dentry_get_pub(dentry_t *d)
+void vfs_dentry_get(dentry_t *d)
 {
     dentry_get(d);
 }
@@ -450,7 +450,7 @@ void dentry_get_pub(dentry_t *d)
 /**
  * @brief 引用计数 -1，归零时转入 LRU 或回收（供外部模块使用）
  */
-void dentry_put_pub(dentry_t *d)
+void vfs_dentry_put(dentry_t *d)
 {
     dentry_put(d);
 }
@@ -974,7 +974,7 @@ static dentry_t *lookup_dotdot(dentry_t *cur)
  * @brief 将路径字符串解析为对应的目录项
  * @param[in] path 要解析的路径字符串（绝对或相对）
  * @return 持有一个引用计数的目录项；路径不存在或出错返回 NULL
- * @note 调用者负责调用 dentry_put_pub() 释放返回的引用。
+ * @note 调用者负责调用 vfs_dentry_put() 释放返回的引用。
  * @details 解析算法：
  *  -# 若路径以 '/' 开头，起始节点为 vfs_root_dentry；否则为 proc_cwd（NULL 时回退到根）。
  *  -# 逐分量循环：

@@ -156,7 +156,7 @@ int16_t do_fork(uint32_t clone_flags, uintptr_t stack, intstkf_t *regs)
         /* d_ref 的增减一律在大锁内：别的 hart 可能正对同一个目录项 dentry_put。
          * 只在真有 cwd 时才取锁，理由同 do_exit 归还 cwd 那处。 */
         vfs_lock();
-        dentry_get_pub(new_proc->proc_cwd);
+        vfs_dentry_get(new_proc->proc_cwd);
         vfs_unlock();
     }
 
@@ -248,7 +248,7 @@ static void exit_common(int16_t error_code, uint8_t sig)
         dentry_t *cwd = curr->proc_cwd;
         curr->proc_cwd = NULL;
         vfs_lock();
-        dentry_put_pub(cwd);
+        vfs_dentry_put(cwd);
         vfs_unlock();
     }
 

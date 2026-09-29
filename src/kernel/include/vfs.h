@@ -270,8 +270,8 @@ extern vfsmount_t *vfs_root_mount;
 /* ============================================================
  * 引用计数导出接口（供 proc.c 与自检用例使用）
  * ============================================================ */
-void dentry_get_pub(dentry_t *d);   /* 引用计数 +1 */
-void dentry_put_pub(dentry_t *d);   /* 引用计数 -1，归零时进入 LRU 或回收 */
+void vfs_dentry_get(dentry_t *d);   /* 引用计数 +1 */
+void vfs_dentry_put(dentry_t *d);   /* 引用计数 -1，归零时进入 LRU 或回收 */
 
 /* ============================================================
  * 目录项缓存（dcache）：可观测性与内存压力接口
@@ -344,7 +344,7 @@ int vfs_fstat   (file_t *file, stat_t *statbuf);  /* 已打开文件版本，直
  * 返回已填字节数，0 = 目录读完，负值为错误码。 */
 int vfs_getdents(file_t *file, void *buf, size_t len);
 
-/* 路径解析（返回持有一个引用计数的 dentry，调用者负责 dentry_put_pub）*/
+/* 路径解析（返回持有一个引用计数的 dentry，调用者负责 vfs_dentry_put）*/
 dentry_t *vfs_lookup(const char *path);
 
 /* 超级块操作（VFS 内部接口，由具体文件系统适配层调用）*/
