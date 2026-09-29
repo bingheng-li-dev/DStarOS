@@ -5,7 +5,6 @@
 #include "dassert.h"
 #include "sched.h"
 #include "proc.h"
-#include "containerof.h"
 
 /* 自旋锁保存的中断状态由调用者持有（内核栈上的局部变量，或调度器存进 pcb 的
  * proc_rq_key），不能放 per-CPU 的槽：acquire 与 release 不保证在同一条执行流、
@@ -105,7 +104,7 @@ void sem_up(ossem_t *sem)
     {
         pcb_t *proc;
         struct list_head *wait_entry = (sem->wait_list).next;
-        proc = getContainer(wait_entry, pcb_t, proc_wait_linker);
+        proc = list_entry(wait_entry, pcb_t, proc_wait_linker);
         list_del(&(proc->proc_wait_linker));
         wakeup(proc);
     }
@@ -170,7 +169,7 @@ void waitq_wake_all(waitq_t *wq)
     while (!list_empty(&tmp))
     {
         struct list_head *node = tmp.next;
-        pcb_t *proc = getContainer(node, pcb_t, proc_wait_linker);
+        pcb_t *proc = list_entry(node, pcb_t, proc_wait_linker);
         /* 摘成自环：被信号打断的任务还会 waitq_remove() 再摘一次 */
         list_del_init(node);
         wakeup(proc);
