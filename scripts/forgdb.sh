@@ -1,20 +1,6 @@
-# For RustSBI v0.1.1
-# qemu-system-riscv64 \
-#     -M  virt \
-#     -m  8M   \
-#     -bios ./bootloader/RustSBI/v0.0.1/sbi-qemu \
-#     -smp ${SMP:-4}  \
-#     -kernel build/kernel.elf    \
-#     -nographic -s -S
+# 启动 QEMU 并停在第一条指令，等 GDB 连 localhost:1234。固件默认用 QEMU 自带的 OpenSBI（-bios default），与 VF2 板载固件同源；
+# 换固件：SBI_BIOS=<固件路径> bash scripts/forgdb.sh
 
-# For OpenSBI
-# qemu-system-riscv64 \
-#     -M  virt \
-#     -bios ./bootloader/fw_payload_qemu.bin \
-#     -device loader,file=build/kernel.elf,addr=0x80200000 \
-#     -nographic -s -S
-
-#For RustSBI v0.4.0
 # rootfs 镜像由 QEMU 的 -device loader 原样写进内存的 ROOTFS_PHYS_BASE。
 # 这个地址必须与 src/kernel/include/memtype.h 的 ROOTFS_PHYS_BASE 一致，
 # 对不上的话镜像会落在 PMM 的页帧池里，那是静默的内存损坏。
@@ -33,7 +19,7 @@ fi
 qemu-system-riscv64 \
     -M  virt \
     -m  128M   \
-    -bios ./bootloader/RustSBI/v0.4.0/rustsbi-prototyper-dynamic.elf \
+    -bios "${SBI_BIOS:-default}" \
     -smp ${SMP:-4}  \
     -kernel build/kernel.elf    \
     "${LOADER[@]}" \

@@ -16,6 +16,8 @@ runs="${2:-1}"
 # 所以在它之前必须留出足够时间让前面的输入被消费干净，不能一次性全灌进去。
 tty_input()
 {
+    # 等内核起来再送：OpenSBI 初始化串口时会复位接收 FIFO，开机前送进去的字节会丢
+    sleep 2
     printf 'hello\n'
     printf 'a\nb\n'
     printf 'abcdef\n'
