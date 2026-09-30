@@ -1,9 +1,8 @@
 FROM ubuntu:24.04
 WORKDIR /root/riscv
 
-# 基础下载能力单独成层：它几乎不变，可以保护下面那层 100 MB 工具链的构建缓存
-# 不被后面 apt 包列表的改动冲掉。
-RUN sed -i 's|http://archive.ubuntu.com/ubuntu|http://mirrors.aliyun.com/ubuntu|g' \
+# 基础镜像还没有 ca-certificates，这里只能用 http；软件包由 apt 的 GPG 签名校验
+RUN sed -i 's|http://archive.ubuntu.com/ubuntu|http://mirrors.tuna.tsinghua.edu.cn/ubuntu/|g' \
     /etc/apt/sources.list.d/ubuntu.sources \
     && apt clean \
     && apt update \
@@ -59,5 +58,10 @@ ENV LANGUAGE=en_US:en
 ENV LC_ALL=en_US.UTF-8
 
 # 安装 GDB插件GEF
-RUN wget -O ~/.gdbinit-gef.py -q https://gef.blah.cat/py \
-    && echo source ~/.gdbinit-gef.py >> ~/.gdbinit
+# 只是调试辅助：下载失败时跳过，不让整个镜像构建失败
+RUN if wget -q --tries=2 --timeout=20 -O ~/.gdbinit-gef.py https://gef.blah.cat/py; then \
+        echo source ~/.gdbinit-gef.py >> ~/.gdbinit; \
+    else \
+        rm -f ~/.gdbinit-gef.py; \
+        echo "GEF download failed, skipped"; \
+    fi
