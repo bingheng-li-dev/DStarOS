@@ -2,11 +2,10 @@
 services:
   dev:
     build: docker
-    image: riscv-os-devkit:v4
+    image: riscv-os-devkit:v5
     container_name: dstar-v4
     stdin_open: true
     tty: true
     working_dir: /root/riscv/DStarOS
     volumes:
       - .:/root/riscv/DStarOS
-      - ${TOOLCHAIN:-../riscv-os/toolchain-kendryte210}:/root/riscv/toolchain-kendryte210

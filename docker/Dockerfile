@@ -13,7 +13,7 @@ RUN sed -i 's|http://archive.ubuntu.com/ubuntu|http://mirrors.tuna.tsinghua.edu.
     && rm -rf /var/lib/apt/lists/*
 
 # musl 交叉工具链（riscv64 / rv64gc / lp64d）。
-# 用途：编用户态程序与 BusyBox；内核仍由 bind mount 进来的 kendryte 裸机工具链编译。
+# 用途：编 musl 用户程序与 BusyBox。内核与裸机用户程序用下面 apt 装的 riscv64-unknown-elf 工具链。
 ARG MUSL_TC=riscv64-lp64d--musl--stable-2026.08-1
 ARG MUSL_TC_URL=https://toolchains.bootlin.com/downloads/releases/toolchains/riscv64-lp64d/tarballs
 RUN wget -q "$MUSL_TC_URL/$MUSL_TC.tar.xz" \
@@ -31,6 +31,7 @@ ENV PATH=/root/riscv/toolchain-musl/bin:$PATH
 # 构建工具，menuconfig 要 ncurses。git/curl 用于拉源码
 RUN apt update \
     && apt-get install -y --no-install-recommends \
+        gcc-riscv64-unknown-elf \
         vim \
         less \
         gdb-multiarch \

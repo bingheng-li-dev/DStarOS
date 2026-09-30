@@ -1,6 +1,7 @@
 
-TOOLPATH?="/root/riscv/toolchain-kendryte210/bin"
-TOOLPREFIX?=$(TOOLPATH)/riscv64-unknown-elf-
+# 裸机工具链默认取 PATH 里的 riscv64-unknown-elf-（容器内由 gcc-riscv64-unknown-elf 提供），
+# 用别的工具链时 make TOOLPREFIX=<路径>/riscv64-unknown-elf-
+TOOLPREFIX?=riscv64-unknown-elf-
 
 # 目标平台，只支持 QEMU 与 VF2。
 PLATFORM?=QEMU

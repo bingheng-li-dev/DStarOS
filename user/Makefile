@@ -1,8 +1,7 @@
 # 用户态程序独立构建流水线（不参与内核主 makefile）。
 # 产物由 tools/build_rootfs.sh 装进 rootfs 镜像，内核的 elf_load() 从镜像加载。
 
-TOOLPATH?=/root/riscv/toolchain-kendryte210/bin
-TOOLPREFIX?=$(TOOLPATH)/riscv64-unknown-elf-
+TOOLPREFIX?=riscv64-unknown-elf-
 
 CC := $(TOOLPREFIX)gcc
 OBJCOPY := $(TOOLPREFIX)objcopy
