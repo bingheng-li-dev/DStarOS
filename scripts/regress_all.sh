@@ -1,13 +1,8 @@
 #!/bin/bash
-# 一口气跑完全部 19 套 QEMU 回归：自动切 src/debug/debug.h 的 DEBUG_SUITE、重编、调 scripts/regress.sh，
-# 结束时把选择器复位成交付形态并重建内核。
-#
-# 用法（容器内，仓库任意目录）：
+# 跑全部或指定的 QEMU 回归套件（容器内）：自动切换 DEBUG_SUITE 并重编，结束时（含 Ctrl-C）复位为 SUITE_NONE。
 #   bash scripts/regress_all.sh                # 全部 19 套
 #   bash scripts/regress_all.sh mem sig        # 只跑指定几套
-#   RUNS=3 bash scripts/regress_all.sh pipe    # 每套连跑 3 次（抓偶发）
-#
-# 结束时（含中途 Ctrl-C）一律复位，否则临时选择会被下一次提交带进去。
+#   RUNS=3 bash scripts/regress_all.sh pipe    # 每套连跑 3 次
 set -uo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -21,11 +16,11 @@ SUITES="${*:-$ALL_SUITES}"
 for s in $SUITES; do
     case " $ALL_SUITES " in
         *" $s "*) ;;
-        *) echo "regress_all: 未知套件 '$s'（可选：$ALL_SUITES）" >&2; exit 2 ;;
+        *) echo "regress_all: unknown suite '$s' (choose from: $ALL_SUITES)" >&2; exit 2 ;;
     esac
 done
 
-# 宿主机偶尔会短暂占住 debug.h（编辑器、杀软），容器里 sed -i 的 rename 随之 Permission denied。
+# 宿主机上的编辑器或杀软偶尔占住 debug.h，sed -i 会失败，所以重试
 set_suite()
 {
     local t
@@ -34,18 +29,18 @@ set_suite()
         grep -qE "^#define DEBUG_SUITE $1\$" "$D" && return 0
         sleep 1
     done
-    echo "regress_all: 无法把 DEBUG_SUITE 设为 $1" >&2
+    echo "regress_all: cannot set DEBUG_SUITE to $1" >&2
     return 1
 }
 
 finish()
 {
     echo
-    set_suite SUITE_NONE || echo "regress_all: ⚠️ DEBUG_SUITE 复位失败，提交前务必检查 $D" >&2
+    set_suite SUITE_NONE || echo "regress_all: WARNING: failed to reset DEBUG_SUITE, check $D before committing" >&2
     if make >/dev/null 2>&1; then
-        echo "DEBUG_SUITE 已复位为交付形态，内核已重建。"
+        echo "DEBUG_SUITE reset to SUITE_NONE, kernel rebuilt"
     else
-        echo "regress_all: ⚠️ 交付形态内核重建失败" >&2
+        echo "regress_all: WARNING: failed to rebuild the delivery kernel" >&2
     fi
 }
 trap finish EXIT
@@ -56,14 +51,14 @@ failed_suites=""
 passed=0
 
 for s in $SUITES; do
-    set_suite "SUITE_$(echo "$s" | tr a-z A-Z)" || { fail=1; failed_suites="$failed_suites $s(开关)"; continue; }
+    set_suite "SUITE_$(echo "$s" | tr a-z A-Z)" || { fail=1; failed_suites="$failed_suites $s(switch)"; continue; }
 
     log="build/regress-$s.log"
     if ! make >"$log" 2>&1; then
-        echo "[$s] FAIL 构建失败，日志见 $log"
+        echo "[$s] FAIL build failed, see $log"
         grep -E "\.[ch]:[0-9]+:|error:" "$log" | head -3
         fail=1
-        failed_suites="$failed_suites $s(构建)"
+        failed_suites="$failed_suites $s(build)"
         continue
     fi
     warnings=$(grep -cE "warning:" "$log")
@@ -76,12 +71,12 @@ for s in $SUITES; do
         failed_suites="$failed_suites $s"
     else
         passed=$((passed + 1))
-        [ "$warnings" != 0 ] && echo "[$s] ⚠️ 构建有 $warnings 条告警"
+        [ "$warnings" != 0 ] && echo "[$s] WARNING: $warnings compiler warning(s)"
     fi
 done
 
 elapsed=$(( $(date +%s) - started_at ))
 echo
-echo "=== 通过 $passed / $(echo $SUITES | wc -w) 套，用时 $((elapsed / 60)) 分 $((elapsed % 60)) 秒 ==="
-[ "$fail" -ne 0 ] && echo "未通过：$failed_suites"
+echo "=== passed $passed / $(echo $SUITES | wc -w) suites in $((elapsed / 60))m $((elapsed % 60))s ==="
+[ "$fail" -ne 0 ] && echo "failed:$failed_suites"
 exit "$fail"

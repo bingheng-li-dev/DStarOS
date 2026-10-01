@@ -1,15 +1,9 @@
 #!/bin/bash
-# 为板上回归逐套打 VF2 镜像：build/vf2-<suite>.img。
-#
-# 用法（容器内，仓库任意目录）：
+# 为板上回归逐套打 VF2 镜像 build/vf2-<suite>.img（容器内）。
 #   bash tools/build_vf2_suites.sh              # 全部 19 套
 #   bash tools/build_vf2_suites.sh wait mfp     # 只打指定的几套
-#
-# 每套把 DEBUG_SUITE 设成对应的 SUITE_*、以 PLATFORM=VF2 全量重建，然后逐个核对：
-#   1. 零告警；
-#   2. 内核里有这一套的特征串（内核态套件用开始 / 收尾标记里的字面串，用户态套件用 USER_PROGRAM_PATH）；
-#   3. 所有 vf2-<suite>.img 的 CRC 互不相同——构建是确定性的，两套 CRC 相同就是打成了同一个镜像。
-# 结束时（含中途失败）把 DEBUG_SUITE 复位成交付形态，并重建 build/vf2-kernel.img。
+# 每套核对：零告警；内核里有该套的特征串；各镜像 CRC 互不相同（相同说明打成了同一个镜像）。
+# 结束时（含中途失败）把 DEBUG_SUITE 复位为 SUITE_NONE 并重建 build/vf2-kernel.img。
 set -uo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -37,12 +31,11 @@ signature_of() {
 for s in $SUITES; do
     case " $ALL_SUITES " in
         *" $s "*) ;;
-        *) echo "build_vf2_suites: 未知套件 '$s'（可选：$ALL_SUITES）" >&2; exit 2 ;;
+        *) echo "build_vf2_suites: unknown suite '$s' (choose from: $ALL_SUITES)" >&2; exit 2 ;;
     esac
 done
 
-# 宿主机偶尔会短暂占住 debug.h（编辑器、杀软），容器里 sed -i 的 rename 随之 Permission denied。
-# 失败时重试，并以文件里实际的值为准。
+# 宿主机上的编辑器或杀软偶尔占住 debug.h，sed -i 会失败，所以重试
 set_suite() {
     local t
     for t in 1 2 3 4 5 6 7 8 9 10; do
@@ -50,7 +43,7 @@ set_suite() {
         grep -qE "^#define DEBUG_SUITE $1\$" "$D" && return 0
         sleep 1
     done
-    echo "build_vf2_suites: 无法把 DEBUG_SUITE 设为 $1" >&2
+    echo "build_vf2_suites: cannot set DEBUG_SUITE to $1" >&2
     return 1
 }
 
@@ -59,11 +52,11 @@ crc_of() {
 }
 
 finish() {
-    set_suite SUITE_NONE || echo "build_vf2_suites: ⚠️ DEBUG_SUITE 复位失败，提交前务必检查 $D" >&2
+    set_suite SUITE_NONE || echo "build_vf2_suites: WARNING: failed to reset DEBUG_SUITE, check $D before committing" >&2
     if make vf2img >/dev/null 2>&1; then
-        echo "交付镜像已重建：build/vf2-kernel.img crc32=$(crc_of build/vf2-kernel.img)"
+        echo "delivery image rebuilt: build/vf2-kernel.img crc32=$(crc_of build/vf2-kernel.img)"
     else
-        echo "build_vf2_suites: ⚠️ 交付镜像重建失败" >&2
+        echo "build_vf2_suites: WARNING: failed to rebuild the delivery image" >&2
     fi
 }
 trap finish EXIT
@@ -77,7 +70,7 @@ for s in $SUITES; do
 
     log="build/vf2-$s.log"
     if ! make vf2img >"$log" 2>&1; then
-        echo "[$s] FAIL 构建失败，日志见 $log"
+        echo "[$s] FAIL build failed, see $log"
         grep -E "\.[ch]:[0-9]+:" "$log" | head -3
         fail=1
         continue
@@ -96,20 +89,20 @@ for s in $SUITES; do
            "$s" "$status" "$warnings" "$hits" "$(stat -c %s "$out")" "$(crc_of "$out")"
 done
 
-# 去重要连同上一轮留下的其余镜像一起比：只重打几套时，也不能和没重打的撞上
+# 连同上一轮留下的镜像一起比，只重打几套时也不能和没重打的撞上
 dups=$(for s in $ALL_SUITES; do [ -f "build/vf2-$s.img" ] && crc_of "build/vf2-$s.img"; done | sort | uniq -d)
 if [ -n "$dups" ]; then
-    echo "FAIL 以下 CRC 在多个 vf2-<suite>.img 之间重复：$dups"
+    echo "FAIL duplicate CRC across vf2-<suite>.img: $dups"
     fail=1
 fi
 
 if [ "$fail" -eq 0 ]; then
-    echo "=== 全部镜像核对通过 ==="
+    echo "=== all images verified ==="
 else
-    echo "=== 有镜像未通过核对，不要上板 ==="
+    echo "=== some images failed verification, do not boot them ==="
 fi
 echo
-echo "U-Boot 侧（内核走 TFTP，rootfs 读 SD 卡）："
+echo "U-Boot (kernel over TFTP, rootfs from SD card):"
 echo "  setenv dstar_t 'tftpboot 0x40200000 vf2-\${suite}.img && fatload mmc 1:1 0x47000000 rootfs.img && booti 0x40200000 - \${fdtcontroladdr}'"
 echo "  saveenv"
 echo "  setenv suite mem"
