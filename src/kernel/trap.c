@@ -13,6 +13,7 @@
 #include "syscall.h"
 #include "signal.h"
 #include "proc.h"
+#include "uaccess.h"
 
 /**
  * @brief 处理一次由指令自身引发的同步异常：U 态发起的只杀该进程，S 态发起的 panic
@@ -85,9 +86,6 @@ void trap_init(void)
     set_csr(sstatus, SSTATUS_SIE);
     set_csr(sie, MIP_SSIP | MIP_STIP | MIP_SEIP);
 
-    /* @todo SUM 全程开着，正确做法是只在 copy_to/from_user 前后开。 */
-    set_csr(sstatus, SSTATUS_SUM);
-
     printf("trap: core %ld inited\n", cpu_get_core_id());
 }
 
@@ -136,6 +134,20 @@ static void trap_interrupt(intstkf_t *sp, int cause)
     }
 }
 
+/**
+ * @brief S 态在 SUM=0 时访问用户地址即 panic：说明漏了 user_access_begin/end
+ * @details 不拦的话，访问已映射的用户页会让缺页处理器反复补一个本来就在的映射。
+ */
+static void trap_check_kernel_uaccess(const intstkf_t *sp)
+{
+    if ((sp->sstatus & SSTATUS_SPP) && !(sp->sstatus & SSTATUS_SUM)
+        && sp->sbadaddr < USER_STACK_TOP)
+    {
+        panic("kernel access to user address 0x%lx without SUM, sepc=0x%lx",
+              sp->sbadaddr, sp->sepc);
+    }
+}
+
 /* 已处理返回 true；未知或不该出现的异常返回 false，由调用方 panic */
 static bool trap_exception(intstkf_t *sp, int cause)
 {
@@ -160,9 +172,11 @@ static bool trap_exception(intstkf_t *sp, int cause)
         vmm_page_fault_handler((virAddr_t)sp->sbadaddr, 0);
         return true;
     case CAUSE_FAULT_LOAD_PAGE:
+        trap_check_kernel_uaccess(sp);
         vmm_page_fault_handler((virAddr_t)sp->sbadaddr, 1);
         return true;
     case CAUSE_FAULT_STORE_PAGE:
+        trap_check_kernel_uaccess(sp);
         vmm_page_fault_handler((virAddr_t)sp->sbadaddr, 2);
         return true;
     case CAUSE_USER_ECALL:

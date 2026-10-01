@@ -81,6 +81,9 @@ trap_entry:
 
     csrr  ra, sstatus
     sd ra, 33*REGBYTES(sp)
+    # 内核默认不能访问用户页，SUM 只在 user_access_begin/end 之间置位；sret 前随帧恢复
+    li ra, SSTATUS_SUM
+    csrc sstatus, ra
 
     csrr  ra, CSR_SBADADDR
     sd ra, 34*REGBYTES(sp)

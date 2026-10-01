@@ -7,11 +7,13 @@
 
 /**
  * @brief 从用户空间拷贝 n 字节到内核缓冲区
- * @note sstatus.SUM 全程置位，直接解引用用户指针；不做地址校验。
+ * @note 只在拷贝期间置位 sstatus.SUM；不做地址校验。
  */
 int copy_from_user(void *kdst, const void *usrc, uint64_t n)
 {
+    unsigned long prev = user_access_begin();
     memcpy(kdst, usrc, n);
+    user_access_end(prev);
     return 0;
 }
 
@@ -21,7 +23,9 @@ int copy_from_user(void *kdst, const void *usrc, uint64_t n)
  */
 int copy_to_user(void *udst, const void *ksrc, uint64_t n)
 {
+    unsigned long prev = user_access_begin();
     memcpy(udst, ksrc, n);
+    user_access_end(prev);
     return 0;
 }
 

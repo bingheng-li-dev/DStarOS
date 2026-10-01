@@ -251,7 +251,8 @@ int elf_load(mm_t *mm, const unsigned char *image, uint64_t size, elf_info_t *in
 
     /* 第三遍：把文件内容填进已经映好的页。各段的字节区间互不重叠（第一遍已校验），
      * 所以填的先后与结果无关。
-     * SUM 已开，且 satp 已切到该 mm，可直接写用户 VA。 */
+     * satp 已切到该 mm，在 user_access_begin/end 之间直接写用户 VA。 */
+    unsigned long uacc = user_access_begin();
     for (int i = 0; i < nload; i++)
     {
         Elf64_Phdr *ph = segs[i].ph;
@@ -265,6 +266,7 @@ int elf_load(mm_t *mm, const unsigned char *image, uint64_t size, elf_info_t *in
          * 冗余的；保留是因为它表达的是"bss 必须是零"这个契约，而不是"帧恰好是零"。 */
         memset((void *)ph->p_vaddr + ph->p_filesz, 0, ph->p_memsz - ph->p_filesz);
     }
+    user_access_end(uacc);
 
     info->entry   = ehdr->e_entry;
     info->phdr_va = phdr_va;

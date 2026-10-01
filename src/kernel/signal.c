@@ -445,7 +445,7 @@ long signal_do_sigreturn(intstkf_t *sp)
 
     /* sstatus 只恢复固定组合，不能整个信任用户帧——用户完全可以把帧里的 SPP
      * 改成 1，那就是一张回 S 态的直通车票。写法与 do_exec 构造 trap 帧时一致 */
-    sp->sstatus = (read_csr(sstatus) & ~SSTATUS_SPP) | SSTATUS_SPIE | SSTATUS_SUM;
+    sp->sstatus = (read_csr(sstatus) & ~SSTATUS_SPP) | SSTATUS_SPIE;
 
     /* 必须把恢复出来的 a0 当返回值交回去：trap_dispatch 那句
      * `sp->x10_a0 = syscall_dispatch(sp)` 会无条件覆盖 a0，返回别的值就等于

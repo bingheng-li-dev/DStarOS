@@ -550,7 +550,7 @@ static int exec_args_copy_from_user(exec_args_t *a, char *const *uvec, int *coun
  *      的最终地址再填指针——实现上就是"先量尺寸、再填"两趟；
  *   3. argv[argc] 与 envp[envc] 的 NULL 都不能省：musl 靠 envp 的 NULL
  *      定位 auxv 的起点，少一个就是整个 auxv 错位、AT_PAGESZ 读成随机值。
- * @note 此刻已经切到新页表，写的是懒分配的用户栈 VMA。S 态带 SUM=1 访问用户地址
+ * @note 此刻已经切到新页表，写的是懒分配的用户栈 VMA。在 user_access_begin/end 之间访问用户地址
  *   触发的缺页由 vmm_page_fault_handler 正常服务，与 copy_to_user 走的是同一条路。
  */
 static int setup_user_stack(const exec_args_t *args, const elf_info_t *info,
@@ -591,6 +591,7 @@ static int setup_user_stack(const exec_args_t *args, const elf_info_t *info,
 
     /* 字符串区与 AT_RANDOM 种子。种子是弱熵（启动至今的纳秒数 + pid），
      * 只够喂 musl 的栈保护 canary，不可作密码学用途 */
+    unsigned long uacc = user_access_begin();
     memcpy((void *)str_base, args->buf, args->used);
     uint64_t seed = ktime_get_ns() ^ ((uint64_t)proc_get_current()->proc_pid << 48);
     ((uint64_t *)rand_va)[0] = seed;
@@ -616,6 +617,7 @@ static int setup_user_stack(const exec_args_t *args, const elf_info_t *info,
     {
         panic("setup_user_stack: argc readback mismatch (sp=%lx)", sp);
     }
+    user_access_end(uacc);
 
     *sp_out = sp;
     return ENO0_NO_ERROR;
@@ -633,7 +635,7 @@ static void user_trapframe_init(intstkf_t *f, virAddr_t entry, virAddr_t ustack)
     f->sepc    = entry;
     f->x2_sp   = ustack;
     f->sstatus = (read_csr(sstatus) & ~SSTATUS_SPP & ~SSTATUS_SIE & ~SSTATUS_FS)
-                 | SSTATUS_SPIE | SSTATUS_SUM | SSTATUS_FS_INITIAL;
+                 | SSTATUS_SPIE | SSTATUS_FS_INITIAL;
 }
 
 /**
@@ -1372,14 +1374,13 @@ static void print_ctx_stk(ctx_t *ctx)
  * @param[in] entry  用户程序入口虚拟地址（将写入 sepc，sret 后 PC 跳至此处）
  * @param[in] ustack 用户栈顶虚拟地址（将写入帧的 x2_sp，须 16 字节对齐）
  * @details 在内核栈顶（PROC_KSTACK_TOP）伪造一个 trap 帧：sepc=entry、sp=ustack、tp=0、
- *   sstatus 置 SPP=0 / SPIE=1 / SUM=1，再经 fork_out_asm → trap_return → sret 进入 U 态。
+ *   sstatus 置 SPP=0 / SPIE=1，再经 fork_out_asm → trap_return → sret 进入 U 态。
  *   sscratch 由 trap_return 在关中断的尾段设好，这里不碰。
  *
  * @note 此函数不返回（标注 __attribute__((noreturn))）。
  *   调用前须确保：
  *     - 当前进程的 proc_mm 已挂载用户地址空间且 satp 已切换；
- *     - entry 所在代码页和 ustack 所在栈 VMA 已就绪（可为懒分配，首次访问触发 page fault）；
- *     - trap_init 已置 sstatus.SUM=1，内核可直接读写用户页。
+ *     - entry 所在代码页和 ustack 所在栈 VMA 已就绪（可为懒分配，首次访问触发 page fault）。
  */
 void enter_user_mode(virAddr_t entry, virAddr_t ustack)
 {

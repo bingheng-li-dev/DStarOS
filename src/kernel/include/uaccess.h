@@ -6,6 +6,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include "encoding.h"
 
 /* 本内核用户地址空间的简化布局：用户栈固定顶在这里（见 proc.c create_user_mm /
  * run_user_program），往下是用户程序的全部合法虚拟地址。内核高半区地址远高于此
@@ -29,6 +30,27 @@
 
 _Static_assert(0x10000UL + USER_HEAP_MAX < USER_MMAP_BASE,
                "heap must not reach the mmap area");
+
+/**
+ * @brief 置位 sstatus.SUM，允许内核访问用户页
+ * @return 置位之前的 SUM 位，交给 user_access_end() 恢复，可嵌套
+ * @note trap 入口会清 SUM，内核默认不能访问用户页；直接读写用户地址必须包在这一对里。
+ */
+static inline unsigned long user_access_begin(void)
+{
+    return set_csr(sstatus, SSTATUS_SUM) & SSTATUS_SUM;
+}
+
+/**
+ * @brief 恢复 user_access_begin() 之前的 sstatus.SUM
+ */
+static inline void user_access_end(unsigned long prev)
+{
+    if (!prev)
+    {
+        clear_csr(sstatus, SSTATUS_SUM);
+    }
+}
 
 int copy_from_user(void *kdst, const void *usrc, uint64_t n);
 int copy_to_user(void *udst, const void *ksrc, uint64_t n);
