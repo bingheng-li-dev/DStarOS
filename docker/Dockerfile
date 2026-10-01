@@ -4,8 +4,7 @@ WORKDIR /root/riscv
 # 基础镜像还没有 ca-certificates，这里只能用 http；软件包由 apt 的 GPG 签名校验
 RUN sed -i 's|http://archive.ubuntu.com/ubuntu|http://mirrors.tuna.tsinghua.edu.cn/ubuntu/|g' \
     /etc/apt/sources.list.d/ubuntu.sources \
-    && apt clean \
-    && apt update \
+    && apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         wget \
@@ -29,7 +28,7 @@ ENV PATH=/root/riscv/toolchain-musl/bin:$PATH
 
 # build-essential / libncurses-dev 是给 BusyBox 用的：它要用宿主 gcc 编自己的
 # 构建工具，menuconfig 要 ncurses。git/curl 用于拉源码
-RUN apt update \
+RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         gcc-riscv64-unknown-elf \
         vim \

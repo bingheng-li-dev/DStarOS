@@ -1,9 +1,9 @@
-# 开发容器
+# 开发容器：docker compose up -d 创建，docker compose exec dev bash 进入
+name: dstaros
 services:
   dev:
     build: docker
     image: riscv-os-devkit:v5
-    container_name: dstar-v4
     stdin_open: true
     tty: true
     working_dir: /root/riscv/DStarOS
