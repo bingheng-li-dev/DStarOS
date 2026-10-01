@@ -27,7 +27,7 @@ Apache-2.0 与 GPL-2 不兼容（其专利与赔偿条款相对 GPL-2 构成附�
 
 | 文件 | 相对导入时的改动 |
 |---|---|
-| `src/lib/bsp/tinyprintf.c` | 无 |
+| `src/lib/bsp/tinyprintf.c` | 有：`<sys/types.h>` 改为 `<stddef.h>`（裸机工具链不带 libc 头） |
 | `src/lib/bsp/include/tinyprintf.h` | 有：`<sys/types.h>` 改为 `<stddef.h>`（freestanding 环境无前者）；注释掉了 `#define printf tfp_printf` 的 libc 覆盖开关 |
 
 - 版权：Copyright (C) 2004 Kustaa Nyholm
