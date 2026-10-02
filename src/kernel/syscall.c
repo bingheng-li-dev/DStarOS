@@ -1201,8 +1201,7 @@ static long sys_brk(virAddr_t addr)
     return (long)addr;
 }
 
-/* PROT_NONE（0）在本项目没有对应表示——VMA 存在即可访问，没有"存在但不可访问"
- * 这一档，按 VMP_R 处理。@todo 需要真实 PROT_NONE 语义时补 VMA 级别的标志。 */
+/* PROT_NONE（0）没有对应的 VMA 标志（没有 mprotect，也就没有"先占地址再开放"的用法），按 VMP_R 处理 */
 static pgprot_t prot_to_vmp(int prot)
 {
     pgprot_t flag = 0;
