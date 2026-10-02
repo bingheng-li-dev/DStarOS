@@ -298,16 +298,18 @@ static void sched_cfs_fairness_test(void)
 /* ============================================================
  * 无饥饿测试：等权重下每个 worker 都必须被调度到，且份额大致均等
  *
- * 与上面的公平性用例分工：那边比例悬殊（87:1），单轮成本又不对称，测得出"权重生效"
- * 但测不出"没人被饿死"；这边全部 nice 0，四个 worker 行为对称、单轮成本一致，
- * 于是"每人都跑到"和"份额均等"都成为稳稳可测的性质。真有人拿到 0，就是调度器
- * 漏掉了就绪队列里的某个任务，那才是需要查的 bug。
+ * 与上面的公平性用例分工：那边测"权重生效"，这边全部 nice 0，测"没人被饿死"。
+ * 份额同样按 CPU 时间判：单轮成本取决于让出后是否被立即重选（见 CFS_BUDGET 处），
+ * 宿主机抢占 QEMU 的 vCPU 线程时轮转次数能差出几十倍，而 CFS 保证的是时间均等。
+ * 次数只用来判"每人都跑到"——真有人是 0，就是调度器漏掉了就绪队列里的某个任务。
  * ============================================================ */
 static void *cfs_nostarve_worker(void *arg)
 {
     int idx = (int)(intptr_t)arg;
 
     sched_test_gate_wait();
+
+    uint64_t rt0 = proc_get_current()->proc_sum_exec_runtime;
 
     while (1)
     {
@@ -319,13 +321,14 @@ static void *cfs_nostarve_worker(void *arg)
         cfs_count[idx] += 1;
         sched_schedule();
     }
+
+    cfs_rt[idx] = proc_get_current()->proc_sum_exec_runtime - rt0;
     return NULL;
 }
 
 #define NOSTARVE_BUDGET 4000
-/* 均等份额是 400/4 = 100；取 1/8 的下限（12）留足抖动余量，同时仍能抓住
- * "某个 worker 被系统性冷落"这类真问题 */
-#define NOSTARVE_MIN    (NOSTARVE_BUDGET / CFS_WORKERS / 8)
+/* 每个 worker 的 CPU 时间不得低于均分份额的 1/8：留足抖动余量，仍能抓住系统性冷落 */
+#define NOSTARVE_MIN_DIV 8
 
 static void sched_cfs_nostarve_test(void)
 {
@@ -336,6 +339,7 @@ static void sched_cfs_nostarve_test(void)
     for (int i = 0; i < CFS_WORKERS; i++)
     {
         cfs_count[i] = 0;
+        cfs_rt[i] = 0;
     }
 
     for (int i = 0; i < CFS_WORKERS; i++)
@@ -346,16 +350,21 @@ static void sched_cfs_nostarve_test(void)
     sched_test_reap_all();
 
     int total = 0;
+    uint64_t total_rt = 0;
     int all_ran = 1;
     int all_fair = 1;
     for (int i = 0; i < CFS_WORKERS; i++)
     {
         total += cfs_count[i];
+        total_rt += cfs_rt[i];
         if (cfs_count[i] <= 0)
         {
             all_ran = 0;
         }
-        if (cfs_count[i] < NOSTARVE_MIN)
+    }
+    for (int i = 0; i < CFS_WORKERS; i++)
+    {
+        if (cfs_rt[i] * CFS_WORKERS * NOSTARVE_MIN_DIV < total_rt)
         {
             all_fair = 0;
         }
@@ -367,6 +376,12 @@ static void sched_cfs_nostarve_test(void)
         printf(" %d", cfs_count[i]);
     }
     printf("   total=%d\n", total);
+    printf("  cputime:");
+    for (int i = 0; i < CFS_WORKERS; i++)
+    {
+        printf(" %d", (int)cfs_rt[i]);
+    }
+    printf("\n");
 
     sched_test_check("every equal-weight worker ran", all_ran);
     sched_test_check("no equal-weight worker starved", all_fair);
