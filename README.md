@@ -1,5 +1,7 @@
 # DStarOS
 
+[![CI](https://github.com/bingheng-li-dev/DStarOS/actions/workflows/ci.yml/badge.svg)](https://github.com/bingheng-li-dev/DStarOS/actions/workflows/ci.yml)
+
 中文 | [English](README.en.md)
 
 RISC-V rv64 内核，运行在 QEMU `virt` 与 StarFive VisionFive 2（JH7110）实机上，用户态跑 BusyBox。

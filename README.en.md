@@ -1,5 +1,7 @@
 # DStarOS
 
+[![CI](https://github.com/bingheng-li-dev/DStarOS/actions/workflows/ci.yml/badge.svg)](https://github.com/bingheng-li-dev/DStarOS/actions/workflows/ci.yml)
+
 [中文](README.md) | English
 
 A RISC-V rv64 kernel that runs on QEMU `virt` and on the StarFive VisionFive 2 (JH7110) board, with BusyBox in

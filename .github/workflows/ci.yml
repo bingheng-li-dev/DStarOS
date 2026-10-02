@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  # 与 docker/Dockerfile 保持一致
+  MUSL_TC: riscv64-lp64d--musl--stable-2026.08-1
+  MUSL_TC_URL: https://toolchains.bootlin.com/downloads/releases/toolchains/riscv64-lp64d/tarballs
+
+jobs:
+  vf2-build:
+    name: VF2 kernel image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-riscv64-unknown-elf
+
+      - name: Build and check Image header
+        run: make vf2img
+
+  qemu-regress:
+    name: QEMU regression
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      MUSL_TOOLPATH: ${{ github.workspace }}/../toolchain-musl/bin
+      CROSS_COMPILE: ${{ github.workspace }}/../toolchain-musl/bin/riscv64-linux-
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+              gcc-riscv64-unknown-elf qemu-system-riscv64 \
+              dosfstools mtools bzip2 file
+
+      - name: Cache musl toolchain
+        id: musl-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/../toolchain-musl
+          key: musl-${{ env.MUSL_TC }}
+
+      - name: Fetch musl toolchain
+        if: steps.musl-cache.outputs.cache-hit != 'true'
+        working-directory: ${{ github.workspace }}/..
+        run: |
+          wget -q "$MUSL_TC_URL/$MUSL_TC.tar.xz" "$MUSL_TC_URL/$MUSL_TC.sha256"
+          sha256sum -c "$MUSL_TC.sha256"
+          mkdir -p toolchain-musl
+          tar -xf "$MUSL_TC.tar.xz" -C toolchain-musl --strip-components=1
+          # 重定位清单里有打包时已删掉的文件，sed 会逐个报找不到，无害
+          toolchain-musl/relocate-sdk.sh 2>/dev/null
+          rm -f "$MUSL_TC.tar.xz" "$MUSL_TC.sha256"
+
+      - name: Cache BusyBox
+        id: busybox-cache
+        uses: actions/cache@v4
+        with:
+          path: build/busybox
+          key: busybox-${{ env.MUSL_TC }}-${{ hashFiles('configs/busybox_dstar.config', 'tools/build_busybox.sh') }}
+
+      - name: Build BusyBox
+        if: steps.busybox-cache.outputs.cache-hit != 'true'
+        run: bash tools/build_busybox.sh
+
+      - name: Build kernel, user programs and rootfs
+        run: |
+          make
+          make -C user
+          make rootfs
+
+      - name: Run all regression suites
+        run: bash scripts/regress_all.sh
+
+      - name: Upload failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regress-logs
+          path: |
+            /tmp/regress-*-fail.log
+            build/regress-*.log
+          if-no-files-found: ignore
